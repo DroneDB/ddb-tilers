@@ -8,8 +8,11 @@
 //  - Two injection queues for tasks submitted by threads outside the pool: interactive (tile
 //    requests) and bulk (builds). A worker looks for work in this order: its own deque, the
 //    interactive queue, the other workers' deques, the bulk queue.
-//  - Idle workers spin briefly ("searching"), then sleep on a futex (std::atomic::wait: futex
-//    on Linux, WaitOnAddress on Windows). A push wakes a sleeper only when no worker is
+//  - Idle workers spin briefly ("searching"), then sleep, each on its own word (std::atomic::wait:
+//    futex on Linux, WaitOnAddress on Windows), listed on a stack of sleepers. A wake-up takes
+//    one sleeper off the stack and changes only its word, so exactly one worker leaves its wait
+//    (with one shared word, every sleeper still on its way into the wait, or spinning inside the
+//    library's wait, would leave on any change). A push wakes a sleeper only when no worker is
 //    searching; the last searcher to find work wakes the next one, so parallelism ramps up one
 //    wake-up at a time instead of one system call per push.
 //  - A waiting thread that runs out of work parks on its own word (detail::Parker): the group or
@@ -17,7 +20,9 @@
 //    worker first, a parked helper that may run anything only when no worker sleeps, and a
 //    parked isolated helper only for a task of its own tree. No completion wakes the whole pool.
 //  - Priorities: interactive tasks are picked before bulk ones (injection queue order, and a
-//    worker takes a queued interactive task before a bulk task of its own deque). A thread
+//    worker takes a queued interactive task before a bulk task of its own deque). On Windows a
+//    worker runs bulk tasks below normal OS priority, so the application's threads that submit
+//    requests are not kept off the CPUs for a scheduler quantum by a busy pool. A thread
 //    waiting for interactive work (an interactive group, or any wait inside an interactive task)
 //    never runs unrelated bulk tasks: only its own subtasks and interactive tasks.
 //  - Invariant: a worker's deque only holds tasks spawned by the frames on its own stack
@@ -318,6 +323,8 @@ private:
         std::atomic<uint64_t> executed{0};
         std::atomic<uint64_t> stolen{0};
         std::atomic<uint64_t> sleeps{0};
+        std::atomic<uint32_t> wake{0};  // the word this worker sleeps on (changed to wake it)
+        bool idle = false;              // on the stack of sleepers (guarded by idleMutex_)
     };
 
     /// Doubly linked FIFO of injected tasks, plus a second list through the same tasks of the
@@ -361,6 +368,8 @@ private:
     /// (or nullptr).
     detail::Parker* Inject(detail::Task* t, int queue) noexcept;
     void NotifyOne() noexcept;
+    /// Takes the most recent sleeper off the stack of sleepers and wakes it; false when none.
+    bool WakeOneSleeper() noexcept;
     void RunTask(detail::Task* t, int self, const IsolationNode* inherit, bool interactiveRegion) noexcept;
     int SelfIndex() const noexcept;
 
@@ -377,8 +386,9 @@ private:
     ThreadPoolOptions options_;
     std::vector<std::unique_ptr<Worker>> workers_;
     InjectionQueue inject_[2];
-    alignas(64) std::atomic<uint32_t> epoch_{0};  // idle workers sleep on it (new work, shutdown)
-    alignas(64) std::atomic<uint32_t> sleepers_{0};  // idle workers asleep or about to be
+    alignas(64) std::mutex idleMutex_;
+    std::vector<uint32_t> idle_;                     // sleeping workers (a stack; capacity: all)
+    alignas(64) std::atomic<uint32_t> sleepers_{0};  // size of idle_ (asleep or about to be)
     std::atomic<uint32_t> searching_{0};             // workers spinning for work
     alignas(64) std::mutex parkMutex_;
     ParkEntry* parked_ = nullptr;                    // parked helpers

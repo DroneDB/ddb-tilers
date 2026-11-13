@@ -58,6 +58,19 @@ inline uint32_t LoadAfterPublish(std::atomic<uint32_t>& counter) noexcept {
 #endif
 }
 
+// Windows runs threads of equal priority for whole quanta (tens of milliseconds, more on
+// servers) before it switches, so workers running bulk tasks on every CPU keep the
+// application's own threads (the ones that submit interactive requests) off the CPUs that
+// long: an interactive request is queued late, then served at once. Workers therefore run bulk work below normal priority and interactive work at normal
+// priority (SetCurrentThreadBackground; a no-op on other systems, whose schedulers share the
+// CPUs among runnable threads at short intervals). Only changes of level make a system call.
+void ApplyWorkerOsPriority(Priority p) noexcept {
+    thread_local Priority applied = Priority::kInteractive;  // a new thread runs at normal priority
+    if (p == applied) return;
+    applied = p;
+    SetCurrentThreadBackground(p == Priority::kBulk);
+}
+
 }  // namespace
 
 // ---- parkers -----------------------------------------------------------------------------------
@@ -324,6 +337,7 @@ ThreadPool::ThreadPool(ThreadPoolOptions options) : options_(std::move(options))
             }
         }
     }
+    idle_.reserve(n);  // pushes under idleMutex_ never allocate
     for (size_t i = 0; i < n; ++i) {
         workers_[i]->thread = std::thread([this, i] { WorkerMain(static_cast<uint32_t>(i)); });
     }
@@ -402,12 +416,8 @@ void ThreadPool::NotifyOne() noexcept {
     // A worker looking for work will find this task, and the last searcher to find work wakes
     // the next sleeper: no system call per push.
     if (searching_.load(std::memory_order_relaxed) != 0) return;
-    if (sleepers != 0) {
-        epoch_.fetch_add(1, std::memory_order_release);
-        epoch_.notify_one();
-        return;
-    }
-    // Every idle worker is busy: wake a parked helper that may run anything.
+    if (sleepers != 0 && WakeOneSleeper()) return;
+    // No idle worker sleeps: wake a parked helper that may run anything.
     detail::Parker* p = nullptr;
     {
         std::lock_guard lock(parkMutex_);
@@ -426,9 +436,33 @@ void ThreadPool::NotifyOne() noexcept {
     if (p != nullptr) p->Unpark();
 }
 
+bool ThreadPool::WakeOneSleeper() noexcept {
+    Worker* w = nullptr;
+    {
+        std::lock_guard lock(idleMutex_);
+        if (idle_.empty()) return false;
+        w = workers_[idle_.back()].get();
+        idle_.pop_back();
+        w->idle = false;
+        sleepers_.fetch_sub(1, std::memory_order_relaxed);
+    }
+    w->wake.fetch_add(1, std::memory_order_release);
+    w->wake.notify_one();
+    return true;
+}
+
 void ThreadPool::WakeAll() noexcept {
-    epoch_.fetch_add(1, std::memory_order_release);
-    epoch_.notify_all();
+    {
+        std::lock_guard lock(idleMutex_);
+        for (uint32_t i : idle_) {
+            Worker& w = *workers_[i];
+            w.idle = false;
+            w.wake.fetch_add(1, std::memory_order_release);
+            w.wake.notify_one();
+        }
+        sleepers_.fetch_sub(static_cast<uint32_t>(idle_.size()), std::memory_order_relaxed);
+        idle_.clear();
+    }
     std::lock_guard lock(parkMutex_);
     for (ParkEntry* e = parked_; e != nullptr;) {
         ParkEntry* next = e->next;
@@ -561,9 +595,11 @@ void ThreadPool::RunTask(detail::Task* t, int self, const IsolationNode* inherit
     cur.seqFloor = detail::Slot().seq;
     if (self >= 0) cur.floor = workers_[static_cast<size_t>(self)]->deque.BottomIndex();
     priority = interactiveRegion ? Priority::kInteractive : t->priority();
+    if (self >= 0) ApplyWorkerOsPriority(priority);
     t->invoke(t);
     cur = saved;
     priority = savedPriority;
+    if (self >= 0) ApplyWorkerOsPriority(priority);
 }
 
 bool ThreadPool::TryRunOne() {
@@ -747,19 +783,31 @@ void ThreadPool::WorkerMain(uint32_t index) {
             continue;
         }
 
-        const uint32_t e = epoch_.load(std::memory_order_acquire);
-        sleepers_.fetch_add(1, std::memory_order_seq_cst);
-        if (HasWork()) {
-            sleepers_.fetch_sub(1, std::memory_order_relaxed);
-            continue;
+        // Sleep (Dekker-style): read the word, list this worker and count it as a sleeper, then
+        // re-check the queues. A push either sees the sleeper (and takes it off the stack to wake
+        // it) or is seen by the re-check. Whoever takes the worker off the stack uncounts it.
+        const uint32_t word = me.wake.load(std::memory_order_acquire);
+        {
+            std::lock_guard lock(idleMutex_);
+            idle_.push_back(index);
+            me.idle = true;
+            sleepers_.fetch_add(1, std::memory_order_seq_cst);
         }
-        if (stopping_.load(std::memory_order_seq_cst)) {
-            sleepers_.fetch_sub(1, std::memory_order_relaxed);
+        const bool work = HasWork();
+        if (work || stopping_.load(std::memory_order_seq_cst)) {
+            {
+                std::lock_guard lock(idleMutex_);
+                if (me.idle) {
+                    std::erase(idle_, index);
+                    me.idle = false;
+                    sleepers_.fetch_sub(1, std::memory_order_relaxed);
+                }
+            }
+            if (work) continue;
             break;
         }
         me.sleeps.fetch_add(1, std::memory_order_relaxed);
-        epoch_.wait(e, std::memory_order_acquire);
-        sleepers_.fetch_sub(1, std::memory_order_relaxed);
+        me.wake.wait(word, std::memory_order_acquire);  // returns once a waker changed the word
         woken = true;
     }
     tlsWorker = WorkerTls{};

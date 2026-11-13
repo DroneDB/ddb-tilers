@@ -56,4 +56,9 @@ bool PinCurrentThread(const std::vector<int>& cpus);
 /// Names the calling thread (visible in perf, gdb, Task Manager); best effort.
 void SetCurrentThreadName(const std::string& name);
 
+/// Runs the calling thread below normal OS priority (`background`) or at normal priority.
+/// Windows only (SetThreadPriority); a no-op elsewhere, where giving a thread its priority
+/// back needs a privilege.
+void SetCurrentThreadBackground(bool background) noexcept;
+
 }  // namespace ddbt::exec

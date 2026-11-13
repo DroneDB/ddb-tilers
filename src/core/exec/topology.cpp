@@ -212,6 +212,10 @@ void SetCurrentThreadName(const std::string& name) {
     SetThreadDescription(GetCurrentThread(), w.c_str());
 }
 
+void SetCurrentThreadBackground(bool background) noexcept {
+    SetThreadPriority(GetCurrentThread(), background ? THREAD_PRIORITY_BELOW_NORMAL : THREAD_PRIORITY_NORMAL);
+}
+
 #else
 
 std::vector<int> AllowedCpus() {
@@ -256,6 +260,8 @@ void SetCurrentThreadName(const std::string& name) {
     (void)name;
 #endif
 }
+
+void SetCurrentThreadBackground(bool) noexcept {}
 
 #endif
 
