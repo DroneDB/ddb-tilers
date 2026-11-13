@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <numbers>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -576,7 +577,7 @@ TEST_F(CopcTilerTest, GeocentricCloudsTileInHybridAndModernModes) {
     // +-30 km), the hybrid and modern modes tile it.
     CloudSpec s;
     s.wkt = test::kEcefWkt;
-    const double lat = 45 * M_PI / 180, lon = 15 * M_PI / 180, R = 6378137.0;
+    const double lat = 45 * std::numbers::pi / 180, lon = 15 * std::numbers::pi / 180, R = 6378137.0;
     s.center[0] = R * std::cos(lat) * std::cos(lon);
     s.center[1] = R * std::cos(lat) * std::sin(lon);
     s.center[2] = R * std::sin(lat);
