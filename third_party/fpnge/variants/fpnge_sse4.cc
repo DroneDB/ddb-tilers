@@ -27,6 +27,14 @@
 #elif defined(__clang__)
 #error "fpnge variants: GCC or MSVC only"
 #endif
+// fpnge.cc picks its code by the feature macros: MSVC does not define them for the instructions
+// its intrinsics use, and GCC before 14 does not define those of a target pragma in C++.
+#ifndef __SSE4_1__
+#define __SSE4_1__ 1
+#endif
+#ifndef __PCLMUL__
+#define __PCLMUL__ 1
+#endif
 #include "../fpnge.cc"
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC pop_options

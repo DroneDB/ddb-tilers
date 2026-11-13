@@ -21,14 +21,22 @@
 // variant runs on any CPU with these instructions.
 #define FPNGE_USE_PEXT 0
 #define FPNGEEncode ddbt_fpnge_encode_avx2
-#if defined(_MSC_VER) && !defined(__clang__) && !defined(__AVX2__)
-#define __AVX2__ 1
-#endif
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC push_options
 #pragma GCC target("avx2,bmi,bmi2,sse4.1,pclmul")
 #elif defined(__clang__)
 #error "fpnge variants: GCC or MSVC only"
+#endif
+// fpnge.cc picks its code by the feature macros: MSVC does not define them for the instructions
+// its intrinsics use, and GCC before 14 does not define those of a target pragma in C++.
+#ifndef __AVX2__
+#define __AVX2__ 1
+#endif
+#ifndef __SSE4_1__
+#define __SSE4_1__ 1
+#endif
+#ifndef __PCLMUL__
+#define __PCLMUL__ 1
 #endif
 #include "../fpnge.cc"
 #if defined(__GNUC__) && !defined(__clang__)
