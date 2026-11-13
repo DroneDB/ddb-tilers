@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 # Freeze the benchmark baseline: the official DroneDB 2.4.1 release (git cbc4bffb, libddb ABI 2.4).
 #
 # Extracts the release .deb into <work>/baseline/ddb-2.4.1/, writes <work>/baseline/MANIFEST.json

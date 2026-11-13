@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Render the corpus page (Markdown) from the corpus manifest (written by corpus-manifest.py).
 
 Usage: corpus_docs.py [--manifest FILE] [--out FILE]

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Smoke test of the frozen baseline (DroneDB 2.4.1) through the libddb C API.
 
 Loads libddb.so from the snapshot, calls DDBRegisterProcess, renders one raster tile and one COPC

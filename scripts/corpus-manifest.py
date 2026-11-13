@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Write the benchmark corpus manifest (read in place, never copied or modified).
 
 Output (default /mnt/data/ddb-tilers-work/corpus/manifest.json):

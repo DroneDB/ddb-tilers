@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MPL-2.0
 # Fill refs/ (gitignored) with read-only reference sources, offline first.
 #
 #   refs/gdal-3.13.3/   GDAL 3.13.3     from a local tarball (DroneDB vcpkg downloads)

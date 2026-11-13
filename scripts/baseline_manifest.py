@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MPL-2.0
 """Write MANIFEST.json of the frozen baseline snapshot (and verify it with --verify).
 
 The manifest maps every file of the extracted DroneDB .deb to sha256 and size, records the deb

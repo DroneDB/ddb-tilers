@@ -113,9 +113,8 @@ Presets (`CMakePresets.json`):
 | `linux-asan-ubsan`, `linux-tsan`, `windows-msvc-asan` | Sanitizers |
 | `linux-pgo-gen`, `linux-pgo-use` | Profile-guided optimisation |
 
-The build produces the static library `libddbt.a` / `ddbt_static.lib`, the shared library `libddbt.so` /
-`ddbt.dll` (C API only), the
-`ddbt` command line tool and the test binaries.
+The build produces the static library `libddbt.a` / `ddbt_static.lib`, the shared library
+`libddbt.so` / `ddbt.dll` (C API only), the `ddbt` command line tool and the test binaries.
 
 ## Use
 
@@ -180,4 +179,5 @@ selects its work directory.
 
 ## License
 
-[MPL-2.0](LICENSE).
+[MPL-2.0](LICENSE). The licences of the third-party code and libraries are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
