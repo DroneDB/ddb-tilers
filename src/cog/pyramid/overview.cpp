@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 // Compiled without floating-point contraction (sources.cmake): sums round as GDAL's do.
+//
+// The conversion of the source rows into the planes of the horizontal pass (FillRows) is compiled
+// once per enabled target (foreach_target.h re-includes this file) and HWY_DYNAMIC_DISPATCH picks
+// the best one the CPU runs: plain C++ that the compiler vectorizes for each target's
+// instructions, the same values on every target.
 #include "cog/pyramid/overview.h"
 
 #include "cog/pyramid/overview_kernels.h"
@@ -11,6 +16,14 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "cog/pyramid/overview.cpp"
+#include "hwy/foreach_target.h"  // IWYU pragma: keep, must come before highway.h
+#include "hwy/highway.h"
+
+#ifndef DDBT_COG_PYRAMID_OVERVIEW_ONCE
+#define DDBT_COG_PYRAMID_OVERVIEW_ONCE
 
 namespace ddbt::cog::pyramid {
 
@@ -447,6 +460,27 @@ void NormalisedWeights(const Taps& t, std::vector<double>& out) {
         for (size_t j = 0; j < m; ++j) out[k * m + j] = t.weights[k * m + j] * t.invSum[k];
 }
 
+// The source rows of one Downsample call, for FillRows.
+struct FillSource {
+    const DownsampleSpec& spec;
+    const uint8_t* src;
+    size_t srcStride;
+    const uint8_t* srcMask;
+    int srcW, top;
+    size_t rowStride;
+    Scratch& s;
+};
+
+}  // namespace
+
+}  // namespace ddbt::cog::pyramid
+
+#endif  // DDBT_COG_PYRAMID_OVERVIEW_ONCE
+
+HWY_BEFORE_NAMESPACE();
+namespace ddbt::cog::pyramid {
+namespace HWY_NAMESPACE {
+
 // The samples of one interleaved row as one double plane per band (NB > 0: the band count known
 // at compile time, so that the compiler vectorizes the loop).
 template <typename T, int NB>
@@ -530,6 +564,40 @@ void FillRows(const DownsampleSpec& spec, const uint8_t* src, size_t srcStride, 
     }
 }
 
+// Rows [y, y + n) of the source (y relative to the first row the taps read).
+void FillRowsImpl(const FillSource& r, int y, int n) {
+    using tiff::SampleType;
+    const int top = r.top + y;
+    switch (r.spec.type) {
+        case SampleType::kU8: FillRows<uint8_t>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kI8: FillRows<int8_t>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kU16: FillRows<uint16_t>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kI16: FillRows<int16_t>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kU32: FillRows<uint32_t>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kI32: FillRows<int32_t>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kF32: FillRows<float>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        case SampleType::kF64: FillRows<double>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, top, n, r.rowStride, r.s); break;
+        default: break;  // DownsampleT accepts only the types above
+    }
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace ddbt::cog::pyramid
+HWY_AFTER_NAMESPACE();
+
+#if HWY_ONCE
+
+namespace ddbt::cog::pyramid {
+
+namespace {
+
+HWY_EXPORT(FillRowsImpl);
+
+// HorizontalJob::fill: the rows by the FillRows of the running CPU's target.
+void FillSourceRows(void* context, int y, int n) {
+    HWY_DYNAMIC_DISPATCH(FillRowsImpl)(*static_cast<const FillSource*>(context), y, n);
+}
+
 template <typename T, typename W>
 void DownsampleT(const DownsampleSpec& spec, const uint8_t* src, size_t srcStride, int srcX0, int srcY0, int srcW,
                  int srcH, const uint8_t* srcMask, const Taps& cols, const Taps& rows, int dstW, int dstH, uint8_t* dst,
@@ -577,19 +645,8 @@ void DownsampleT(const DownsampleSpec& spec, const uint8_t* src, size_t srcStrid
     h.mask = layout;
     h.rows = static_cast<int>(nRows);
     h.chunkRows = kRowsPerChunk;
-    struct Rows {
-        const DownsampleSpec& spec;
-        const uint8_t* src;
-        size_t srcStride;
-        const uint8_t* srcMask;
-        int srcW, top;
-        size_t rowStride;
-        Scratch& s;
-    } rowsSource{spec, src, srcStride, srcMask, srcW, r0 - srcY0, rowStride, s};
-    h.fill = [](void* context, int y, int n) {
-        const Rows& r = *static_cast<const Rows*>(context);
-        FillRows<T>(r.spec, r.src, r.srcStride, r.srcMask, r.srcW, r.top + y, n, r.rowStride, r.s);
-    };
+    FillSource rowsSource{spec, src, srcStride, srcMask, srcW, r0 - srcY0, rowStride, s};
+    h.fill = &FillSourceRows;
     h.fillContext = &rowsSource;
     h.samples = s.samples.data();
     h.masks = s.masks.data();
@@ -714,3 +771,5 @@ std::vector<std::pair<uint32_t, uint32_t>> OverviewSizes(uint32_t width, uint32_
 }
 
 }  // namespace ddbt::cog::pyramid
+
+#endif  // HWY_ONCE

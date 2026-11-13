@@ -276,6 +276,10 @@ bool AllBytesEqualImpl(const uint8_t* p, size_t n, uint8_t value) {
     return true;
 }
 
+void SourcePixelsImpl(const SourcePixelsJob& job) {
+    for (size_t k = 0; k < job.n; ++k) SourcePixel(job, k);
+}
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ddbt::cog::tiler::kernels
 HWY_AFTER_NAMESPACE();
@@ -292,6 +296,7 @@ HWY_EXPORT(InterleavePlanesImpl);
 HWY_EXPORT(ExtractSamplesImpl);
 HWY_EXPORT(PickSamples32Impl);
 HWY_EXPORT(AllBytesEqualImpl);
+HWY_EXPORT(SourcePixelsImpl);
 
 void NodataMaskF32(const uint8_t* samples, size_t n, float nodata, uint8_t* out) {
     HWY_DYNAMIC_DISPATCH(NodataMaskF32Impl)(samples, n, nodata, out);
@@ -325,6 +330,8 @@ void PickSamples32(const uint8_t* row, size_t rowWords, const uint32_t* xIn, siz
 bool AllBytesEqual(const uint8_t* p, size_t n, uint8_t value) {
     return HWY_DYNAMIC_DISPATCH(AllBytesEqualImpl)(p, n, value);
 }
+
+void SourcePixels(const SourcePixelsJob& job) { HWY_DYNAMIC_DISPATCH(SourcePixelsImpl)(job); }
 
 }  // namespace ddbt::cog::tiler::kernels
 

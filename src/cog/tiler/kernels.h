@@ -11,6 +11,8 @@
 //    multiply by 255, divide, truncate). The file is compiled without contraction.
 //  - InterleavePlanes / ExtractSamples: planar <-> pixel-interleaved bytes.
 //  - AllBytesEqual: the all-transparent / all-opaque checks of an alpha plane.
+//  - SourcePixels: the source pixels of the warped pixels of a tile (plain C++ compiled per
+//    target: std::floor is one instruction from SSE 4.1 on).
 //
 // Internal API: the tiler and the unit tests use it. Float buffers are passed as bytes (the
 // tiler's sample buffers); they need no alignment.
@@ -70,5 +72,41 @@ void PickSamples32Scalar(const uint8_t* row, const uint32_t* xIn, size_t n, uint
 
 /// Every one of the n bytes equals `value` (true for n = 0).
 bool AllBytesEqual(const uint8_t* p, size_t n, uint8_t value);
+
+/// The source pixels of warped tile pixels: point k (xs[k], ys[k] in the source CRS, a failed
+/// transform not finite or HUGE_VAL) goes to pixel where[k] of sx / sy as the pixel of the source
+/// level (scaleX, scaleY: the level's size over the full resolution's; width x height) that
+/// holds it, -2 / -2 outside the level or for a failed transform.
+struct SourcePixelsJob {
+    const double* xs = nullptr;
+    const double* ys = nullptr;
+    const size_t* where = nullptr;
+    size_t n = 0;
+    const double* invGt = nullptr;  ///< the source's inverse geotransform (6 values)
+    double scaleX = 1, scaleY = 1;
+    int width = 0, height = 0;
+    int32_t* sx = nullptr;
+    int32_t* sy = nullptr;
+};
+void SourcePixels(const SourcePixelsJob& job);
+
+/// Point k of SourcePixels (the operations of every target).
+inline void SourcePixel(const SourcePixelsJob& j, size_t k) noexcept {
+    const size_t i = j.where[k];
+    const double x = j.xs[k], y = j.ys[k];
+    if (!std::isfinite(x) || x == HUGE_VAL) {
+        j.sx[i] = j.sy[i] = -2;
+        return;
+    }
+    const double fx = j.invGt[0] + x * j.invGt[1] + y * j.invGt[2];
+    const double fy = j.invGt[3] + x * j.invGt[4] + y * j.invGt[5];
+    const double lx = std::floor(fx * j.scaleX), ly = std::floor(fy * j.scaleY);
+    if (fx < 0 || fy < 0 || lx < 0 || ly < 0 || lx >= j.width || ly >= j.height) {
+        j.sx[i] = j.sy[i] = -2;
+        return;
+    }
+    j.sx[i] = static_cast<int32_t>(lx);
+    j.sy[i] = static_cast<int32_t>(ly);
+}
 
 }  // namespace ddbt::cog::tiler::kernels

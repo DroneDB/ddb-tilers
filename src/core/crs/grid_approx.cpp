@@ -166,43 +166,19 @@ GridApprox GridApprox::Build(std::shared_ptr<const Transform> transform, double 
     return g;
 }
 
-bool GridApprox::Interpolate(double& x, double& y) const {
-    const double px = x, py = y;
-    if (!(px >= minX_ && px <= maxX_ && py >= minY_ && py <= maxY_)) return false;  // outside or NaN
-    const int ci = std::min(cells_ - 1, static_cast<int>((px - minX_) * invW_));
-    const int cj = std::min(cells_ - 1, static_cast<int>((py - minY_) * invH_));
-    // The multiply-adds are fused (std::fma), whatever the compiler's contraction: the SIMD kernel
-    // reproduces these bits, and they are the ones GCC's default contraction gave on x86-64-v3.
-    double x0 = std::fma(static_cast<double>(ci), cellW_, minX_), y0 = std::fma(static_cast<double>(cj), cellH_, minY_);
-    double x1 = ci + 1 == cells_ ? maxX_ : x0 + cellW_;
-    double y1 = cj + 1 == cells_ ? maxY_ : y0 + cellH_;
-    const Node* nd = &nodes_[static_cast<size_t>(cj * cells_ + ci)];
-    while (nd->child >= 0) {
-        const double xm = 0.5 * (x0 + x1), ym = 0.5 * (y0 + y1);
-        int q = 0;
-        if (px >= xm) {
-            q |= 1;
-            x0 = xm;
-        } else {
-            x1 = xm;
-        }
-        if (py >= ym) {
-            q |= 2;
-            y0 = ym;
-        } else {
-            y1 = ym;
-        }
-        nd = &nodes_[static_cast<size_t>(nd->child + q)];
-    }
-    if (nd->exact) return false;
-    const double s = (px - x0) / (x1 - x0), t = (py - y0) / (y1 - y0);
-    const double bx = std::fma(s, nd->cx[1] - nd->cx[0], nd->cx[0]);
-    const double tx = std::fma(s, nd->cx[3] - nd->cx[2], nd->cx[2]);
-    const double by = std::fma(s, nd->cy[1] - nd->cy[0], nd->cy[0]);
-    const double ty = std::fma(s, nd->cy[3] - nd->cy[2], nd->cy[2]);
-    x = std::fma(t, tx - bx, bx);
-    y = std::fma(t, ty - by, by);
-    return true;
+kernels::CellGrid GridApprox::Grid() const {
+    kernels::CellGrid grid;
+    grid.minX = minX_;
+    grid.minY = minY_;
+    grid.maxX = maxX_;
+    grid.maxY = maxY_;
+    grid.cellW = cellW_;
+    grid.cellH = cellH_;
+    grid.invW = invW_;
+    grid.invH = invH_;
+    grid.cells = cells_;
+    grid.nodes = nodes_.data();
+    return grid;
 }
 
 size_t GridApprox::TransformExactly(double* xs, double* ys, const std::vector<size_t>& idx) const {
@@ -222,36 +198,24 @@ size_t GridApprox::TransformExactly(double* xs, double* ys, const std::vector<si
 
 size_t GridApprox::TransformPoints(double* xs, double* ys, size_t n) const {
     if (nodes_.empty()) return transform_->TransformPoints(xs, ys, nullptr, n, options_.direction);
-    kernels::CellGrid grid;
-    grid.minX = minX_;
-    grid.minY = minY_;
-    grid.maxX = maxX_;
-    grid.maxY = maxY_;
-    grid.cellW = cellW_;
-    grid.cellH = cellH_;
-    grid.invW = invW_;
-    grid.invH = invH_;
-    grid.cells = cells_;
-    grid.nodes = nodes_.data();
+    const kernels::CellGrid grid = Grid();
     std::vector<size_t> exactIdx;
     constexpr size_t kBlock = 1024;
-    uint32_t rest[kBlock];
+    uint32_t exact[kBlock];
     for (size_t b = 0; b < n; b += kBlock) {
         const size_t m = std::min(kBlock, n - b);
-        const size_t r = kernels::InterpolateSharedCells(grid, xs + b, ys + b, m, rest);
-        for (size_t k = 0; k < r; ++k) {
-            const size_t i = b + rest[k];
-            if (!Interpolate(xs[i], ys[i])) exactIdx.push_back(i);
-        }
+        const size_t r = kernels::InterpolatePoints(grid, xs + b, ys + b, m, exact);
+        for (size_t k = 0; k < r; ++k) exactIdx.push_back(b + exact[k]);
     }
     return TransformExactly(xs, ys, exactIdx);
 }
 
 size_t GridApprox::TransformPointsScalar(double* xs, double* ys, size_t n) const {
     if (nodes_.empty()) return transform_->TransformPoints(xs, ys, nullptr, n, options_.direction);
+    const kernels::CellGrid grid = Grid();
     std::vector<size_t> exactIdx;
     for (size_t i = 0; i < n; ++i)
-        if (!Interpolate(xs[i], ys[i])) exactIdx.push_back(i);
+        if (!kernels::InterpolatePoint(grid, xs[i], ys[i])) exactIdx.push_back(i);
     return TransformExactly(xs, ys, exactIdx);
 }
 

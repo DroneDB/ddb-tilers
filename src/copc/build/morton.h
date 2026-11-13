@@ -2,17 +2,21 @@
 //
 // 63-bit Morton keys of the COPC builder: 21 bits per axis, x in the lowest bit of each triple
 // (so the 3 bits below a node's prefix are its child direction as COPC numbers them: x = bit 0,
-// y = bit 1, z = bit 2). BMI2 pdep / pext when the build targets it (x86-64-v3), else the
-// classic magic-number spreading; both give the same keys.
+// y = bit 1, z = bit 2). Two encoders that give the same keys: the classic magic-number spreading
+// (any CPU) and BMI2 PDEP / PEXT (x86-64 CPUs with BMI2). MortonEncode / MortonDecode use PDEP when
+// the whole build targets BMI2; the hot loops of the builder (KeyMapper::KeysOfRecords,
+// SelectWinners) are compiled per CPU target and pick PDEP at run time (simd::HasFastPdep()).
 #pragma once
 
 #include <cstdint>
 
-#if defined(__BMI2__) && (defined(__x86_64__) || defined(_M_X64))
+#include "core/simd/target_attr.h"
+
+#if DDBT_X86_64
 #include <immintrin.h>
-#define DDBT_MORTON_BMI2 1
+#define DDBT_MORTON_PDEP 1
 #else
-#define DDBT_MORTON_BMI2 0
+#define DDBT_MORTON_PDEP 0
 #endif
 
 namespace ddbt::copc::build {
@@ -53,19 +57,30 @@ constexpr void MortonDecodePortable(uint64_t k, uint32_t& x, uint32_t& y, uint32
     z = detail::Compact3(k >> 2);
 }
 
-inline uint64_t MortonEncode(uint32_t x, uint32_t y, uint32_t z) noexcept {
-#if DDBT_MORTON_BMI2
+#if DDBT_MORTON_PDEP
+/// BMI2 encoder: call it only from code compiled for BMI2 that runs after a CPU check.
+DDBT_TARGET("bmi2") inline uint64_t MortonEncodePdep(uint32_t x, uint32_t y, uint32_t z) noexcept {
     return _pdep_u64(x, kMortonMaskX) | _pdep_u64(y, kMortonMaskX << 1) | _pdep_u64(z, kMortonMaskX << 2);
+}
+DDBT_TARGET("bmi2") inline void MortonDecodePdep(uint64_t k, uint32_t& x, uint32_t& y, uint32_t& z) noexcept {
+    x = static_cast<uint32_t>(_pext_u64(k, kMortonMaskX));
+    y = static_cast<uint32_t>(_pext_u64(k, kMortonMaskX << 1));
+    z = static_cast<uint32_t>(_pext_u64(k, kMortonMaskX << 2));
+}
+#endif
+
+/// The encoder a caller compiled for the build's baseline can use: PDEP when the baseline has BMI2.
+inline uint64_t MortonEncode(uint32_t x, uint32_t y, uint32_t z) noexcept {
+#if DDBT_MORTON_PDEP && defined(__BMI2__)
+    return MortonEncodePdep(x, y, z);
 #else
     return MortonEncodePortable(x, y, z);
 #endif
 }
 
 inline void MortonDecode(uint64_t k, uint32_t& x, uint32_t& y, uint32_t& z) noexcept {
-#if DDBT_MORTON_BMI2
-    x = static_cast<uint32_t>(_pext_u64(k, kMortonMaskX));
-    y = static_cast<uint32_t>(_pext_u64(k, kMortonMaskX << 1));
-    z = static_cast<uint32_t>(_pext_u64(k, kMortonMaskX << 2));
+#if DDBT_MORTON_PDEP && defined(__BMI2__)
+    MortonDecodePdep(k, x, y, z);
 #else
     MortonDecodePortable(k, x, y, z);
 #endif

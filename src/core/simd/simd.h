@@ -43,4 +43,8 @@ void ForceTargetForTest(int64_t targetBit);
 bool HasSse4() noexcept;
 bool HasAvx2() noexcept;
 
+/// HasAvx2() on a CPU whose BMI2 PDEP / PEXT are fast: AMD (and Hygon) CPUs before Zen 3 run them
+/// as microcode, hundreds of cycles for a 21-bit mask, slower than the portable bit spreading.
+bool HasFastPdep() noexcept;
+
 }  // namespace ddbt::simd

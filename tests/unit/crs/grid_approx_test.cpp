@@ -200,19 +200,23 @@ TEST(GridApprox, SimdMatchesTheScalarCodeOnEveryTarget) {
     }
 }
 
-TEST(GridApprox, SharedCellKernelInterpolatesWholeGroups) {
-    // One accepted cell: every full SIMD group is interpolated by the kernel (fused multiply-adds,
-    // as the scalar code); only the tail is left. An exact cell and a refined cell are left whole,
-    // and so is every point on a target without a native FMA.
-    GridApprox::Node nodes[3];
+TEST(GridApprox, InterpolatePointsGivesTheBitsOfThePointByPointCodeOnEveryTarget) {
+    // One initial cell: an accepted leaf (the full SIMD groups by the vector path, the tail point
+    // by point), an exact cell (every point to the exact transform), a refined cell (every point
+    // by the point-by-point code, through its children: an accepted, an exact and two accepted
+    // leaves). Every target gives the bits of InterpolatePoint, the reference compiled for the
+    // library's baseline (std::fma).
     const double cx[4] = {1000.25, 1100.5, 990.125, 1105.75}, cy[4] = {-50.5, -48.25, 40.125, 45.0};
-    for (int k = 0; k < 4; ++k) {
-        nodes[0].cx[k] = nodes[1].cx[k] = nodes[2].cx[k] = cx[k];
-        nodes[0].cy[k] = nodes[1].cy[k] = nodes[2].cy[k] = cy[k];
-    }
-    nodes[1].exact = 1;
-    nodes[2].child = 0;
+    std::vector<GridApprox::Node> nodes(5);
+    for (size_t j = 0; j < nodes.size(); ++j)
+        for (int k = 0; k < 4; ++k) {
+            nodes[j].cx[k] = cx[k] + static_cast<double>(j) * 3.5;
+            nodes[j].cy[k] = cy[k] - static_cast<double>(j) * 1.25;
+        }
+    nodes[2].exact = 1;  // a child of the refined cell
     for (int which = 0; which < 3; ++which) {
+        nodes[0].exact = which == 1 ? 1 : 0;
+        nodes[0].child = which == 2 ? 1 : -1;
         kernels::CellGrid grid;
         grid.minX = 10;
         grid.minY = 20;
@@ -223,37 +227,50 @@ TEST(GridApprox, SharedCellKernelInterpolatesWholeGroups) {
         grid.invW = 1.0 / 20;
         grid.invH = 1.0 / 30;
         grid.cells = 1;
-        grid.nodes = &nodes[which];
+        grid.nodes = nodes.data();
+        const size_t n = 203;
+        std::vector<double> x0(n), y0(n);
+        for (size_t i = 0; i < n; ++i) {
+            x0[i] = 10 + 20.0 * static_cast<double>(i) / (n - 1);
+            y0[i] = 20 + 30.0 * static_cast<double>(i % 7) / 6;
+        }
+        x0[100] = 31;  // outside the rectangle: exact transform
+        y0[101] = std::nan("");
+        std::vector<double> wx = x0, wy = y0;
+        std::vector<bool> wantExact(n);
+        for (size_t i = 0; i < n; ++i) wantExact[i] = !kernels::InterpolatePoint(grid, wx[i], wy[i]);
+        ASSERT_TRUE(wantExact[100] && wantExact[101]);
+        size_t interpolated = 0;
+        for (size_t i = 0; i < n; ++i) interpolated += wantExact[i] ? 0u : 1u;
+        EXPECT_EQ(interpolated == 0, which == 1) << which;
         for (const int64_t bit : simd::SupportedTargetBits()) {
             simd::ForceTargetForTest(bit);
-            const size_t n = 203;
-            std::vector<double> x(n), y(n);
+            std::vector<double> x = x0, y = y0;
+            std::vector<uint32_t> exact(n);
+            const size_t r = kernels::InterpolatePoints(grid, x.data(), y.data(), n, exact.data());
+            std::vector<bool> gotExact(n, false);
+            for (size_t k = 0; k < r; ++k) gotExact[exact[k]] = true;
+            EXPECT_EQ(gotExact, wantExact) << simd::TargetNameOf(bit) << " " << which;
             for (size_t i = 0; i < n; ++i) {
-                x[i] = 10 + 20.0 * static_cast<double>(i) / (n - 1);
-                y[i] = 20 + 30.0 * static_cast<double>(i % 7) / 6;
-            }
-            const std::vector<double> x0 = x, y0 = y;
-            std::vector<uint32_t> rest(n);
-            const size_t r = kernels::InterpolateSharedCells(grid, x.data(), y.data(), n, rest.data());
-            std::vector<bool> left(n, false);
-            for (size_t k = 0; k < r; ++k) left[rest[k]] = true;
-            if (which != 0 || !kernels::SharedCellKernelInterpolates()) {
-                EXPECT_EQ(r, n) << simd::TargetNameOf(bit);
-                continue;
-            }
-            EXPECT_LT(r, size_t{64}) << simd::TargetNameOf(bit);
-            for (size_t i = 0; i < n; ++i) {
-                if (left[i]) continue;
-                const double s = (x0[i] - std::fma(0.0, 20.0, 10.0)) / (30.0 - 10.0);
-                const double t = (y0[i] - std::fma(0.0, 30.0, 20.0)) / (50.0 - 20.0);
-                const double bx = std::fma(s, cx[1] - cx[0], cx[0]), tx = std::fma(s, cx[3] - cx[2], cx[2]);
-                const double by = std::fma(s, cy[1] - cy[0], cy[0]), ty = std::fma(s, cy[3] - cy[2], cy[2]);
-                EXPECT_EQ(x[i], std::fma(t, tx - bx, bx)) << simd::TargetNameOf(bit) << " point " << i;
-                EXPECT_EQ(y[i], std::fma(t, ty - by, by)) << simd::TargetNameOf(bit) << " point " << i;
+                if (wantExact[i]) continue;
+                EXPECT_EQ(x[i], wx[i]) << simd::TargetNameOf(bit) << " " << which << " point " << i;
+                EXPECT_EQ(y[i], wy[i]) << simd::TargetNameOf(bit) << " " << which << " point " << i;
             }
         }
         simd::ForceTargetForTest(0);
     }
+    // The accepted leaf: the operations of GridApprox, two fused multiply-adds per coordinate.
+    nodes[0].exact = 0;
+    nodes[0].child = -1;
+    double px = 17.5, py = 33.0;
+    kernels::CellGrid grid{10, 20, 30, 50, 20, 30, 1.0 / 20, 1.0 / 30, 1, nodes.data()};
+    ASSERT_TRUE(kernels::InterpolatePoint(grid, px, py));
+    const double s = (17.5 - std::fma(0.0, 20.0, 10.0)) / (30.0 - 10.0);
+    const double t = (33.0 - std::fma(0.0, 30.0, 20.0)) / (50.0 - 20.0);
+    const double bx = std::fma(s, cx[1] - cx[0], cx[0]), tx = std::fma(s, cx[3] - cx[2], cx[2]);
+    const double by = std::fma(s, cy[1] - cy[0], cy[0]), ty = std::fma(s, cy[3] - cy[2], cy[2]);
+    EXPECT_EQ(px, std::fma(t, tx - bx, bx));
+    EXPECT_EQ(py, std::fma(t, ty - by, by));
 }
 
 TEST(GridApprox, ExactModeAndArguments) {

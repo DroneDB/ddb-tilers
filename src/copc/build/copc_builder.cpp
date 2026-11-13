@@ -206,7 +206,9 @@ public:
         if (b.xyz != nullptr) DDBT_TRY(readers::QuantizeXyz(spec_, b.xyz, b.count, b.records));
         const size_t rs = spec_.RecordSize();
         bool outside = false;
-        for (size_t i = 0; i < b.count; ++i) keys_.push_back(m_.KeyOfRecord(b.records + i * rs, outside));
+        const size_t at = keys_.size();
+        keys_.resize(at + b.count);
+        m_.KeysOfRecords(b.records, rs, b.count, keys_.data() + at, outside);
         return Status();
     }
 
@@ -228,6 +230,8 @@ public:
         const size_t rs = spec_.RecordSize();
         const size_t n = b.count;
         binIdx_.resize(n);
+        keys_.resize(n);
+        m_.KeysOfRecords(b.records, rs, n, keys_.data(), st_.outside);
         touched_.clear();
         const bool rgb = spec_.format >= 7;
         const int shift = 3 * (kKeyBits - kHistDepth);
@@ -249,8 +253,7 @@ public:
                 const uint16_t c = std::max({LoadLE<uint16_t>(r + 30), LoadLE<uint16_t>(r + 32), LoadLE<uint16_t>(r + 34)});
                 st_.maxColor = std::max(st_.maxColor, c);
             }
-            const uint64_t key = m_.Key(x, y, z, st_.outside);
-            const uint32_t bin = binOfCell_[key >> shift];
+            const uint32_t bin = binOfCell_[keys_[i] >> shift];
             binIdx_[i] = bin;
             if (counts_[bin]++ == 0) touched_.push_back(bin);
         }
@@ -282,6 +285,7 @@ private:
     BinStore::Writer& w_;
     ScatterStats& st_;
     std::vector<uint32_t> counts_;
+    std::vector<uint64_t> keys_;
     std::vector<uint32_t> binIdx_;
     std::vector<uint32_t> touched_;
     std::vector<uint8_t> grouped_;
@@ -563,7 +567,9 @@ private:
                 std::vector<uint8_t> recs(rs * n);
                 DDBT_TRY(readers::QuantizeXyz(spec_, probeSample_.data(), n, recs.data()));
                 bool outside = false;
-                for (size_t i = 0; i < n; ++i) weighted.emplace_back(mapper_.KeyOfRecord(recs.data() + i * rs, outside), probeWeight_);
+                std::vector<uint64_t> probeKeys(n);
+                mapper_.KeysOfRecords(recs.data(), rs, n, probeKeys.data(), outside);
+                for (uint64_t key : probeKeys) weighted.emplace_back(key, probeWeight_);
             }
         }
         const size_t cells = size_t{1} << (3 * kHistDepth);
@@ -779,11 +785,14 @@ private:
         entries.reserve(static_cast<size_t>(lr.count));
         bool outside = false;
         const int shift = 3 * (kKeyBits - p.depth);
+        std::vector<uint64_t> pieceKeys;
         for (const auto& piece : lr.pieces) {
             const size_t n = piece.size() / rs;
+            pieceKeys.resize(n);
+            mapper_.KeysOfRecords(piece.data(), rs, n, pieceKeys.data(), outside);
             for (size_t k = 0; k < n; ++k) {
                 const uint8_t* rec = piece.data() + k * rs;
-                const uint64_t key = mapper_.KeyOfRecord(rec, outside);
+                const uint64_t key = pieceKeys[k];
                 if (p.depth > 0 && (key >> shift) != p.prefix) return InternalError("a point is outside its partition");
                 entries.push_back({key, rec});
             }

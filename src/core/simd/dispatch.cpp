@@ -15,6 +15,9 @@
 #define HWY_TARGET_INCLUDE "core/simd/dispatch.cpp"
 #include "hwy/foreach_target.h"  // IWYU pragma: keep, must come before highway.h
 #include "hwy/highway.h"
+#if HWY_ARCH_X86
+#include "hwy/x86_cpuid.h"
+#endif
 
 HWY_BEFORE_NAMESPACE();
 namespace ddbt::simd {
@@ -104,6 +107,31 @@ constexpr int64_t kSse4OrBetter = 0;
 
 bool HasSse4() noexcept { return (hwy::SupportedTargets() & kSse4OrBetter) != 0; }
 bool HasAvx2() noexcept { return (hwy::SupportedTargets() & kAvx2OrBetter) != 0; }
+
+namespace {
+// AMD and Hygon CPUs before family 19h (Zen 3) implement PDEP / PEXT in microcode.
+bool PdepIsMicrocoded() noexcept {
+#if HWY_ARCH_X86
+    uint32_t abcd[4];
+    hwy::x86::Cpuid(0, 0, abcd);
+    if (abcd[0] < 1) return false;
+    const bool amd = abcd[1] == 0x68747541 && abcd[3] == 0x69746e65 && abcd[2] == 0x444d4163;     // AuthenticAMD
+    const bool hygon = abcd[1] == 0x6f677948 && abcd[3] == 0x6e65476e && abcd[2] == 0x656e6975;   // HygonGenuine
+    if (!amd && !hygon) return false;
+    hwy::x86::Cpuid(1, 0, abcd);
+    const uint32_t base = (abcd[0] >> 8) & 0xF;
+    const uint32_t family = base == 0xF ? base + ((abcd[0] >> 20) & 0xFF) : base;
+    return family < 0x19;
+#else
+    return false;
+#endif
+}
+}  // namespace
+
+bool HasFastPdep() noexcept {
+    static const bool microcoded = PdepIsMicrocoded();
+    return HasAvx2() && !microcoded;
+}
 
 }  // namespace ddbt::simd
 

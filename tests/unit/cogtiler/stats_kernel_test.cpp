@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // The statistics kernels shared by the tiler and the COG builder (cog/tiler/stats_kernel.h):
 // Welford as DroneDB computes it, exact sums independent of chunking and merge order for
-// integer samples, the correctly rounded mean.
+// integer samples, the correctly rounded mean, the same bits on every CPU target.
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -12,10 +12,12 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "../test_env.h"
 #include "cog/tiler/stats_kernel.h"
+#include "core/simd/simd.h"
 
 namespace stats = ddbt::cog::stats;
 using ddbt::cog::tiff::SampleType;
@@ -249,4 +251,85 @@ TEST(StatsKernel, ExactIsTheDefaultMode) {
 TEST(StatsKernel, CompatIsOptIn) {
     ScopedStatsMode m("compat");
     EXPECT_EQ(stats::StatsModeFromEnv(), stats::StatsMode::kCompat);
+}
+
+namespace {
+
+// Samples of type T with NaN / infinities (floating point), the NoData value, masked pixels and an
+// alpha sample per pixel (2 samples per pixel: value, alpha).
+template <typename T>
+void CheckEveryTargetGivesTheSameBits(SampleType type, uint64_t seed) {
+    std::mt19937_64 rng(seed);
+    const size_t n = 4099;
+    std::vector<T> px(2 * n);
+    std::vector<uint8_t> mask(n);
+    const T nd = static_cast<T>(7);
+    for (size_t i = 0; i < n; ++i) {
+        if constexpr (std::is_floating_point_v<T>) {
+            const uint64_t r = rng() % 61;
+            px[2 * i] = r == 0   ? std::numeric_limits<T>::quiet_NaN()
+                        : r == 1 ? std::numeric_limits<T>::infinity()
+                        : r == 2 ? nd
+                                 : static_cast<T>(std::ldexp(static_cast<double>(rng() % 2000001) - 1e6, static_cast<int>(rng() % 40) - 30));
+        } else {
+            px[2 * i] = rng() % 53 == 0 ? nd : static_cast<T>(rng());
+        }
+        px[2 * i + 1] = static_cast<T>(rng() % 17 == 0 ? 0 : 255);
+        mask[i] = rng() % 13 == 0 ? 0 : 255;
+    }
+    const auto bytes = Bytes(px);
+    struct Guard {
+        ~Guard() { ddbt::simd::ForceTargetForTest(0); }
+    } guard;
+    bool first = true;
+    stats::ExactSums wantExact[4];
+    stats::Welford wantWelford[4];
+    for (const int64_t bit : ddbt::simd::SupportedTargetBits()) {
+        ddbt::simd::ForceTargetForTest(bit);
+        const std::string target = ddbt::simd::TargetNameOf(bit);
+        for (int k = 0; k < 4; ++k) {
+            stats::SampleFilter f;
+            f.type = type;
+            f.hasNodata = (k & 1) != 0;
+            f.nodata = static_cast<double>(nd);
+            const uint8_t* m = (k & 2) != 0 ? mask.data() : nullptr;
+            const uint8_t* alpha = (k & 2) != 0 ? bytes.data() + sizeof(T) : nullptr;
+            stats::ExactSums e;
+            stats::Welford w;
+            stats::AddRun(e, f, bytes.data(), 2 * sizeof(T), static_cast<uint32_t>(n), m, alpha);
+            stats::AddRun(w, f, bytes.data(), 2 * sizeof(T), static_cast<uint32_t>(n), m, alpha);
+            if (first) {
+                wantExact[k] = e;
+                wantWelford[k] = w;
+                continue;
+            }
+            const auto& we = wantExact[k];
+            const auto& ww = wantWelford[k];
+            EXPECT_EQ(e.n, we.n) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&e.lo, &we.lo, sizeof(double)), 0) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&e.hi, &we.hi, sizeof(double)), 0) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&e.sum, &we.sum, sizeof(e.sum)), 0) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&e.sumSq, &we.sumSq, sizeof(e.sumSq)), 0) << target << " " << k;
+            EXPECT_EQ(w.n, ww.n) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&w.mean, &ww.mean, sizeof(double)), 0) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&w.m2, &ww.m2, sizeof(double)), 0) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&w.lo, &ww.lo, sizeof(double)), 0) << target << " " << k;
+            EXPECT_EQ(std::memcmp(&w.hi, &ww.hi, sizeof(double)), 0) << target << " " << k;
+        }
+        first = false;
+    }
+}
+
+}  // namespace
+
+// The accumulation loops are compiled per CPU target: every target gives the bits of the others.
+TEST(StatsKernel, EveryTargetGivesTheSameBits) {
+    CheckEveryTargetGivesTheSameBits<uint8_t>(SampleType::kU8, 1);
+    CheckEveryTargetGivesTheSameBits<int8_t>(SampleType::kI8, 2);
+    CheckEveryTargetGivesTheSameBits<uint16_t>(SampleType::kU16, 3);
+    CheckEveryTargetGivesTheSameBits<int16_t>(SampleType::kI16, 4);
+    CheckEveryTargetGivesTheSameBits<uint32_t>(SampleType::kU32, 5);
+    CheckEveryTargetGivesTheSameBits<int32_t>(SampleType::kI32, 6);
+    CheckEveryTargetGivesTheSameBits<float>(SampleType::kF32, 7);
+    CheckEveryTargetGivesTheSameBits<double>(SampleType::kF64, 8);
 }

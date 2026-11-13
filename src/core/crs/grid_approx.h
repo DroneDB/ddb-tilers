@@ -29,6 +29,10 @@
 
 namespace ddbt::crs {
 
+namespace kernels {
+struct CellGrid;
+}
+
 struct GridApproxOptions {
     int gridSize = 9;       ///< nodes per side of the initial grid (>= 2)
     double maxError = 0.0;  ///< target units; 0: exact everywhere (no approximation)
@@ -59,7 +63,8 @@ public:
 
     /// Transforms n points in place (as Transform::TransformPoints, without z). Returns the
     /// number of failed points (set to HUGE_VAL). Groups of consecutive points in one cell are
-    /// interpolated with SIMD (grid_approx_kernels.h), with the bits of the scalar code.
+    /// interpolated with SIMD, the others one by one (grid_approx_kernels.h), with the bits of the
+    /// scalar code.
     size_t TransformPoints(double* xs, double* ys, size_t n) const;
 
     /// TransformPoints point by point, without SIMD: the reference of the tests.
@@ -78,9 +83,8 @@ public:
 private:
     GridApprox() = default;
 
-    // Interpolates one point; false when it needs the exact transform (outside the rectangle,
-    // NaN, or in an exact cell).
-    bool Interpolate(double& x, double& y) const;
+    // The cells of the approximation as the interpolation reads them.
+    kernels::CellGrid Grid() const;
     // The exact transform of the points at `idx`; returns the number that failed.
     size_t TransformExactly(double* xs, double* ys, const std::vector<size_t>& idx) const;
 

@@ -5,23 +5,12 @@
 #include <cstring>
 #include <numeric>
 
+#include "copc/build/kernels.h"
 #include "copc/build/morton.h"
 
 namespace ddbt::copc::build {
 
 namespace {
-
-constexpr uint32_t kNoCell = ~uint32_t{0};
-
-/// Squared distance, in units of 1 / (2 g) key cells, from the centre of key cell l to the
-/// centre of grid cell c (g grid cells over 2^b key cells, per axis).
-inline uint64_t GridDistance(uint32_t lx, uint32_t ly, uint32_t lz, uint32_t cx, uint32_t cy, uint32_t cz, int64_t g,
-                             int b) noexcept {
-    const int64_t dx = g * (2 * int64_t{lx} + 1) - ((2 * int64_t{cx} + 1) << b);
-    const int64_t dy = g * (2 * int64_t{ly} + 1) - ((2 * int64_t{cy} + 1) << b);
-    const int64_t dz = g * (2 * int64_t{lz} + 1) - ((2 * int64_t{cz} + 1) << b);
-    return static_cast<uint64_t>(dx * dx + dy * dy + dz * dz);
-}
 
 /// The candidates of one child of a node being built.
 struct ChildView {
@@ -166,38 +155,8 @@ bool IsLeaf(int depth, uint64_t points, int regionLeafDepth, const LodParams& p)
 
 void SelectWinners(const uint64_t* keys, size_t n, int depth, int cells, uint8_t* win, std::vector<uint32_t>& scratch) {
     const size_t g = static_cast<size_t>(cells);
-    if (scratch.size() < g * g * g) scratch.assign(g * g * g, kNoCell);
-    const int b = kKeyBits - depth;
-    const uint64_t mask = (uint64_t{1} << (3 * b)) - 1;
-    const int64_t gi = cells;
-    auto cellOf = [&](uint64_t key, uint32_t& lx, uint32_t& ly, uint32_t& lz, uint32_t& cx, uint32_t& cy, uint32_t& cz) {
-        MortonDecode(key & mask, lx, ly, lz);
-        cx = static_cast<uint32_t>((uint64_t{lx} * g) >> b);
-        cy = static_cast<uint32_t>((uint64_t{ly} * g) >> b);
-        cz = static_cast<uint32_t>((uint64_t{lz} * g) >> b);
-        return static_cast<uint32_t>(cx + g * (cy + g * cz));
-    };
-    uint32_t lx, ly, lz, cx, cy, cz;
-    for (size_t i = 0; i < n; ++i) {
-        const uint32_t id = cellOf(keys[i], lx, ly, lz, cx, cy, cz);
-        uint32_t& best = scratch[id];
-        if (best == kNoCell) {
-            best = static_cast<uint32_t>(i);
-            continue;
-        }
-        const uint64_t d = GridDistance(lx, ly, lz, cx, cy, cz, gi, b);
-        uint32_t bx, by, bz, ux, uy, uz;
-        cellOf(keys[best], bx, by, bz, ux, uy, uz);
-        if (d < GridDistance(bx, by, bz, ux, uy, uz, gi, b)) best = static_cast<uint32_t>(i);
-    }
-    // Mark the winners and leave the grid empty again.
-    for (size_t i = 0; i < n; ++i) {
-        const uint32_t id = cellOf(keys[i], lx, ly, lz, cx, cy, cz);
-        if (scratch[id] == static_cast<uint32_t>(i)) {
-            win[i] = 1;
-            scratch[id] = kNoCell;
-        }
-    }
+    if (scratch.size() < g * g * g) scratch.assign(g * g * g, kernels::kNoCell);
+    kernels::SelectWinners(keys, n, depth, cells, win, scratch.data());
 }
 
 void SortEntries(std::vector<SortEntry>& entries, std::vector<SortEntry>& scratch, size_t recordSize, int fixedTopBits) {

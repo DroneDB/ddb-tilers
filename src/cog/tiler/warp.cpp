@@ -7,6 +7,7 @@
 #include <numbers>
 
 #include "cog/tiler/cog_source.h"
+#include "cog/tiler/kernels.h"
 #include "cog/tiler/raster_io.h"
 #include "cog/tiler/tile_error.h"
 #include "core/crs/crs.h"
@@ -206,22 +207,19 @@ void WarpModel::Map(const CogSource& source, int level, std::span<const int32_t>
     } catch (const std::exception& e) {
         Fail(std::string("Cannot warp: ") + e.what());
     }
-    for (size_t k = 0; k < xs.size(); ++k) {
-        const size_t i = where[k];
-        if (!std::isfinite(xs[k]) || xs[k] == HUGE_VAL) {
-            sx[i] = sy[i] = -2;
-            continue;
-        }
-        const double fx = srcInvGt_[0] + xs[k] * srcInvGt_[1] + ys[k] * srcInvGt_[2];
-        const double fy = srcInvGt_[3] + xs[k] * srcInvGt_[4] + ys[k] * srcInvGt_[5];
-        const double lx = std::floor(fx * scaleX), ly = std::floor(fy * scaleY);
-        if (fx < 0 || fy < 0 || lx < 0 || ly < 0 || lx >= lw || ly >= lh) {
-            sx[i] = sy[i] = -2;
-            continue;
-        }
-        sx[i] = static_cast<int32_t>(lx);
-        sy[i] = static_cast<int32_t>(ly);
-    }
+    kernels::SourcePixelsJob job;
+    job.xs = xs.data();
+    job.ys = ys.data();
+    job.where = where.data();
+    job.n = xs.size();
+    job.invGt = srcInvGt_.data();
+    job.scaleX = scaleX;
+    job.scaleY = scaleY;
+    job.width = lw;
+    job.height = lh;
+    job.sx = sx.data();
+    job.sy = sy.data();
+    kernels::SourcePixels(job);
 }
 
 }  // namespace ddbt::cog::tiler

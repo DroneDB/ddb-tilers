@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// Highway SIMD kernel of GridApprox::TransformPoints. Compiled once per enabled target
+// The interpolation of GridApprox::TransformPoints. Compiled once per enabled target
 // (foreach_target.h re-includes this file); HWY_DYNAMIC_DISPATCH picks the best target at runtime.
 //
-// Bit-identical to GridApprox's scalar code: the cell's corner differences, the subtraction and
-// division of the cell coordinates, and the interpolations as fused multiply-adds (std::fma there,
-// MulAdd here: one rounding). Targets without a native FMA would emulate MulAdd with two
-// roundings, so they leave every point to the scalar code. The file is compiled with
-// -ffp-contract=off: no other multiply and add may be fused.
+// Bit-identical to InterpolatePoint: the cell's corner differences, the subtraction and division of
+// the cell coordinates, and the interpolations as fused multiply-adds (std::fma there, MulAdd here:
+// one rounding). Targets without a native FMA would emulate MulAdd with two roundings, so they
+// interpolate every point with InterpolatePoint (std::fma: exact on every target, an instruction
+// on the targets with FMA). The file is compiled with -ffp-contract=off: no other multiply and add
+// may be fused.
 
 #include "core/crs/grid_approx_kernels.h"
 
@@ -24,10 +25,13 @@ namespace HWY_NAMESPACE {
 
 namespace hn = hwy::HWY_NAMESPACE;
 
-void InterpolateSharedCellsImpl(const CellGrid& g, double* HWY_RESTRICT xs, double* HWY_RESTRICT ys, size_t n,
-                                uint32_t* HWY_RESTRICT rest, size_t* restCount) {
+void InterpolatePointsImpl(const CellGrid& g, double* HWY_RESTRICT xs, double* HWY_RESTRICT ys, size_t n,
+                           uint32_t* HWY_RESTRICT exact, size_t* exactCount) {
     size_t k = 0;
     size_t i = 0;
+    const auto onePoint = [&](size_t at) {
+        if (!InterpolatePoint(g, xs[at], ys[at])) exact[k++] = static_cast<uint32_t>(at);
+    };
 #if HWY_NATIVE_FMA
     const hn::ScalableTag<double> d;
     const size_t N = hn::Lanes(d);
@@ -53,7 +57,7 @@ void InterpolateSharedCellsImpl(const CellGrid& g, double* HWY_RESTRICT xs, doub
                                                        static_cast<size_t>(ci)]
                                             : nullptr;
         if (nd == nullptr || nd->child >= 0 || nd->exact) {
-            for (size_t l = 0; l < N; ++l) rest[k++] = static_cast<uint32_t>(i + l);
+            for (size_t l = 0; l < N; ++l) onePoint(i + l);
             continue;
         }
         const double x0 = std::fma(static_cast<double>(ci), g.cellW, g.minX);
@@ -70,11 +74,9 @@ void InterpolateSharedCellsImpl(const CellGrid& g, double* HWY_RESTRICT xs, doub
         hn::StoreU(hn::MulAdd(t, hn::Sub(ty, by), by), d, ys + i);
     }
 #endif
-    for (; i < n; ++i) rest[k++] = static_cast<uint32_t>(i);
-    *restCount = k;
+    for (; i < n; ++i) onePoint(i);
+    *exactCount = k;
 }
-
-bool KernelInterpolatesImpl() { return HWY_NATIVE_FMA != 0; }
 
 }  // namespace HWY_NAMESPACE
 }  // namespace ddbt::crs::kernels
@@ -83,14 +85,11 @@ HWY_AFTER_NAMESPACE();
 #if HWY_ONCE
 namespace ddbt::crs::kernels {
 
-HWY_EXPORT(InterpolateSharedCellsImpl);
-HWY_EXPORT(KernelInterpolatesImpl);
+HWY_EXPORT(InterpolatePointsImpl);
 
-bool SharedCellKernelInterpolates() { return HWY_DYNAMIC_DISPATCH(KernelInterpolatesImpl)(); }
-
-size_t InterpolateSharedCells(const CellGrid& g, double* xs, double* ys, size_t n, uint32_t* rest) {
+size_t InterpolatePoints(const CellGrid& g, double* xs, double* ys, size_t n, uint32_t* exact) {
     size_t count = 0;
-    HWY_DYNAMIC_DISPATCH(InterpolateSharedCellsImpl)(g, xs, ys, n, rest, &count);
+    HWY_DYNAMIC_DISPATCH(InterpolatePointsImpl)(g, xs, ys, n, exact, &count);
     return count;
 }
 

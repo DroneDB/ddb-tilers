@@ -90,10 +90,12 @@ Requirements:
   baseline in `vcpkg-configuration.json`. All dependencies are static and release-only.
 - NASM on Linux (`apt install nasm`): the libjpeg-turbo overlay port in `ports/` refuses to build
   without its SIMD code. On Windows vcpkg downloads NASM.
-- Any x86-64 CPU. The SIMD code (Highway kernels, the fpnge PNG encoder, CRC-32C) is compiled
-  for SSE2, SSSE3, SSE4, AVX2, AVX-512 and Zen 4 and the best variant the CPU runs is chosen at
-  start-up; the rest of the code is compiled for plain x86-64 (`DDBT_ISA_BASELINE`: `x86-64-v2`,
-  `x86-64-v3` or `native` raise it). `scripts/check-baseline-isa.py` checks a build for
+- Any x86-64 CPU. The SIMD code (Highway kernels, the fpnge PNG encoder, CRC-32C) and the hot
+  scalar loops (band statistics, overview input rows, warped pixel mapping, grid interpolation,
+  the Morton keys of the COPC builder with BMI2 PDEP / PEXT) are compiled for SSE2, SSSE3, SSE4,
+  AVX2, AVX-512 and Zen 4 and the best variant the CPU runs is chosen at start-up, with the same
+  output on every variant; the rest of the code is compiled for plain x86-64
+  (`DDBT_ISA_BASELINE`: `x86-64-v2`, `x86-64-v3` or `native` raise it). `scripts/check-baseline-isa.py` checks a build for
   instructions above the baseline outside that dispatched code.
 
 ```sh

@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstring>
 #include <cstdio>
 #include <filesystem>
 #include <map>
@@ -24,6 +25,7 @@
 #include "copc/readers/convert.h"
 #include "copc/readers/las_reader.h"
 #include "core/mem/system_memory.h"
+#include "core/simd/simd.h"
 #include "../test_env.h"
 #include "synth_las.h"
 
@@ -44,13 +46,13 @@ std::string TempDir() {
     return p.string();
 }
 
-TEST(CopcBuildMorton, Bmi2MatchesPortable) {
+TEST(CopcBuildMorton, EncodersMatch) {
     std::mt19937_64 rng(1);
     for (int i = 0; i < 100000; ++i) {
         const uint32_t x = static_cast<uint32_t>(rng()) & (kKeyCells - 1), y = static_cast<uint32_t>(rng()) & (kKeyCells - 1),
                        z = static_cast<uint32_t>(rng()) & (kKeyCells - 1);
-        const uint64_t k = MortonEncode(x, y, z);
-        ASSERT_EQ(k, MortonEncodePortable(x, y, z));
+        const uint64_t k = MortonEncodePortable(x, y, z);
+        ASSERT_EQ(MortonEncode(x, y, z), k);
         uint32_t a, b, c;
         MortonDecode(k, a, b, c);
         ASSERT_EQ(a, x);
@@ -58,12 +60,83 @@ TEST(CopcBuildMorton, Bmi2MatchesPortable) {
         ASSERT_EQ(c, z);
         MortonDecodePortable(k, a, b, c);
         ASSERT_EQ(a, x);
+        ASSERT_EQ(b, y);
+        ASSERT_EQ(c, z);
+#if DDBT_MORTON_PDEP
+        if (simd::HasAvx2()) {
+            ASSERT_EQ(MortonEncodePdep(x, y, z), k);
+            MortonDecodePdep(k, a, b, c);
+            ASSERT_EQ(a, x);
+            ASSERT_EQ(b, y);
+            ASSERT_EQ(c, z);
+        }
+#endif
     }
     // Child direction = the 3 bits below the prefix: x bit 0, y bit 1, z bit 2.
     EXPECT_EQ(MortonEncode(1, 0, 0), 1u);
     EXPECT_EQ(MortonEncode(0, 1, 0), 2u);
     EXPECT_EQ(MortonEncode(0, 0, 1), 4u);
     EXPECT_EQ(PrefixAt(MortonEncode(kKeyCells - 1, 0, 0), 1), 1u);
+}
+
+// The per-target loops (portable encoder below AVX2, PDEP on AVX2 and better when the CPU runs it
+// fast) give the keys of KeyOfRecord and the same winners on every target the CPU runs.
+TEST(CopcBuildKernels, KeysAndWinnersOnEveryTarget) {
+    struct Guard {
+        ~Guard() { simd::ForceTargetForTest(0); }
+    } guard;
+    Cube cube;
+    cube.center = {1000.0, -2000.0, 50.0};
+    cube.halfSize = 600.0;
+    const KeyMapper m(cube, {0.01, 0.01, 0.001}, {1000.0, -2000.0, 0.0});
+    const size_t rs = 20, n = 50001;
+    std::mt19937_64 rng(7);
+    std::vector<uint8_t> recs(n * rs);
+    for (size_t i = 0; i < n; ++i) {
+        // Mostly inside the cube, a few points beyond each face.
+        const int32_t v[3] = {static_cast<int32_t>(rng() % 130001) - 65000, static_cast<int32_t>(rng() % 130001) - 65000,
+                              static_cast<int32_t>(rng() % 1300001) - 650000};
+        std::memcpy(recs.data() + i * rs, v, sizeof v);
+    }
+    std::vector<uint64_t> want(n);
+    bool wantOutside = false;
+    for (size_t i = 0; i < n; ++i) want[i] = m.KeyOfRecord(recs.data() + i * rs, wantOutside);
+    ASSERT_TRUE(wantOutside);
+    bool insideOutside = false;
+    std::vector<uint64_t> inside(1);
+    m.KeysOfRecords(recs.data(), rs, 0, inside.data(), insideOutside);
+    EXPECT_FALSE(insideOutside);
+
+    // The keys of one node of depth 9: its prefix and random low bits, sorted.
+    const int depth = 9;
+    const uint64_t prefix = uint64_t{0123} << (3 * (kKeyBits - depth));
+    std::vector<uint64_t> nodeKeys(20000);
+    for (auto& k : nodeKeys) k = prefix | (rng() & ((uint64_t{1} << (3 * (kKeyBits - depth))) - 1));
+    std::sort(nodeKeys.begin(), nodeKeys.end());
+    std::vector<uint8_t> wantWin;
+
+    std::vector<int64_t> bits = simd::SupportedTargetBits();
+    std::reverse(bits.begin(), bits.end());  // the least capable first: the reference winners
+    for (const int64_t bit : bits) {
+        simd::ForceTargetForTest(bit);
+        const std::string target = simd::TargetNameOf(bit) + (simd::HasFastPdep() ? " (PDEP)" : "");
+        std::vector<uint64_t> got(n);
+        bool outside = false;
+        m.KeysOfRecords(recs.data(), rs, n, got.data(), outside);
+        EXPECT_EQ(got, want) << target;
+        EXPECT_EQ(outside, wantOutside) << target;
+        for (const int cells : {3, 64, 128}) {
+            std::vector<uint32_t> scratch;
+            std::vector<uint8_t> win(nodeKeys.size(), 0);
+            SelectWinners(nodeKeys.data(), nodeKeys.size(), depth, cells, win.data(), scratch);
+            if (cells == 128) {
+                if (wantWin.empty()) wantWin = win;
+                EXPECT_EQ(win, wantWin) << target;
+            }
+            for (uint32_t v : scratch) ASSERT_EQ(v, ~uint32_t{0}) << target;
+            EXPECT_GT(std::count(win.begin(), win.end(), uint8_t{1}), 0) << target << " " << cells;
+        }
+    }
 }
 
 TEST(CopcBuildLod, WinnerIsClosestToTheCellCentreThenFirst) {

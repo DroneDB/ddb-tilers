@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdint>
 
+#include "copc/build/kernels.h"
 #include "copc/build/morton.h"
 #include "copc/copc/hierarchy.h"
 #include "core/util/endian.h"
@@ -68,6 +69,12 @@ public:
     /// Key of an output record (X / Y / Z little-endian int32 at offsets 0, 4, 8).
     uint64_t KeyOfRecord(const uint8_t* r, bool& outside) const noexcept {
         return Key(LoadLE<int32_t>(r), LoadLE<int32_t>(r + 4), LoadLE<int32_t>(r + 8), outside);
+    }
+
+    /// keys[i] = KeyOfRecord of record i (`n` records `rs` bytes apart), by the loop compiled for
+    /// the running CPU (kernels.h).
+    void KeysOfRecords(const uint8_t* recs, size_t rs, size_t n, uint64_t* keys, bool& outside) const {
+        kernels::KeysOfRecords(*this, recs, rs, n, keys, outside);
     }
 
 private:

@@ -2,6 +2,11 @@
 // Compiled without floating-point contraction and without LTO (sources.cmake): Welford's sums
 // must round as DroneDB's (generic x86-64, no FMA) do, and the double-double sums rely on every
 // addition being rounded on its own.
+//
+// The accumulation loops are compiled once per enabled target (foreach_target.h re-includes this
+// file) and HWY_DYNAMIC_DISPATCH picks the best one the CPU runs: plain C++ that the compiler
+// generates for each target's instructions. Without contraction and without reassociation every
+// target gives the same bits.
 #include "cog/tiler/stats_kernel.h"
 
 #include <algorithm>
@@ -9,6 +14,14 @@
 #include <cstdlib>
 #include <cstring>
 #include <type_traits>
+
+#undef HWY_TARGET_INCLUDE
+#define HWY_TARGET_INCLUDE "cog/tiler/stats_kernel.cpp"
+#include "hwy/foreach_target.h"  // IWYU pragma: keep, must come before highway.h
+#include "hwy/highway.h"
+
+#ifndef DDBT_COG_STATS_KERNEL_ONCE
+#define DDBT_COG_STATS_KERNEL_ONCE
 
 namespace ddbt::cog::stats {
 
@@ -83,6 +96,32 @@ inline void AddScaled(DoubleDouble& x, uint64_t v, int shift) {
     AddDD(x, {std::ldexp(h, shift), std::ldexp(l, shift)});
 }
 
+// --- exact sums -----------------------------------------------------------------------------------
+
+// The NoData value as a sample of integer type T: a sample equals it (as doubles) only when it is
+// an integer in T's range.
+template <typename T>
+bool IntegerNodata(const SampleFilter& f, T& out) {
+    if (!f.hasNodata || std::isnan(f.nodata)) return false;
+    const double nd = f.nodata;
+    if (nd < static_cast<double>(std::numeric_limits<T>::min()) || nd > static_cast<double>(std::numeric_limits<T>::max()))
+        return false;
+    const T t = static_cast<T>(nd);
+    if (static_cast<double>(t) != nd) return false;
+    out = t;
+    return true;
+}
+
+}  // namespace
+
+}  // namespace ddbt::cog::stats
+
+#endif  // DDBT_COG_STATS_KERNEL_ONCE
+
+HWY_BEFORE_NAMESPACE();
+namespace ddbt::cog::stats {
+namespace HWY_NAMESPACE {
+
 // --- Welford --------------------------------------------------------------------------------------
 
 template <typename T>
@@ -123,22 +162,6 @@ void WelfordRun(Welford& acc, const SampleFilter& f, const uint8_t* p, size_t st
     acc.lo = lo;
     acc.hi = hi;
     acc.n = n;
-}
-
-// --- exact sums -----------------------------------------------------------------------------------
-
-// The NoData value as a sample of integer type T: a sample equals it (as doubles) only when it is
-// an integer in T's range.
-template <typename T>
-bool IntegerNodata(const SampleFilter& f, T& out) {
-    if (!f.hasNodata || std::isnan(f.nodata)) return false;
-    const double nd = f.nodata;
-    if (nd < static_cast<double>(std::numeric_limits<T>::min()) || nd > static_cast<double>(std::numeric_limits<T>::max()))
-        return false;
-    const T t = static_cast<T>(nd);
-    if (static_cast<double>(t) != nd) return false;
-    out = t;
-    return true;
 }
 
 // Integer samples: exact integer sums over sub-runs (no overflow), added to the double-double sums
@@ -237,9 +260,7 @@ void ExactFloatRun(ExactSums& acc, const SampleFilter& f, const uint8_t* p, size
     }
 }
 
-}  // namespace
-
-void AddRun(Welford& a, const SampleFilter& f, const uint8_t* p, size_t step, uint32_t count, const uint8_t* mask,
+void AddRunWelfordImpl(Welford& a, const SampleFilter& f, const uint8_t* p, size_t step, uint32_t count, const uint8_t* mask,
             const uint8_t* alpha) {
     switch (f.type) {
         case tiff::SampleType::kU8: WelfordRun<uint8_t>(a, f, p, step, count, mask, alpha); break;
@@ -254,7 +275,7 @@ void AddRun(Welford& a, const SampleFilter& f, const uint8_t* p, size_t step, ui
     }
 }
 
-void AddRun(ExactSums& a, const SampleFilter& f, const uint8_t* p, size_t step, uint32_t count, const uint8_t* mask,
+void AddRunExactImpl(ExactSums& a, const SampleFilter& f, const uint8_t* p, size_t step, uint32_t count, const uint8_t* mask,
             const uint8_t* alpha) {
     switch (f.type) {
         case tiff::SampleType::kU8: ExactIntRun<uint8_t>(a, f, p, step, count, mask, alpha); break;
@@ -267,6 +288,27 @@ void AddRun(ExactSums& a, const SampleFilter& f, const uint8_t* p, size_t step, 
         case tiff::SampleType::kF64: ExactFloatRun<double>(a, f, p, step, count, mask, alpha); break;
         default: break;
     }
+}
+
+}  // namespace HWY_NAMESPACE
+}  // namespace ddbt::cog::stats
+HWY_AFTER_NAMESPACE();
+
+#if HWY_ONCE
+
+namespace ddbt::cog::stats {
+
+HWY_EXPORT(AddRunWelfordImpl);
+HWY_EXPORT(AddRunExactImpl);
+
+void AddRun(Welford& a, const SampleFilter& f, const uint8_t* p, size_t step, uint32_t count, const uint8_t* mask,
+            const uint8_t* alpha) {
+    HWY_DYNAMIC_DISPATCH(AddRunWelfordImpl)(a, f, p, step, count, mask, alpha);
+}
+
+void AddRun(ExactSums& a, const SampleFilter& f, const uint8_t* p, size_t step, uint32_t count, const uint8_t* mask,
+            const uint8_t* alpha) {
+    HWY_DYNAMIC_DISPATCH(AddRunExactImpl)(a, f, p, step, count, mask, alpha);
 }
 
 void Merge(ExactSums& into, const ExactSums& from) {
@@ -317,3 +359,5 @@ std::optional<StatsResult> Finish(const ExactSums& a) {
 }
 
 }  // namespace ddbt::cog::stats
+
+#endif  // HWY_ONCE
