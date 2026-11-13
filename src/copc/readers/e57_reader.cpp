@@ -9,6 +9,7 @@
 #include <string>
 
 #include "copc/readers/fields.h"
+#include "core/util/checked_math.h"
 #include "core/util/endian.h"
 
 #if defined(__SSE4_2__)
@@ -520,7 +521,7 @@ Expected<std::unique_ptr<E57Reader>> E57Reader::Open(const std::string& path, co
         }
         for (const auto& f : s.fields) {
             uint64_t bits = 0;
-            if (__builtin_mul_overflow(s.records, static_cast<uint64_t>(f.width), &bits) || bits > UINT64_MAX - 7 ||
+            if (!CheckedMul(s.records, static_cast<uint64_t>(f.width), &bits) || bits > UINT64_MAX - 7 ||
                 (bits + 7) / 8 > f.totalBytes)
                 return Corrupt(path + ": E57 field " + f.name + " holds fewer values than the record count");
         }

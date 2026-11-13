@@ -6,17 +6,7 @@
 #include <cstring>
 #include <mutex>
 
-#include "core/io/platform.h"
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <unistd.h>
-#endif
+#include "core/io/scratch_file.h"
 
 namespace ddbt::copc::build {
 
@@ -111,48 +101,26 @@ private:
 
 // ---------------------------------------------------------------- spill
 
+/// The spill file: an anonymous scratch file in the spill directory, read back once per segment
+/// (the page cache is told so, as the data is not read again).
 class SpillFile {
 public:
     static Expected<std::unique_ptr<SpillFile>> Create(const std::string& dir) {
-        std::unique_ptr<SpillFile> f(new SpillFile());
-        static std::atomic<uint32_t> serial{0};
-#ifdef _WIN32
-        const std::string path = dir + "\\ddbt-copc-spill." + std::to_string(GetCurrentProcessId()) + "." +
-                                 std::to_string(serial.fetch_add(1)) + ".tmp";
-        DDBT_ASSIGN_OR_RETURN(std::wstring w, io::detail::ToWidePath(path));
-        HANDLE h = CreateFileW(w.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                               FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return Win32Status("create " + path, GetLastError());
-        f->h_ = h;
-#else
-        const std::string path = dir + "/ddbt-copc-spill." + std::to_string(getpid()) + "." +
-                                 std::to_string(serial.fetch_add(1)) + ".tmp";
-        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
-        if (fd < 0) return ErrnoStatus("create " + path, errno);
-        ::unlink(path.c_str());
-        f->h_ = fd;
-#endif
-        f->path_ = path;
-        return f;
+        // '/' is a separator on Windows too (the wide path is normalised).
+        DDBT_ASSIGN_OR_RETURN(io::ScratchFile file,
+                              io::ScratchFile::Create(dir + "/ddbt-copc-spill", io::ScratchKind::kAnonymous));
+        return std::unique_ptr<SpillFile>(new SpillFile(std::move(file)));
     }
-    ~SpillFile() {
-        if (h_ != io::detail::kInvalidHandle) io::detail::CloseHandle(h_);
-    }
-    Status Write(uint64_t off, const uint8_t* p, size_t n) { return io::detail::WriteAt(h_, off, p, n, path_); }
+    Status Write(uint64_t off, const uint8_t* p, size_t n) { return file_.WriteAt(off, {p, n}); }
     Status Read(uint64_t off, uint8_t* p, size_t n) {
-        size_t got = 0;
-        DDBT_TRY(io::detail::ReadAt(h_, off, p, n, &got, path_));
-        if (got != n) return IoError("spill file: short read");
-#if !defined(_WIN32) && defined(POSIX_FADV_DONTNEED)
-        ::posix_fadvise(h_, static_cast<off_t>(off), static_cast<off_t>(n), POSIX_FADV_DONTNEED);
-#endif
+        DDBT_TRY(file_.ReadAt(off, {p, n}));
+        file_.DropCache(off, n);
         return Status();
     }
 
 private:
-    SpillFile() = default;
-    io::detail::NativeHandle h_ = io::detail::kInvalidHandle;
-    std::string path_;
+    explicit SpillFile(io::ScratchFile file) : file_(std::move(file)) {}
+    io::ScratchFile file_;
 };
 
 class SpillStore final : public BinStore {

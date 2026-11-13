@@ -2,23 +2,13 @@
 #include "cog/writer/cog_writer.h"
 
 #include <algorithm>
-#include <atomic>
-#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <map>
 #include <mutex>
 
-#ifndef _WIN32
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#ifdef __linux__
-#include <linux/falloc.h>
-#endif
-#endif
-
 #include "cog/tiff/tiff_tags.h"
+#include "core/io/scratch_file.h"
 #include "core/util/endian.h"
 
 namespace ddbt::cog::writer {
@@ -28,48 +18,6 @@ namespace {
 using encode::ByteBuffer;
 
 constexpr uint64_t kClassicLimit = 0xFFFFFFFFull;
-
-Status Errno(const char* what, const std::string& path) {
-    return ErrnoStatus(std::string(what) + " " + path, errno);
-}
-
-#ifndef _WIN32
-Status PWriteAll(int fd, const uint8_t* p, size_t n, uint64_t off, const std::string& path) {
-    while (n > 0) {
-        const ssize_t w = ::pwrite(fd, p, n, static_cast<off_t>(off));
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            return Errno("write", path);
-        }
-        p += w;
-        n -= static_cast<size_t>(w);
-        off += static_cast<uint64_t>(w);
-    }
-    return Status::Ok();
-}
-
-Status PReadAll(int fd, uint8_t* p, size_t n, uint64_t off, const std::string& path) {
-    while (n > 0) {
-        const ssize_t r = ::pread(fd, p, n, static_cast<off_t>(off));
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            return Errno("read", path);
-        }
-        if (r == 0) return Status(StatusCode::kIoError, "unexpected end of " + path);
-        p += r;
-        n -= static_cast<size_t>(r);
-        off += static_cast<uint64_t>(r);
-    }
-    return Status::Ok();
-}
-#endif
-
-std::atomic<uint64_t> g_tempCounter{0};
-
-std::string TempName(const std::string& path, const char* tag) {
-    return path + "." + tag + "." + std::to_string(::getpid()) + "." +
-           std::to_string(g_tempCounter.fetch_add(1)) + ".tmp";
-}
 
 // ---------------------------------------------------------------------------------------------
 // TIFF directory serialisation
@@ -217,15 +165,13 @@ struct CogWriter::Impl {
 
     mutable std::mutex mutex;
     // Full-resolution data file (becomes the output).
-    std::string dataPath;
-    int dataFd = -1;
+    io::ScratchFile data;
     uint64_t dataEnd = 0;
     uint64_t nextSeq = 0;
     std::map<uint64_t, ByteBuffer> pending;  // reorder buffer of full-resolution blocks
     uint64_t pendingBytes = 0;
     // Overview spill.
-    std::string spillPath;
-    int spillFd = -1;
+    io::ScratchFile spill;
     uint64_t spillEnd = 0;
     uint64_t ramBytes = 0;
     bool finished = false;
@@ -236,18 +182,8 @@ struct CogWriter::Impl {
     ~Impl() { Abort(); }
 
     void Abort() noexcept {
-#ifndef _WIN32
-        if (dataFd >= 0) {
-            ::close(dataFd);
-            dataFd = -1;
-            ::unlink(dataPath.c_str());
-        }
-        if (spillFd >= 0) {
-            ::close(spillFd);
-            spillFd = -1;
-            ::unlink(spillPath.c_str());
-        }
-#endif
+        data.Discard();
+        spill.Discard();
     }
 
     // Writes leader + bytes + trailer at the end of the data file.
@@ -264,9 +200,9 @@ struct CogWriter::Impl {
         uint8_t lead[4], trail[4] = {0, 0, 0, 0};
         StoreLE<uint32_t>(lead, n);
         std::memcpy(trail, b.data() + (n >= 4 ? n - 4 : 0), std::min<uint32_t>(n, 4));
-        DDBT_TRY(PWriteAll(dataFd, lead, 4, dataEnd, dataPath));
-        DDBT_TRY(PWriteAll(dataFd, b.data(), n, dataEnd + 4, dataPath));
-        DDBT_TRY(PWriteAll(dataFd, trail, 4, dataEnd + 4 + n, dataPath));
+        DDBT_TRY(data.WriteAt(dataEnd, lead));
+        DDBT_TRY(data.WriteAt(dataEnd + 4, {b.data(), n}));
+        DDBT_TRY(data.WriteAt(dataEnd + 4 + n, trail));
         rec.offset = dataEnd + 4;
         rec.size = n;
         dataEnd += 8 + static_cast<uint64_t>(n);
@@ -289,12 +225,10 @@ struct CogWriter::Impl {
             rec.bytes = std::move(b);
             return Status::Ok();
         }
-        if (spillFd < 0) {
-            spillPath = TempName(path, "ovr");
-            spillFd = ::open(spillPath.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-            if (spillFd < 0) return Errno("create", spillPath);
+        if (!spill.IsOpen()) {
+            DDBT_ASSIGN_OR_RETURN(spill, io::ScratchFile::Create(path + ".ovr", io::ScratchKind::kAnonymous));
         }
-        DDBT_TRY(PWriteAll(spillFd, b.data(), b.size(), spillEnd, spillPath));
+        DDBT_TRY(spill.WriteAt(spillEnd, {b.data(), b.size()}));
         rec.offset = spillEnd;
         spillEnd += b.size();
         stats.spilledBytes += b.size();
@@ -476,7 +410,7 @@ struct CogWriter::Impl {
         return L;
     }
 
-    Status WritePrefix(int fd, const std::string& fdPath, const Layout& L) {
+    Status WritePrefix(io::ScratchFile& out, const Layout& L) {
         std::vector<uint8_t> head;
         if (L.big) {
             const uint8_t h[16] = {'I', 'I', 43, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -503,7 +437,7 @@ struct CogWriter::Impl {
         uint64_t stageAt = 0;
         auto flush = [&]() -> Status {
             if (stage.empty()) return Status::Ok();
-            DDBT_TRY(PWriteAll(fd, stage.data(), stage.size(), stageAt, fdPath));
+            DDBT_TRY(out.WriteAt(stageAt, stage));
             stageAt += stage.size();
             stage.clear();
             return Status::Ok();
@@ -519,7 +453,7 @@ struct CogWriter::Impl {
                 p = r.bytes.data();
             } else {
                 spillBuf.resize(r.size);
-                DDBT_TRY(PReadAll(spillFd, spillBuf.data(), r.size, r.offset, spillPath));
+                DDBT_TRY(spill.ReadAt(r.offset, spillBuf));
                 p = spillBuf.data();
             }
             stage.insert(stage.end(), p, p + r.size);
@@ -552,12 +486,7 @@ struct CogWriter::Impl {
             for (const BlockRec& r : lv.mask)
                 if (spec.hasMask && !r.present) return Status(StatusCode::kInternal, "COG writer: a mask block was never put");
         }
-#ifdef _WIN32
-        return Status(StatusCode::kUnsupported, "COG writer: not implemented on Windows yet");
-#else
-        struct stat st {};
-        uint64_t blk = 4096;
-        if (::fstat(dataFd, &st) == 0 && st.st_blksize > 0) blk = static_cast<uint64_t>(st.st_blksize);
+        const uint64_t blk = data.BlockSize();
 
         auto fits = [](const Layout& L) { return L.fileEnd <= kClassicLimit; };
         bool big = options.forceBigTiff;
@@ -568,56 +497,30 @@ struct CogWriter::Impl {
         if (tryInsert) {
             L = ComputeLayout(big, blk);
             if (!big && !fits(L)) L = ComputeLayout(big = true, blk);
-#ifdef __linux__
-            if (::fallocate(dataFd, FALLOC_FL_INSERT_RANGE, 0, static_cast<off_t>(L.fullResStart)) == 0) inserted = true;
-#endif
+            inserted = data.InsertRangeAtStart(L.fullResStart);
         }
         if (inserted) {
-            DDBT_TRY(WritePrefix(dataFd, dataPath, L));
+            DDBT_TRY(WritePrefix(data, L));
             // The padding between the overview data and the full-resolution data is a hole.
         } else {
             L = ComputeLayout(big = options.forceBigTiff, 1);
             if (!big && !fits(L)) L = ComputeLayout(big = true, 1);
-            const std::string outTemp = TempName(path, "cog");
-            const int fd = ::open(outTemp.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-            if (fd < 0) return Errno("create", outTemp);
-            Status s = WritePrefix(fd, outTemp, L);
+            DDBT_ASSIGN_OR_RETURN(io::ScratchFile out, io::ScratchFile::Create(path + ".cog"));
+            DDBT_TRY(WritePrefix(out, L));
             // Copy the full-resolution data after the prefix.
             uint64_t copied = 0;
             std::vector<uint8_t> buf(size_t{8} << 20);
-            while (s.ok() && copied < dataEnd) {
+            while (copied < dataEnd) {
                 const size_t n = static_cast<size_t>(std::min<uint64_t>(buf.size(), dataEnd - copied));
-                s = PReadAll(dataFd, buf.data(), n, copied, dataPath);
-                if (s.ok()) s = PWriteAll(fd, buf.data(), n, L.fullResStart + copied, outTemp);
+                const std::span<uint8_t> chunk(buf.data(), n);
+                DDBT_TRY(data.ReadAt(copied, chunk));
+                DDBT_TRY(out.WriteAt(L.fullResStart + copied, chunk));
                 copied += n;
             }
-            if (!s.ok()) {
-                ::close(fd);
-                ::unlink(outTemp.c_str());
-                return s;
-            }
-            ::close(dataFd);
-            ::unlink(dataPath.c_str());
-            dataFd = fd;
-            dataPath = outTemp;
+            data = std::move(out);  // discards the full-resolution file
         }
-        if (::ftruncate(dataFd, static_cast<off_t>(L.fileEnd)) != 0) return Errno("truncate", dataPath);
-        if (options.durable && ::fdatasync(dataFd) != 0) return Errno("sync", dataPath);
-        if (::close(dataFd) != 0) {
-            dataFd = -1;
-            return Errno("close", dataPath);
-        }
-        dataFd = -1;
-        if (::rename(dataPath.c_str(), path.c_str()) != 0) {
-            const Status s = Errno("rename", dataPath);
-            ::unlink(dataPath.c_str());
-            return s;
-        }
-        if (spillFd >= 0) {
-            ::close(spillFd);
-            spillFd = -1;
-            ::unlink(spillPath.c_str());
-        }
+        DDBT_TRY(data.Publish(path, L.fileEnd, options.durable));
+        spill.Discard();
         finished = true;
         stats.fileSize = L.fileEnd;
         stats.prefixBytes = L.prefixEnd;
@@ -629,7 +532,6 @@ struct CogWriter::Impl {
         }
         ramBytes = 0;
         return Status::Ok();
-#endif
     }
 };
 
@@ -658,14 +560,8 @@ Expected<std::unique_ptr<CogWriter>> CogWriter::Create(const std::string& path, 
     };
     addLevel(impl->spec.width, impl->spec.height);
     for (const auto& [w, h] : impl->spec.overviews) addLevel(w, h);
-#ifdef _WIN32
-    return Status(StatusCode::kUnsupported, "COG writer: not implemented on Windows yet");
-#else
-    impl->dataPath = TempName(path, "cog");
-    impl->dataFd = ::open(impl->dataPath.c_str(), O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
-    if (impl->dataFd < 0) return Errno("create", impl->dataPath);
+    DDBT_ASSIGN_OR_RETURN(impl->data, io::ScratchFile::Create(path + ".cog"));
     return std::unique_ptr<CogWriter>(new CogWriter(std::move(impl)));
-#endif
 }
 
 uint32_t CogWriter::Levels() const noexcept { return static_cast<uint32_t>(impl_->levels.size()); }

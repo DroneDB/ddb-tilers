@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #ifdef _WIN32
 
+#include <process.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -127,6 +128,64 @@ Expected<uint64_t> HandleSize(NativeHandle h, std::string_view path) {
 void CloseHandle(NativeHandle h) noexcept {
     if (h != nullptr && h != INVALID_HANDLE_VALUE) ::CloseHandle(h);
 }
+
+Expected<NativeHandle> CreateNew(const std::string& path, bool deleteOnClose, bool* exists) {
+    *exists = false;
+    DDBT_ASSIGN_OR_RETURN(std::wstring wide, ToWidePath(path));
+    DWORD flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED;
+    if (deleteOnClose) flags |= FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE;
+    HANDLE h = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                           nullptr, CREATE_NEW, flags, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        *exists = err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS;
+        return Win32Status(What("create", path), err);
+    }
+    IoStats::AddOpen();
+    return h;
+}
+
+Status SetSize(NativeHandle h, uint64_t size, std::string_view path) {
+    FILE_END_OF_FILE_INFO eof{};
+    eof.EndOfFile.QuadPart = static_cast<LONGLONG>(size);
+    if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &eof, sizeof(eof)))
+        return Win32Status(What("set end of file", path), GetLastError());
+    return Status::Ok();
+}
+
+Status SyncData(NativeHandle h, std::string_view path) {
+    if (!FlushFileBuffers(h)) return Win32Status(What("FlushFileBuffers", path), GetLastError());
+    return Status::Ok();
+}
+
+Status RenameReplace(const std::string& from, const std::string& to) {
+    DDBT_ASSIGN_OR_RETURN(std::wstring wfrom, ToWidePath(from));
+    DDBT_ASSIGN_OR_RETURN(std::wstring wto, ToWidePath(to));
+    if (!MoveFileExW(wfrom.c_str(), wto.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        return Win32Status("rename '" + from + "' to '" + to + "'", GetLastError());
+    return Status::Ok();
+}
+
+Status SyncParentDirectory(const std::string&) { return Status::Ok(); }
+
+void RemoveFile(const std::string& path) noexcept {
+    auto wide = ToWidePath(path);
+    if (wide.ok()) DeleteFileW(wide->c_str());
+}
+
+uint64_t PreferredBlockSize(NativeHandle) noexcept { return 4096; }
+
+bool InsertRange(NativeHandle, uint64_t, uint64_t) noexcept { return false; }
+
+void PreallocateHint(NativeHandle h, uint64_t bytes) noexcept {
+    FILE_ALLOCATION_INFO info{};
+    info.AllocationSize.QuadPart = static_cast<LONGLONG>(bytes);
+    SetFileInformationByHandle(h, FileAllocationInfo, &info, sizeof(info));
+}
+
+void DropCacheHint(NativeHandle, uint64_t, uint64_t) noexcept {}
+
+unsigned long ProcessId() noexcept { return static_cast<unsigned long>(_getpid()); }
 
 }  // namespace ddbt::io::detail
 

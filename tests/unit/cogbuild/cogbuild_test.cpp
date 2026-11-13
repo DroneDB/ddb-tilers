@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "../test_env.h"
 #include "cog/build/cog_builder.h"
 #include "cog/build/stats.h"
 #include "cog/encode/block_encoder.h"
@@ -257,9 +258,11 @@ TEST(Stats, DefaultIsExactSumsAndCompatIsOptIn) {
         return acc.Result(px.size())[0]->mean;
     };
     EXPECT_EQ(run(), exact);
-    setenv("DDBT_STATS_MODE", "compat", 1);
-    const double compat = run();
-    unsetenv("DDBT_STATS_MODE");
+    double compat = 0;
+    {
+        ddbt::test::ScopedEnv env("DDBT_STATS_MODE", "compat");
+        compat = run();
+    }
     EXPECT_EQ(compat, wm);
     EXPECT_EQ(run(), exact);
 }

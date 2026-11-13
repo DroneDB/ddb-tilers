@@ -24,6 +24,7 @@
 #include "copc/readers/convert.h"
 #include "copc/readers/las_reader.h"
 #include "core/mem/system_memory.h"
+#include "../test_env.h"
 #include "synth_las.h"
 
 namespace ddbt::copc::build {
@@ -38,7 +39,7 @@ using copc::testing::SynthLas;
 using copc::testing::WriteBytes;
 
 std::string TempDir() {
-    const fs::path p = fs::temp_directory_path() / ("ddbt-copcbuild-" + std::to_string(::getpid()));
+    const fs::path p = fs::temp_directory_path() / ("ddbt-copcbuild-" + ddbt::test::ProcessIdString());
     fs::create_directories(p);
     return p.string();
 }
@@ -458,14 +459,8 @@ TEST(CopcBuildEndToEnd, EveryFormatKeepsEveryPointAndIsDeterministic) {
 }
 
 TEST(CopcBuildMemory, DefaultBudgetFromTheEnvironment) {
-    auto set = [](const char* v) {
-#ifdef _WIN32
-        _putenv_s("DDBT_COPC_BUILD_MEM_MB", v ? v : "");
-#else
-        if (v) setenv("DDBT_COPC_BUILD_MEM_MB", v, 1);
-        else unsetenv("DDBT_COPC_BUILD_MEM_MB");
-#endif
-    };
+    ddbt::test::ScopedEnv restore("DDBT_COPC_BUILD_MEM_MB", nullptr);
+    auto set = [](const char* v) { ddbt::test::ScopedEnv::Set("DDBT_COPC_BUILD_MEM_MB", v); };
     set("512");
     auto b = DefaultCopcMemoryBudget();
     ASSERT_TRUE(b.ok());

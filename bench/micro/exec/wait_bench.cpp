@@ -6,7 +6,11 @@
 //    for it): process CPU time per completed flight / task group.
 #include <benchmark/benchmark.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/resource.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -34,10 +38,19 @@ void SpinFor(std::chrono::nanoseconds d) {
 }
 
 double ProcessCpuSeconds() {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    auto seconds = [](const FILETIME& t) {  // 100 ns units
+        return 1e-7 * static_cast<double>((static_cast<uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime);
+    };
+    return seconds(kernel) + seconds(user);
+#else
     rusage u{};
     getrusage(RUSAGE_SELF, &u);
     return static_cast<double>(u.ru_utime.tv_sec + u.ru_stime.tv_sec) +
            1e-6 * static_cast<double>(u.ru_utime.tv_usec + u.ru_stime.tv_usec);
+#endif
 }
 
 // ---- isolated wait with a bulk backlog ----

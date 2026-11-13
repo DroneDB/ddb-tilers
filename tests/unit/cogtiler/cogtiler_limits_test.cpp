@@ -30,6 +30,7 @@
 #include "cog/tiler/vis.h"
 #include "core/tile/compat.h"
 #include "ddbt/ddbt.h"
+#include "../test_env.h"
 #include "synth_raster.h"
 
 namespace fs = std::filesystem;
@@ -59,28 +60,7 @@ private:
     fs::path path_;
 };
 
-/// Sets an environment variable for the scope.
-class ScopedEnv {
-public:
-    ScopedEnv(const char* name, const char* value) : name_(name) {
-        if (const char* old = std::getenv(name)) old_ = old;
-        Set(name, value);
-    }
-    ~ScopedEnv() { Set(name_, old_ ? old_->c_str() : nullptr); }
-
-private:
-    static void Set(const char* name, const char* value) {
-#ifdef _WIN32
-        _putenv_s(name, value != nullptr ? value : "");
-#else
-        if (value != nullptr) ::setenv(name, value, 1);
-        else ::unsetenv(name);
-#endif
-    }
-
-    const char* name_;
-    std::optional<std::string> old_;
-};
+using ddbt::test::ScopedEnv;
 
 // XYZ tile of a 3857 point.
 std::pair<int, int> TileOf(double mx, double my, int z) {

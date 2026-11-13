@@ -63,7 +63,7 @@ std::map<std::string, std::string> CorpusPaths() {
 
 struct TileSet {
     std::string path;
-    std::shared_ptr<const tiff::TiffReader> reader;
+    std::shared_ptr<const ddbt::cog::tiff::TiffReader> reader;
     uint32_t ifd = 0;
     std::vector<uint32_t> index;
     std::vector<std::vector<uint8_t>> raw;
@@ -78,11 +78,11 @@ TileSet Load(const char* id, size_t count) {
     auto it = paths.find(id);
     if (it == paths.end()) return s;
     s.path = it->second;
-    auto r = tiff::TiffReader::Open(s.path);
+    auto r = ddbt::cog::tiff::TiffReader::Open(s.path);
     if (!r.ok()) return s;
     s.reader = *r;
     s.ifd = s.reader->MainImage();
-    const tiff::IfdInfo& info = s.reader->Ifd(s.ifd);
+    const ddbt::cog::tiff::IfdInfo& info = s.reader->Ifd(s.ifd);
     s.decodedBytes = info.DecodedBlockBytes(0);
     const uint32_t n = info.blocksAcross * info.blocksDown;
     for (uint32_t k = 0; k < n && s.index.size() < count; ++k) {
@@ -160,10 +160,10 @@ void BM_Jpeg(benchmark::State& state, uint32_t denom, bool crop) {
         state.SkipWithError("corpus file missing (fixtures index)");
         return;
     }
-    const tiff::IfdInfo& info = s.reader->Ifd(s.ifd);
+    const ddbt::cog::tiff::IfdInfo& info = s.reader->Ifd(s.ifd);
     codecs::JpegDecodeOptions o;
     o.tables = info.jpegTables;
-    o.ycbcrToRgb = info.photometric == tiff::photometric::kYCbCr;
+    o.ycbcrToRgb = info.photometric == ddbt::cog::tiff::photometric::kYCbCr;
     o.scaleDenom = denom;
     const uint32_t w = crop ? 256 : codecs::JpegScaledSize(info.blockWidth, denom);
     const uint32_t h = crop ? 256 : codecs::JpegScaledSize(info.blockHeight, denom);

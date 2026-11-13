@@ -3,6 +3,7 @@
 // supports, and the ramp against PDAL's filters.colorinterp definition.
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <random>

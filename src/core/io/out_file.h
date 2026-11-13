@@ -38,7 +38,7 @@ struct OutFileOptions {
 
 class OutFile {
 public:
-    /// Creates the temporary file "<path>.tmp.<pid>.<n>" next to `utf8Path`.
+    /// Creates the temporary file "<path>.<pid>.<n>.tmp" next to `utf8Path`.
     static Expected<OutFile> Create(std::string_view utf8Path, const OutFileOptions& options = {});
 
     OutFile() noexcept;

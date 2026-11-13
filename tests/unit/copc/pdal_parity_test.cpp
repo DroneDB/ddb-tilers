@@ -24,12 +24,12 @@
 #include <mutex>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 #include "copc/copc/copc_file.h"
 #include "copc/copc/node_decoder.h"
 #include "copc/las/las_header.h"
+#include "../test_env.h"
 #include "copc_test_util.h"
 #include "core/exec/parallel_for.h"
 #include "core/io/byte_source.h"
@@ -109,7 +109,7 @@ Expected<MultisetHash> HashLas(const std::string& path, const las::LasHeader& in
 }
 
 fs::path TmpDir() {
-    return fs::path("/mnt/data/ddb-tilers-work/tmp") / ("copc-parity-" + std::to_string(::getpid()));
+    return fs::path("/mnt/data/ddb-tilers-work/tmp") / ("copc-parity-" + ddbt::test::ProcessIdString());
 }
 
 // PDAL's hash for a case (cached unless `fresh`).

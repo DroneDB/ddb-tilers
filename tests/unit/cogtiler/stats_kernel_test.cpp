@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "../test_env.h"
 #include "cog/tiler/stats_kernel.h"
 
 namespace stats = ddbt::cog::stats;
@@ -221,27 +222,8 @@ TEST(StatsKernel, SixteenBitAlphaIsRescaled) {
 
 namespace {
 // Sets (or unsets, value == nullptr) DDBT_STATS_MODE for the scope and restores it.
-class ScopedStatsMode {
-public:
-    explicit ScopedStatsMode(const char* value) {
-        if (const char* old = std::getenv("DDBT_STATS_MODE")) {
-            had_ = true;
-            old_ = old;
-        }
-        Set(value);
-    }
-    ~ScopedStatsMode() { Set(had_ ? old_.c_str() : nullptr); }
-
-private:
-    static void Set(const char* v) {
-        if (v) {
-            setenv("DDBT_STATS_MODE", v, 1);
-        } else {
-            unsetenv("DDBT_STATS_MODE");
-        }
-    }
-    bool had_ = false;
-    std::string old_;
+struct ScopedStatsMode : ddbt::test::ScopedEnv {
+    explicit ScopedStatsMode(const char* value) : ScopedEnv("DDBT_STATS_MODE", value) {}
 };
 }  // namespace
 

@@ -6,28 +6,14 @@
 #include <cstring>
 #include <mutex>
 
-#include "core/io/io_stats.h"
-#include "core/io/platform.h"
+#include "core/io/scratch_file.h"
 #include "core/mem/aligned.h"
-
-#ifdef _WIN32
-#include <process.h>
-#include <windows.h>
-#else
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <cerrno>
-#include <cstdio>
-#endif
 
 namespace ddbt::io {
 
 struct OutFile::State {
-    detail::NativeHandle handle = detail::kInvalidHandle;
+    ScratchFile file;
     std::string finalPath;
-    std::string tempPath;
     OutFileOptions options;
 
     std::mutex mutex;            // guards everything below except maxEnd
@@ -49,7 +35,7 @@ struct OutFile::State {
     Status FlushLocked() {
         if (!error.ok()) return error;
         if (bufferLen == 0) return Status::Ok();
-        Status s = detail::WriteAt(handle, BufferStart(), buffer.get(), bufferLen, tempPath);
+        Status s = file.WriteAt(BufferStart(), {buffer.get(), bufferLen});
         if (!s.ok()) {
             error = s;
             return s;
@@ -57,51 +43,7 @@ struct OutFile::State {
         bufferLen = 0;
         return Status::Ok();
     }
-
-    void CloseHandle() noexcept {
-        if (handle != detail::kInvalidHandle) detail::CloseHandle(handle);
-        handle = detail::kInvalidHandle;
-    }
-
-    void RemoveTemp() noexcept {
-        if (tempPath.empty()) return;
-#ifdef _WIN32
-        auto wide = detail::ToWidePath(tempPath);
-        if (wide.ok()) DeleteFileW(wide->c_str());
-#else
-        ::unlink(tempPath.c_str());
-#endif
-    }
 };
-
-namespace {
-
-std::string TempName(const std::string& finalPath) {
-    static std::atomic<uint64_t> counter{0};
-#ifdef _WIN32
-    const auto pid = static_cast<unsigned long>(_getpid());
-#else
-    const auto pid = static_cast<unsigned long>(::getpid());
-#endif
-    return finalPath + ".tmp." + std::to_string(pid) + "." + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
-}
-
-#ifndef _WIN32
-// fsync of the directory holding `path`, so the rename itself is durable.
-Status SyncParentDir(const std::string& path) {
-    const size_t slash = path.find_last_of('/');
-    const std::string dir = slash == std::string::npos ? "." : (slash == 0 ? "/" : path.substr(0, slash));
-    const int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd < 0) return ErrnoStatus("open directory '" + dir + "'", errno);
-    const int rc = ::fsync(fd);
-    const int err = errno;
-    ::close(fd);
-    if (rc != 0) return ErrnoStatus("fsync directory '" + dir + "'", err);
-    return Status::Ok();
-}
-#endif
-
-}  // namespace
 
 OutFile::OutFile() noexcept = default;
 OutFile::OutFile(OutFile&& other) noexcept = default;
@@ -120,56 +62,16 @@ Expected<OutFile> OutFile::Create(std::string_view utf8Path, const OutFileOption
     st->finalPath = std::string(utf8Path);
     st->options = options;
     if (st->options.bufferSize < 4096) st->options.bufferSize = 4096;
-
-    for (int attempt = 0;; ++attempt) {
-        st->tempPath = TempName(st->finalPath);
-#ifdef _WIN32
-        DDBT_ASSIGN_OR_RETURN(std::wstring wide, detail::ToWidePath(st->tempPath));
-        HANDLE h = CreateFileW(wide.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ, nullptr, CREATE_NEW,
-                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            const DWORD err = GetLastError();
-            if ((err == ERROR_FILE_EXISTS || err == ERROR_ALREADY_EXISTS) && attempt < 100) continue;
-            return Win32Status("create '" + st->tempPath + "'", err);
-        }
-        st->handle = h;
-#else
-        const int fd = ::open(st->tempPath.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0666);
-        if (fd < 0) {
-            const int err = errno;
-            if (err == EINTR || (err == EEXIST && attempt < 100)) continue;
-            return ErrnoStatus("create '" + st->tempPath + "'", err);
-        }
-        st->handle = fd;
-#endif
-        break;
-    }
-    IoStats::AddOpen();
-
-    if (options.preallocate > 0) {
-#ifdef _WIN32
-        FILE_ALLOCATION_INFO info{};
-        info.AllocationSize.QuadPart = static_cast<LONGLONG>(options.preallocate);
-        SetFileInformationByHandle(st->handle, FileAllocationInfo, &info, sizeof(info));  // hint only
-#elif defined(__linux__)
-        // KEEP_SIZE: blocks are reserved but the size stays 0; Finish() trims what is unused.
-        ::fallocate(st->handle, FALLOC_FL_KEEP_SIZE, 0, static_cast<off_t>(options.preallocate));  // hint only
-#endif
-    }
-
-    try {
-        st->buffer = mem::MakeAlignedBytes(st->options.bufferSize, 4096);
-    } catch (...) {
-        st->CloseHandle();
-        st->RemoveTemp();
-        throw;
-    }
+    DDBT_ASSIGN_OR_RETURN(st->file, ScratchFile::Create(st->finalPath));
+    // Blocks are reserved but the size stays 0; Finish() trims what is unused.
+    st->file.Preallocate(options.preallocate);
+    st->buffer = mem::MakeAlignedBytes(st->options.bufferSize, 4096);  // on a throw, ~ScratchFile deletes the file
     OutFile out;
     out.s_ = std::move(st);
     return out;
 }
 
-bool OutFile::IsOpen() const noexcept { return s_ && s_->handle != detail::kInvalidHandle; }
+bool OutFile::IsOpen() const noexcept { return s_ && s_->file.IsOpen(); }
 
 const std::string& OutFile::FinalPath() const noexcept {
     static const std::string empty;
@@ -178,7 +80,7 @@ const std::string& OutFile::FinalPath() const noexcept {
 
 const std::string& OutFile::TempPath() const noexcept {
     static const std::string empty;
-    return s_ ? s_->tempPath : empty;
+    return s_ ? s_->file.Path() : empty;
 }
 
 uint64_t OutFile::Tell() const noexcept {
@@ -199,7 +101,7 @@ Status OutFile::Append(std::span<const uint8_t> bytes) {
     if (s.bufferLen + bytes.size() > cap) DDBT_TRY(s.FlushLocked());
     if (bytes.size() >= cap) {
         // Larger than the buffer: written directly, no copy.
-        Status st = detail::WriteAt(s.handle, s.appendPos, bytes.data(), bytes.size(), s.tempPath);
+        Status st = s.file.WriteAt(s.appendPos, bytes);
         if (!st.ok()) {
             s.error = st;
             return st;
@@ -233,7 +135,7 @@ Status OutFile::WriteAt(uint64_t offset, std::span<const uint8_t> bytes) {
             DDBT_TRY(s.FlushLocked());
         }
     }
-    Status st = detail::WriteAt(s.handle, offset, bytes.data(), bytes.size(), s.tempPath);
+    Status st = s.file.WriteAt(offset, bytes);
     if (!st.ok()) {
         std::lock_guard lock(s.mutex);
         if (s.error.ok()) s.error = st;
@@ -257,55 +159,16 @@ Status OutFile::Finish() {
         std::lock_guard lock(s.mutex);
         st = s.FlushLocked();
     }
-    const uint64_t size = Size();
-#ifdef _WIN32
-    if (st.ok()) {
-        FILE_END_OF_FILE_INFO eof{};
-        eof.EndOfFile.QuadPart = static_cast<LONGLONG>(size);
-        if (!SetFileInformationByHandle(s.handle, FileEndOfFileInfo, &eof, sizeof(eof))) {
-            st = Win32Status("set end of file '" + s.tempPath + "'", GetLastError());
-        }
-    }
-    if (st.ok() && s.options.durable && !FlushFileBuffers(s.handle)) {
-        st = Win32Status("FlushFileBuffers '" + s.tempPath + "'", GetLastError());
-    }
-    s.CloseHandle();
-    if (st.ok()) {
-        auto wtmp = detail::ToWidePath(s.tempPath);
-        auto wfinal = detail::ToWidePath(s.finalPath);
-        if (!wtmp.ok()) st = wtmp.status();
-        else if (!wfinal.ok()) st = wfinal.status();
-        else if (!MoveFileExW(wtmp->c_str(), wfinal->c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-            st = Win32Status("rename '" + s.tempPath + "' to '" + s.finalPath + "'", GetLastError());
-    }
-#else
-    // Truncating to the written size also releases blocks preallocated past it.
-    if (st.ok() && ::ftruncate(s.handle, static_cast<off_t>(size)) != 0) {
-        st = ErrnoStatus("ftruncate '" + s.tempPath + "'", errno);
-    }
-    if (st.ok() && s.options.durable && ::fdatasync(s.handle) != 0) {
-        st = ErrnoStatus("fdatasync '" + s.tempPath + "'", errno);
-    }
-    s.CloseHandle();
-    if (st.ok() && std::rename(s.tempPath.c_str(), s.finalPath.c_str()) != 0) {
-        st = ErrnoStatus("rename '" + s.tempPath + "' to '" + s.finalPath + "'", errno);
-    }
-    if (st.ok() && s.options.durable) st = SyncParentDir(s.finalPath);
-#endif
-    if (st.ok()) {
-        s.tempPath.clear();  // published: nothing left to delete
+    if (!st.ok()) {
+        s.file.Discard();
         return st;
     }
-    s.RemoveTemp();
-    s.tempPath.clear();
-    return st;
+    // Setting the size to the written size also releases blocks preallocated past it.
+    return s.file.Publish(s.finalPath, Size(), s.options.durable);
 }
 
 void OutFile::Abort() noexcept {
-    if (!s_) return;
-    s_->CloseHandle();
-    s_->RemoveTemp();
-    s_->tempPath.clear();
+    if (s_) s_->file.Discard();
 }
 
 }  // namespace ddbt::io

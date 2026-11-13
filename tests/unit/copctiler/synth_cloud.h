@@ -12,9 +12,9 @@
 #include <string>
 #include <vector>
 
-#include <unistd.h>
 
 #include "../copc/copc_test_util.h"
+#include "../test_env.h"
 #include "copc/las/point_format.h"
 
 namespace ddbt::copc::tiler::test {
@@ -147,7 +147,7 @@ inline std::filesystem::path ScratchDir(const std::string& name) {
     const char* base = std::getenv("DDBT_TEST_TMP");
     std::filesystem::path d = base ? base : "/mnt/data/ddb-tilers-work/tmp";
     if (!std::filesystem::exists(d)) d = std::filesystem::temp_directory_path();
-    d /= "copctiler-test-" + std::to_string(::getpid()) + "-" + name;
+    d /= "copctiler-test-" + ddbt::test::ProcessIdString() + "-" + name;
     std::filesystem::create_directories(d);
     return d;
 }

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../copcbuild/synth_las.h"
+#include "../test_env.h"
 #include "copc/readers/convert.h"
 #include "copc/readers/e57_reader.h"
 #include "copc/readers/las_reader.h"
@@ -33,7 +34,7 @@ using copc::testing::SynthLas;
 using copc::testing::WriteBytes;
 
 std::string TempDir() {
-    const fs::path p = fs::temp_directory_path() / ("ddbt-readers-" + std::to_string(::getpid()));
+    const fs::path p = fs::temp_directory_path() / ("ddbt-readers-" + ddbt::test::ProcessIdString());
     fs::create_directories(p);
     return p.string();
 }
