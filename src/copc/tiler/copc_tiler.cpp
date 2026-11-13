@@ -650,14 +650,15 @@ int ResolutionOffset() {
     return offset;
 }
 
-void RenderRgba(const Cloud& cloud, const TileRequest& r, std::vector<uint8_t>& rgba, RenderInfo* infoOut) {
-    if (r.tileSize <= 0 || (r.tileSize & (r.tileSize - 1)) != 0)
+namespace {
+void RequireTileSize(int tileSize) {
+    if (tileSize <= 0 || (tileSize & (tileSize - 1)) != 0)
         throw TileError(TileErrorCode::kInvalidArgs, "Tile size must be a power of 2 greater than 0");
-    const Mode mode = r.mode.value_or(GetMode());
-    const tile::compat::GlobalMercator m(r.tileSize);
-    const int tmsRow = tile::compat::InternalRow(r.y, r.z, r.tms);
+}
 
-    // The footprint's tile range (Tiler::getMinMaxCoordsForZ): any zoom, out of it an error.
+// The footprint the tiles of `mode` are bounded by (Tiler::getMinMaxCoordsForZ): the baseline's,
+// else (outside compat) the densified outline's. Throws when there is none.
+const Rect& TilingFootprint(const Cloud& cloud, Mode mode) {
     const std::optional<Rect>* footprint = &cloud.compatFootprint();
     if (!*footprint && mode != Mode::kCompat) footprint = &cloud.footprint();
     if (!*footprint) {
@@ -665,7 +666,32 @@ void RenderRgba(const Cloud& cloud, const TileRequest& r, std::vector<uint8_t>& 
             cloud.footprintError().empty() ? std::string("its bounds do not map to EPSG:3857") : cloud.footprintError();
         throw TileError(TileErrorCode::kInvalidArgs, "Cannot tile " + cloud.path() + ": footprint unavailable: " + why);
     }
-    const Rect& f = **footprint;
+    return **footprint;
+}
+}  // namespace
+
+tile::compat::TileExtent Extent(const std::string& path, int tileSize) {
+    RequireTileSize(tileSize);
+    const auto cloud = Cloud::Get(path);
+    const Rect& f = TilingFootprint(*cloud, GetMode());
+    tile::compat::TileExtent e;
+    e.minX = f.minX;
+    e.minY = f.minY;
+    e.maxX = f.maxX;
+    e.maxY = f.maxY;
+    e.zooms = tile::compat::PointCloudZoomRange(tile::compat::GlobalMercator(tileSize), f.minX, f.minY, f.maxX,
+                                                f.maxY, tile::compat::kDroneDbCopcSpan);
+    return e;
+}
+
+void RenderRgba(const Cloud& cloud, const TileRequest& r, std::vector<uint8_t>& rgba, RenderInfo* infoOut) {
+    RequireTileSize(r.tileSize);
+    const Mode mode = r.mode.value_or(GetMode());
+    const tile::compat::GlobalMercator m(r.tileSize);
+    const int tmsRow = tile::compat::InternalRow(r.y, r.z, r.tms);
+
+    // The footprint's tile range (Tiler::getMinMaxCoordsForZ): any zoom, out of it an error.
+    const Rect& f = TilingFootprint(cloud, mode);
     const auto range = tile::compat::MinMaxCoordsForZ(m, f.minX, f.minY, f.maxX, f.maxY, r.z);
     if (!range.Contains(r.x, tmsRow)) throw TileError(TileErrorCode::kException, OutOfBounds(range));
 
@@ -723,6 +749,7 @@ encode::ByteBuffer RenderTile(const TileRequest& r) {
 
 ::ddbt::cache::CacheStats TileCacheStats() { return EncodedTiles().Stats(); }
 void SetTileCacheBudget(size_t bytes) { EncodedTiles().SetBudget(bytes); }
+size_t TileCacheBudget() { return EncodedTiles().BudgetBytes(); }
 void ClearTileCache() { EncodedTiles().Clear(); }
 
 }  // namespace ddbt::copc::tiler

@@ -42,6 +42,8 @@
 // cache (DDBT_COPC_TILE_CACHE_MB, default 64; 0 disables).
 #pragma once
 
+#include "core/tile/compat.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -98,6 +100,11 @@ encode::ByteBuffer RenderTile(const TileRequest& request);
 void RenderRgba(const Cloud& cloud, const TileRequest& request, std::vector<uint8_t>& rgba,
                 RenderInfo* info = nullptr);
 
+/// The footprint and zoom range of `path` for `tileSize` px tiles in the process-wide mode, as
+/// PointCloudTiler's constructor computes them (the footprint the tiles are bounded by, the span
+/// DroneDB uses). Throws cog::tiler::TileError like RenderTile.
+tile::compat::TileExtent Extent(const std::string& path, int tileSize);
+
 /// The process-wide mode: DDBT_COPC_TILER_MODE (compat|hybrid|modern), else DDBT_TILER_MODE (the
 /// variable the COG tiler reads: compat|default, where default means this tiler's default; hybrid
 /// and modern are accepted too), else hybrid. Unknown values fall through to the next source.
@@ -110,6 +117,7 @@ int ResolutionOffset();
 
 ::ddbt::cache::CacheStats TileCacheStats();
 void SetTileCacheBudget(size_t bytes);
+size_t TileCacheBudget();
 void ClearTileCache();
 
 }  // namespace ddbt::copc::tiler

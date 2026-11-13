@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
-// The COG build export of the C API: ddbtBuildCog (DroneDB's buildCog contract, cog.cpp).
+// The COG build exports of the C API: ddbtBuildCog and ddbtBuildCog2 (with progress), DroneDB's
+// buildCog contract (cog.cpp).
 //
 // optionsJson (all optional): {"codec": "lzw" | "deflate" | "zstd" (non-JPEG outputs),
 // "level": n (DEFLATE / ZSTD level), "jpegQuality": 1..100 (warped JPEG outputs; default
@@ -15,6 +16,8 @@
 
 #include "cog/build/cog_builder.h"
 #include "cog/tiler/json_lite.h"
+#include "api/api_common.h"
+#include "api/build_progress.h"
 #include "core/util/last_error.h"
 #include "ddbt/ddbt.h"
 
@@ -24,12 +27,8 @@ namespace json = ddbt::cog::tiler::json;
 using ddbt::cog::build::BuildOptions;
 using ddbt::cog::build::BuildReport;
 
-ddbtErr Fail(ddbtErr code, const std::string& message) {
-    ddbt::SetLastError(message);
-    return code;
-}
-
-bool IsEmpty(const char* s) { return s == nullptr || *s == '\0'; }
+using ddbt::api::Fail;
+using ddbt::api::IsEmpty;
 
 // Parses the options; returns an error message, "" when fine.
 std::string ParseOptions(const char* text, BuildOptions& o, std::string& reportPath) {
@@ -95,7 +94,8 @@ void WriteReport(const std::string& path, const BuildReport& r) {
 
 }  // namespace
 
-extern "C" ddbtErr ddbtBuildCog(const char* inputPath, const char* outputPath, const char* optionsJson) {
+extern "C" ddbtErr ddbtBuildCog2(const char* inputPath, const char* outputPath, const char* optionsJson,
+                                 ddbtProgressCallback progress, void* userData) {
     try {
         ddbt::ClearLastError();
         if (IsEmpty(inputPath)) return Fail(DDBT_ERR_INVALIDARGS, "Invalid inputPath: empty");
@@ -104,19 +104,13 @@ extern "C" ddbtErr ddbtBuildCog(const char* inputPath, const char* outputPath, c
         std::string reportPath;
         if (const std::string err = ParseOptions(optionsJson, options, reportPath); !err.empty())
             return Fail(DDBT_ERR_INVALIDARGS, err);
-        std::error_code ec;
         const std::string in(inputPath);
-        if (!std::filesystem::exists(std::filesystem::path(std::u8string(in.begin(), in.end())), ec))
-            return Fail(DDBT_ERR_NOTFOUND, in + " does not exist");
+        if (!ddbt::api::PathExists(in)) return Fail(DDBT_ERR_NOTFOUND, in + " does not exist");
+        const ddbt::api::BuildProgress forward(progress, userData);
+        options.progress = forward.Fn();
         BuildReport report;
         const ddbt::Status s = ddbt::cog::build::BuildCog(inputPath, outputPath, options, &report);
-        if (!s.ok()) {
-            const ddbtErr code = s.code() == ddbt::StatusCode::kInvalidArgument ? DDBT_ERR_INVALIDARGS
-                                 : s.code() == ddbt::StatusCode::kNotFound      ? DDBT_ERR_NOTFOUND
-                                 : s.code() == ddbt::StatusCode::kCancelled     ? DDBT_ERR_CANCELED
-                                                                                : DDBT_ERR_EXCEPTION;
-            return Fail(code, std::string(s.message()));
-        }
+        if (!s.ok()) return Fail(ddbt::api::CodeOf(s), std::string(s.message()));
         if (!reportPath.empty()) WriteReport(reportPath, report);
         return DDBT_ERR_NONE;
     } catch (const std::bad_alloc&) {
@@ -126,4 +120,8 @@ extern "C" ddbtErr ddbtBuildCog(const char* inputPath, const char* outputPath, c
     } catch (...) {
         return Fail(DDBT_ERR_EXCEPTION, "unknown exception");
     }
+}
+
+extern "C" ddbtErr ddbtBuildCog(const char* inputPath, const char* outputPath, const char* optionsJson) {
+    return ddbtBuildCog2(inputPath, outputPath, optionsJson, nullptr, nullptr);
 }

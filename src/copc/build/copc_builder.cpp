@@ -1100,7 +1100,16 @@ private:
 
 }  // namespace
 
+namespace {
+std::atomic<uint64_t> g_defaultBudgetOverride{0};
+}  // namespace
+
+void SetDefaultCopcMemoryBudget(uint64_t bytes) noexcept {
+    g_defaultBudgetOverride.store(bytes, std::memory_order_relaxed);
+}
+
 Expected<uint64_t> DefaultCopcMemoryBudget() {
+    if (const uint64_t set = g_defaultBudgetOverride.load(std::memory_order_relaxed); set != 0) return set;
     if (const char* env = std::getenv("DDBT_COPC_BUILD_MEM_MB"); env != nullptr && *env != '\0') {
         uint64_t mb = 0;
         const char* end = env + std::strlen(env);

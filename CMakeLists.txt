@@ -3,11 +3,19 @@ cmake_minimum_required(VERSION 3.25)
 
 # Options are declared before project(): the vcpkg toolchain runs inside project() and reads
 # VCPKG_MANIFEST_FEATURES, so the dev-only dependencies follow the options.
-option(DDBT_BUILD_CLI "Build the ddbt command line tool" ON)
-option(DDBT_BUILD_TESTS "Build the unit tests (vcpkg feature: tests)" ON)
+# Embedded in another project (add_subdirectory), only the static library is built by default:
+# no tool, tests, benchmarks or shared library, no LTO of our objects (the host links them), and
+# the host's output directories are left alone.
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  set(_ddbt_top ON)
+else()
+  set(_ddbt_top OFF)
+endif()
+option(DDBT_BUILD_CLI "Build the ddbt command line tool" ${_ddbt_top})
+option(DDBT_BUILD_TESTS "Build the unit tests (vcpkg feature: tests)" ${_ddbt_top})
 option(DDBT_BUILD_BENCH "Build bench/ (vcpkg feature: bench)" OFF)
-option(DDBT_BUILD_SHARED "Also build libddbt.so / ddbt.dll (ddbt_shared)" ON)
-option(DDBT_LTO "Link time optimization for our code (Release-like configs, no sanitizer)" ON)
+option(DDBT_BUILD_SHARED "Also build libddbt.so / ddbt.dll (ddbt_shared)" ${_ddbt_top})
+option(DDBT_LTO "Link time optimization for our code (Release-like configs, no sanitizer)" ${_ddbt_top})
 option(DDBT_WERROR "Treat warnings in our code as errors" OFF)
 set(DDBT_ISA_BASELINE "x86-64-v3" CACHE STRING "Baseline ISA of our code: x86-64-v2, x86-64-v3 or native (Highway dispatches above it)")
 set_property(CACHE DDBT_ISA_BASELINE PROPERTY STRINGS x86-64-v2 x86-64-v3 native)
@@ -24,7 +32,7 @@ if(DDBT_BUILD_BENCH)
   list(APPEND VCPKG_MANIFEST_FEATURES bench)
 endif()
 
-project(ddbt VERSION 0.1.0 LANGUAGES C CXX
+project(ddbt VERSION 0.2.0 LANGUAGES C CXX
         DESCRIPTION "Fast, light COG and COPC builders and tilers"
         HOMEPAGE_URL "https://github.com/DroneDB/ddb-tilers")
 
@@ -40,11 +48,13 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_C_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+if(PROJECT_IS_TOP_LEVEL)
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+  if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+  endif()
 endif()
 
 include(DdbtFlags)       # ddbt_flags: ISA, optimization, LTO, linker gc-sections

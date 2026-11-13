@@ -102,8 +102,13 @@ struct CopcBuildReport {
 Status BuildCopc(const std::string& input, const std::string& output, const CopcBuildOptions& options,
                  CopcBuildReport* report = nullptr);
 
-/// The default memory budget: `DDBT_COPC_BUILD_MEM_MB` MiB when set (an error when it is not
-/// a positive integer), else 4 GiB but at most half the physical memory.
+/// The default memory budget: the one set by SetDefaultCopcMemoryBudget, else
+/// `DDBT_COPC_BUILD_MEM_MB` MiB when set (an error when it is not a positive integer), else 4 GiB
+/// but at most half the physical memory.
 Expected<uint64_t> DefaultCopcMemoryBudget();
+
+/// Sets the process-wide default memory budget of the builds that do not give one (a host's
+/// configuration, which wins over `DDBT_COPC_BUILD_MEM_MB`); 0 restores the default order.
+void SetDefaultCopcMemoryBudget(uint64_t bytes) noexcept;
 
 }  // namespace ddbt::copc::build

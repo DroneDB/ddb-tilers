@@ -122,6 +122,16 @@ struct RasterTiling {
 /// tile); g is the window otherwise.
 bool TileWindow(const RasterTiling& t, int tz, int tx, int tmsRow, GQResult& g) noexcept;
 
+/// What DroneDB's Tiler holds after its constructor: the EPSG:3857 bounds of the input
+/// (oMinX, oMinY, oMaxX, oMaxY, quirks included) and its zoom range [tMinZ, tMaxZ].
+struct TileExtent {
+    double minX = 0, minY = 0, maxX = 0, maxY = 0;
+    ZoomRange zooms{0, 0};
+};
+
+/// The span DroneDB uses for every COPC (getCopcInfo leaves it at 128).
+inline constexpr int kDroneDbCopcSpan = 128;
+
 /// PointCloudTiler: zoom range from the EPSG:3857 footprint and the COPC span.
 ZoomRange PointCloudZoomRange(const GlobalMercator& m, double oMinX, double oMinY, double oMaxX, double oMaxY,
                               int span) noexcept;

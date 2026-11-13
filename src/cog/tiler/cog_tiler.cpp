@@ -781,6 +781,7 @@ void SetSamplingMode(SamplingMode mode) { g_mode.store(static_cast<int>(mode), s
 
 cache::CacheStats TileCacheStats() { return Tiles().Stats(); }
 void SetTileCacheBudget(size_t bytes) { Tiles().SetBudget(bytes); }
+size_t TileCacheBudget() { return Tiles().BudgetBytes(); }
 void ClearTileCache() { Tiles().Clear(); }
 
 size_t TileScratchBytes() {
@@ -788,10 +789,28 @@ size_t TileScratchBytes() {
     return std::max({s.image.capacity(), s.alpha.capacity(), s.samples.capacity(), s.plane.capacity()});
 }
 
+namespace {
+void RequireTileSize(int tileSize) {
+    if (tileSize <= 0 || (tileSize & (tileSize - 1)) != 0) Fail("Tile size must be a power of 2 greater than 0");
+    if (tileSize > kMaxTileSize) FailInvalid("Tile size must be at most " + std::to_string(kMaxTileSize));
+}
+}  // namespace
+
+tile::compat::TileExtent Extent(const std::string& path, int tileSize) {
+    RequireTileSize(tileSize);
+    const RasterView geometry(*CogSource::Get(path));
+    const tile::compat::RasterTiling t(tileSize, geometry.GeoTransform().data(), geometry.Width(), geometry.Height());
+    tile::compat::TileExtent e;
+    e.minX = t.bounds.oMinX;
+    e.minY = t.bounds.oMinY;
+    e.maxX = t.bounds.oMaxX;
+    e.maxY = t.bounds.oMaxY;
+    e.zooms = t.zooms;
+    return e;
+}
+
 encode::ByteBuffer RenderTile(const TileRequest& req) {
-    if (req.tileSize <= 0 || (req.tileSize & (req.tileSize - 1)) != 0)
-        Fail("Tile size must be a power of 2 greater than 0");
-    if (req.tileSize > kMaxTileSize) FailInvalid("Tile size must be at most " + std::to_string(kMaxTileSize));
+    RequireTileSize(req.tileSize);
     if (req.z < 0 || req.z > kMaxZoom || req.x < 0 || req.y < 0 || req.x >= (1 << req.z) || req.y >= (1 << req.z))
         FailInvalid("Invalid tile coordinates");
     std::shared_ptr<const CogSource> src = CogSource::Get(req.path);

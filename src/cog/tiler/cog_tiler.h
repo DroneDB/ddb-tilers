@@ -21,6 +21,8 @@
 // band painted with a colormap).
 #pragma once
 
+#include "core/tile/compat.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -67,6 +69,12 @@ inline constexpr size_t kTileScratchKeepBytes = size_t{2} * 512 * 512 * 4;
 /// render would need more working memory than DDBT_TILE_REQUEST_MB (1024 MiB by default).
 encode::ByteBuffer RenderTile(const TileRequest& request);
 
+/// The bounds and zoom range of `path` for `tileSize` px tiles, as GDALTiler::open computes them
+/// (on the EPSG:3857 grid of the file, or of the warped view of another CRS). Throws TileError
+/// like RenderTile (kNotFound, kInvalidArgs for the tile size, kNotImplemented for inputs that are
+/// not GeoTIFF).
+tile::compat::TileExtent Extent(const std::string& path, int tileSize);
+
 /// The largest working buffer the calling thread keeps between renders (tests).
 size_t TileScratchBytes();
 
@@ -76,6 +84,7 @@ void SetSamplingMode(SamplingMode mode);
 
 cache::CacheStats TileCacheStats();
 void SetTileCacheBudget(size_t bytes);
+size_t TileCacheBudget();
 void ClearTileCache();
 
 }  // namespace ddbt::cog::tiler

@@ -12,8 +12,12 @@ list(APPEND DDBT_SOURCES
 
 # Development default for proj.db: the share/proj of the PROJ we link (vcpkg_installed of this
 # build; PROJ_DIR is where find_package(PROJ) found proj-config.cmake). Overridden at run time by
-# DDBT_PROJ_DATA or ddbt::crs::SetProjDataDir().
-if(DEFINED PROJ_DIR AND EXISTS "${PROJ_DIR}/proj.db")
+# DDBT_PROJ_DATA or ddbt::crs::SetProjDataDir(). Embedded, there is no default: the build tree is
+# not where the host is deployed, so the host passes its proj.db folder (ddbtConfigure), else
+# PROJ's own search (PROJ_DATA) applies.
+if(NOT PROJECT_IS_TOP_LEVEL)
+  # no compiled default
+elseif(DEFINED PROJ_DIR AND EXISTS "${PROJ_DIR}/proj.db")
   set_property(SOURCE core/crs/proj_context.cpp APPEND PROPERTY
     COMPILE_DEFINITIONS "DDBT_PROJ_DATA_DEFAULT=\"${PROJ_DIR}\"")
 else()

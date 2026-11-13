@@ -7,30 +7,16 @@
 #include <string>
 #include <vector>
 
+#include "api/api_common.h"
 #include "core/simd/simd.h"
 #include "core/util/last_error.h"
 #include "core/version.h"
 
 namespace {
 
-using ddbt::ClearLastError;
-using ddbt::SetLastError;
-
-ddbtErr Fail(ddbtErr code, std::string message) {
-    SetLastError(std::move(message));
-    return code;
-}
-
-template <typename F>
-ddbtErr Guarded(F&& f) noexcept {
-    try {
-        return f();
-    } catch (const std::exception& e) {
-        return Fail(DDBT_ERR_EXCEPTION, e.what());
-    } catch (...) {
-        return Fail(DDBT_ERR_EXCEPTION, "unknown exception");
-    }
-}
+using ddbt::api::CopyOut;
+using ddbt::api::Fail;
+using ddbt::api::GuardedCall;
 
 void AppendJsonString(std::string& out, const std::string& s) {
     out += '"';
@@ -80,8 +66,7 @@ ddbtErr ddbtFree(void* ptr) {
 }
 
 ddbtErr ddbtCpuInfo(char** outJson) {
-    return Guarded([&]() -> ddbtErr {
-        ClearLastError();
+    return GuardedCall([&]() -> ddbtErr {
         if (outJson == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid outJson: NULL");
 
         std::string j = "{\"version\":";
@@ -104,11 +89,7 @@ ddbtErr ddbtCpuInfo(char** outJson) {
         AppendJsonStringArray(j, ddbt::simd::SupportedTargetNames());
         j += "}}";
 
-        char* buf = static_cast<char*>(std::malloc(j.size() + 1));
-        if (buf == nullptr) return Fail(DDBT_ERR_EXCEPTION, "out of memory");
-        std::memcpy(buf, j.c_str(), j.size() + 1);
-        *outJson = buf;
-        return DDBT_ERR_NONE;
+        return CopyOut(j, outJson);
     });
 }
 

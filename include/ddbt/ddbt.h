@@ -128,12 +128,25 @@ DDBT_API ddbtErr ddbtMemoryTileEx3(const char *inputPath, int tz, int tx, int ty
  * NULL is a no-op. */
 DDBT_API ddbtErr ddbtFree(void *ptr);
 
+/** Progress of a build: the fraction done (0..1, never decreasing) and the phase name.
+ * Called while the build runs, possibly from another thread than the caller's, never
+ * concurrently with itself. It must return quickly and must not call back into ddbt. */
+typedef void (*ddbtProgressCallback)(double fraction, const char *phase, void *userData);
+
 /** Build a Cloud Optimized GeoTIFF.
  * @param inputPath source raster
  * @param outputPath destination file
  * @param optionsJson JSON object with options, or NULL / "" for the defaults
- * @return DDBT_ERR_NONE on success, an error otherwise */
+ * @return DDBT_ERR_NONE on success, an error otherwise (DDBT_ERR_NOT_IMPLEMENTED for an input
+ *         ddbt does not handle) */
 DDBT_API ddbtErr ddbtBuildCog(const char *inputPath, const char *outputPath, const char *optionsJson);
+
+/** ddbtBuildCog with progress: phases "warping", "overviews", "compressing", "statistics"
+ * (DroneDB's names; they follow the fraction, the single pass does them together).
+ * @param progress NULL for none
+ * @param userData passed to progress */
+DDBT_API ddbtErr ddbtBuildCog2(const char *inputPath, const char *outputPath, const char *optionsJson,
+                               ddbtProgressCallback progress, void *userData);
 
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
@@ -141,6 +154,37 @@ DDBT_API ddbtErr ddbtBuildCog(const char *inputPath, const char *outputPath, con
  * @param optionsJson JSON object with options, or NULL / "" for the defaults
  * @return DDBT_ERR_NONE on success, an error otherwise */
 DDBT_API ddbtErr ddbtBuildCopc(const char *inputPath, const char *outputPath, const char *optionsJson);
+
+/** ddbtBuildCopc with progress: phases "planning", "reading", "building", "writing".
+ * @param progress NULL for none
+ * @param userData passed to progress */
+DDBT_API ddbtErr ddbtBuildCopc2(const char *inputPath, const char *outputPath, const char *optionsJson,
+                                ddbtProgressCallback progress, void *userData);
+
+/** Process-wide settings of a host that embeds ddbt, as a JSON object; every member optional,
+ * the others keep their value. Checked whole before anything changes.
+ *   "projDataDir": folder of proj.db for the transforms created from now on ("" = the default
+ *                  search: DDBT_PROJ_DATA, the build's PROJ data, then PROJ's own, PROJ_DATA)
+ *   "threads": workers of the shared pool (0 = one per CPU); only before the first build or tile
+ *              (DDBT_ERR_EXCEPTION afterwards, nothing changed)
+ *   "blockCacheMb", "tileCacheMb": decoded-block and encoded-tile caches of the raster tiler
+ *   "copcNodeCacheMb", "copcTileCacheMb": decoded-node and encoded-tile caches of the point-cloud
+ *                  tiler (MiB, 0 = no cache)
+ *   "copcTilerMode": "compat" (DroneDB 2.4.1's tiles), "hybrid" or "modern"
+ *   "copcBuildMemMb": memory cap of COPC builds that do not give one (0 = the default:
+ *                  DDBT_COPC_BUILD_MEM_MB, else 4 GiB, at most half the memory)
+ * These settings win over the DDBT_* environment variables.
+ * @return DDBT_ERR_INVALIDARGS for a malformed or unknown setting */
+DDBT_API ddbtErr ddbtConfigure(const char *configJson);
+
+/** The bounds and zoom range of a tile input, as DroneDB's tilers compute them when they open
+ * it: {"type": "raster" | "pointcloud", "minX", "minY", "maxX", "maxY" (EPSG:3857 metres),
+ * "minZoom", "maxZoom"}. A COPC file (a name ending in ".copc.laz") is a point cloud, in the
+ * process-wide tile mode; anything else a raster.
+ * @param tileSize tile size in pixels (a power of two)
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree
+ * @return codes as ddbtMemoryTileFmt */
+DDBT_API ddbtErr ddbtTileInfo(const char *inputPath, int tileSize, char **outJson);
 
 /** Information about the build and the CPU dispatch, as a JSON object (Highway targets
  * compiled in, supported by this CPU, and the one selected at runtime).

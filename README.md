@@ -11,7 +11,7 @@ less memory, and output that does not depend on the number of threads. The outpu
 DroneDB's: the same COG grid, codecs and statistics sidecar, the same tile coordinates and
 pixels, so a tile server can switch between the two and compare them.
 
-Status: version 0.1.0, under active development. The C API is not stable yet.
+Status: version 0.2.0, under active development. The C API is not stable yet.
 
 ## What it does
 
@@ -113,6 +113,11 @@ Presets (`CMakePresets.json`):
 | `linux-asan-ubsan`, `linux-tsan`, `windows-msvc-asan` | Sanitizers |
 | `linux-pgo-gen`, `linux-pgo-use` | Profile-guided optimisation |
 
+Embedded in another CMake project (`add_subdirectory`), only the static library `ddbt::ddbt` is
+built by default (no tool, tests, benchmarks or shared library) and the host's output
+directories are left alone; the laz-perf fork is available as `ddbt::lazperf`. The host passes
+its `proj.db` folder with `ddbtConfigure`.
+
 The build produces the static library `libddbt.a` / `ddbt_static.lib`, the shared library
 `libddbt.so` / `ddbt.dll` (C API only), the `ddbt` command line tool and the test binaries.
 
@@ -132,8 +137,11 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 |---|---|
 | `ddbtBuildCog(input, output, optionsJson)` | Build a COG. Options: `codec` (`lzw`, `deflate`, `zstd`), `level`, `jpegQuality`, `noJpeg`, `memoryMb`, `statistics`, `report` (path of a JSON build report) |
 | `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report` |
+| `ddbtBuildCog2(...)`, `ddbtBuildCopc2(...)` | The same builds with a progress callback (fraction and phase) |
 | `ddbtMemoryTileFmt(...)` | A tile of a COG or COPC file in PNG, JPEG or WebP |
 | `ddbtMemoryTileEx2(...)`, `ddbtMemoryTileEx3(...)` | A raster tile with visualisation parameters, in PNG (Ex2) or a chosen format (Ex3) |
+| `ddbtTileInfo(input, tileSize, outJson)` | Bounds (EPSG:3857) and zoom range of a COG or COPC file |
+| `ddbtConfigure(configJson)` | Process-wide settings of a host that embeds the library: `projDataDir`, `threads`, cache budgets (`blockCacheMb`, `tileCacheMb`, `copcNodeCacheMb`, `copcTileCacheMb`), `copcTilerMode`, `copcBuildMemMb`; they win over the environment variables |
 | `ddbtFree`, `ddbtLastError`, `ddbtVersion`, `ddbtCpuInfo` | Memory release, error message of the last call on the thread, version, CPU dispatch |
 
 Every function returns a `ddbtErr`; no exception crosses the C API.

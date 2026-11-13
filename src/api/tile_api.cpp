@@ -13,6 +13,7 @@
 #include <string>
 
 #include "cog/tiler/cog_tiler.h"
+#include "api/api_common.h"
 #include "api/copc_tile.h"
 #include "cog/tiler/tile_error.h"
 #include "cog/tiler/vis.h"
@@ -21,58 +22,12 @@
 
 namespace {
 
+using ddbt::api::GuardedBuffer;
+using ddbt::api::NullOrBlank;
+using ddbt::api::ParseFormat;
+using ddbt::api::RequireLocal;
 using ddbt::cog::tiler::TileError;
 using ddbt::cog::tiler::TileErrorCode;
-
-ddbtErr Report(ddbtErr code, const std::string& message) {
-    ddbt::SetLastError(message);
-    return code;
-}
-
-ddbtErr CodeOf(TileErrorCode c) {
-    switch (c) {
-        case TileErrorCode::kInvalidArgs:
-        case TileErrorCode::kRefused: return DDBT_ERR_INVALIDARGS;
-        case TileErrorCode::kNotFound: return DDBT_ERR_NOTFOUND;
-        case TileErrorCode::kNotImplemented: return DDBT_ERR_NOT_IMPLEMENTED;
-        case TileErrorCode::kException: break;
-    }
-    return DDBT_ERR_EXCEPTION;
-}
-
-// Runs body(buffer) and hands the bytes to the caller only when it returned (guardedBuffer).
-template <typename Body>
-ddbtErr GuardedBuffer(uint8_t** outBuffer, int* outBufferSize, Body&& body) noexcept {
-    try {
-        ddbt::ClearLastError();
-        ddbt::encode::ByteBuffer bytes = body();
-        if (bytes.size() > static_cast<size_t>(INT32_MAX)) return Report(DDBT_ERR_EXCEPTION, "Tile too large");
-        const int size = static_cast<int>(bytes.size());
-        uint8_t* data = bytes.release();
-        if (data == nullptr) {
-            data = static_cast<uint8_t*>(std::malloc(1));
-            if (data == nullptr) return Report(DDBT_ERR_EXCEPTION, "Out of memory");
-        }
-        *outBuffer = data;
-        *outBufferSize = size;
-        return DDBT_ERR_NONE;
-    } catch (const TileError& e) {
-        return Report(CodeOf(e.code()), e.what());
-    } catch (const std::bad_alloc&) {
-        return Report(DDBT_ERR_EXCEPTION, "Out of memory");
-    } catch (const std::exception& e) {
-        return Report(DDBT_ERR_EXCEPTION, e.what());
-    } catch (...) {
-        return Report(DDBT_ERR_EXCEPTION, "Unknown error occurred");
-    }
-}
-
-bool NullOrBlank(const char* s) {
-    if (s == nullptr) return true;
-    for (; *s; ++s)
-        if (!std::isspace(static_cast<unsigned char>(*s))) return false;
-    return true;
-}
 
 std::string OptStr(const char* s) { return s != nullptr ? std::string(s) : std::string(); }
 
@@ -96,29 +51,6 @@ void RequireTileSize(int tileSize) {
     // Not in libddb: the buffers of a tile grow with its square.
     if (tileSize > ddbt::cog::tiler::kMaxTileSize)
         ddbt::cog::tiler::FailInvalid("Tile size must be at most " + std::to_string(ddbt::cog::tiler::kMaxTileSize));
-}
-
-void RequireLocal(const std::string& path) {
-    const auto starts = [&](const char* p) {
-        const size_t n = std::strlen(p);
-        if (path.size() < n) return false;
-        for (size_t i = 0; i < n; ++i)
-            if (std::tolower(static_cast<unsigned char>(path[i])) != p[i]) return false;
-        return true;
-    };
-    if (starts("http://") || starts("https://") || starts("s3://") || starts("/vsi"))
-        throw TileError(TileErrorCode::kNotImplemented, "Remote inputs are not supported yet: " + path);
-}
-
-ddbt::encode::TileFormat ParseFormat(const char* outputFormat) {
-    // tile_encoder.cpp parseImageFormat (case-insensitive).
-    std::string f = OptStr(outputFormat);
-    std::string l = f;
-    for (auto& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (l.empty() || l == "png" || l == "image/png") return ddbt::encode::TileFormat::kPng;
-    if (l == "jpeg" || l == "jpg" || l == "image/jpeg" || l == "image/jpg") return ddbt::encode::TileFormat::kJpeg;
-    if (l == "webp" || l == "image/webp") return ddbt::encode::TileFormat::kWebp;
-    ddbt::cog::tiler::FailInvalid("Unsupported image format: " + f);
 }
 
 }  // namespace

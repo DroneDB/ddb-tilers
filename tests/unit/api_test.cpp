@@ -1,14 +1,31 @@
 // SPDX-License-Identifier: MPL-2.0
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "cog/tiler/block_cache.h"
+#include "cog/tiler/cog_tiler.h"
+#include "cog/tiler/json_lite.h"
+#include "cogtiler/synth_raster.h"
+#include "copc/build/copc_builder.h"
+#include "copc/cache/node_cache.h"
+#include "copc/tiler/copc_tiler.h"
+#include "copcbuild/synth_las.h"
+#include "copctiler/synth_cloud.h"
+#include "core/crs/crs.h"
+#include "core/exec/thread_pool.h"
+#include "core/tile/compat.h"
 #include "ddbt/ddbt.h"
+#include "test_env.h"
 
 TEST(Api, Version) {
     const std::string v = ddbtVersion();
-    EXPECT_EQ(v, "0.1.0");
+    EXPECT_EQ(v, "0.2.0");
 }
 
 TEST(Api, LastErrorIsEmptyWhenNothingFailed) {
@@ -76,8 +93,225 @@ TEST(Api, CpuInfoIsJsonWithTheDispatchTarget) {
     EXPECT_NE(s.find("\"dispatchTarget\":\""), std::string::npos) << s;
     EXPECT_NE(s.find("\"compiledTargets\":["), std::string::npos) << s;
     EXPECT_NE(s.find("\"supportedTargets\":["), std::string::npos) << s;
-    EXPECT_NE(s.find("\"version\":\"0.1.0\""), std::string::npos) << s;
+    EXPECT_NE(s.find("\"version\":\"0.2.0\""), std::string::npos) << s;
     EXPECT_EQ(ddbtCpuInfo(nullptr), DDBT_ERR_INVALIDARGS);
 }
 
 TEST(Api, FreeNullIsNoop) { EXPECT_EQ(ddbtFree(nullptr), DDBT_ERR_NONE); }
+
+// ---------------------------------------------------------------------------------------------
+// The exports for a host library: ddbtConfigure, ddbtTileInfo, ddbtBuildCog2 / ddbtBuildCopc2.
+
+namespace {
+
+namespace json = ddbt::cog::tiler::json;
+
+std::filesystem::path ApiScratch(const std::string& name) {
+    return ddbt::copc::tiler::test::ScratchDir("api-" + name);
+}
+
+json::Value TileInfoOf(const std::string& path, int tileSize) {
+    char* out = nullptr;
+    EXPECT_EQ(ddbtTileInfo(path.c_str(), tileSize, &out), DDBT_ERR_NONE) << ddbtLastError();
+    if (out == nullptr) return json::Value();
+    const auto v = json::Parse(out);
+    ddbtFree(out);
+    EXPECT_TRUE(v && v->IsObject());
+    return v ? *v : json::Value();
+}
+
+double Num(const json::Value& v, const char* key) {
+    const json::Value* m = v.Find(key);
+    EXPECT_NE(m, nullptr) << key;
+    return m != nullptr ? m->num : 0;
+}
+
+struct ProgressLog {
+    std::vector<std::pair<double, std::string>> calls;
+    static void Record(double fraction, const char* phase, void* user) {
+        static_cast<ProgressLog*>(user)->calls.emplace_back(fraction, phase != nullptr ? phase : "");
+    }
+    void ExpectMonotonicTo1(const std::vector<std::string>& phases) const {
+        ASSERT_FALSE(calls.empty());
+        for (size_t i = 1; i < calls.size(); ++i) EXPECT_GE(calls[i].first, calls[i - 1].first) << i;
+        EXPECT_DOUBLE_EQ(calls.back().first, 1.0);
+        for (const auto& [f, phase] : calls) {
+            EXPECT_GE(f, 0.0);
+            EXPECT_NE(std::find(phases.begin(), phases.end(), phase), phases.end()) << phase;
+        }
+    }
+};
+
+}  // namespace
+
+TEST(HostApi, ConfigureAppliesEverySetting) {
+    const auto mode = ddbt::copc::tiler::GetMode();
+    const size_t tileBudget = ddbt::cog::tiler::TileCacheBudget();
+    const size_t blockBudget = ddbt::cog::tiler::BlockCacheBudget();
+    const size_t nodeBudget = ddbt::copc::cache::NodeCache::Global().BudgetBytes();
+    const std::string projDir = ddbt::crs::ProjDataDir();
+
+    ASSERT_EQ(ddbtConfigure(R"({"copcTilerMode": "modern", "tileCacheMb": 3, "blockCacheMb": 5,
+                                "copcNodeCacheMb": 7, "copcTileCacheMb": 9, "copcBuildMemMb": 300})"),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    EXPECT_EQ(ddbt::copc::tiler::GetMode(), ddbt::copc::tiler::Mode::kModern);
+    EXPECT_EQ(ddbt::cog::tiler::TileCacheBudget(), size_t{3} << 20);
+    EXPECT_EQ(ddbt::cog::tiler::BlockCacheBudget(), size_t{5} << 20);
+    EXPECT_EQ(ddbt::copc::cache::NodeCache::Global().BudgetBytes(), size_t{7} << 20);
+    EXPECT_EQ(ddbt::copc::tiler::TileCacheBudget(), size_t{9} << 20);
+    const auto budget = ddbt::copc::build::DefaultCopcMemoryBudget();
+    ASSERT_TRUE(budget.ok());
+    EXPECT_EQ(*budget, uint64_t{300} << 20);
+
+    // The host's setting wins over the environment; 0 restores the default order.
+    {
+        const ddbt::test::ScopedEnv env("DDBT_COPC_BUILD_MEM_MB", "123");
+        EXPECT_EQ(*ddbt::copc::build::DefaultCopcMemoryBudget(), uint64_t{300} << 20);
+        ASSERT_EQ(ddbtConfigure(R"({"copcBuildMemMb": 0})"), DDBT_ERR_NONE);
+        EXPECT_EQ(*ddbt::copc::build::DefaultCopcMemoryBudget(), uint64_t{123} << 20);
+    }
+
+    ASSERT_EQ(ddbtConfigure(R"({"projDataDir": "/some/where"})"), DDBT_ERR_NONE);
+    EXPECT_EQ(ddbt::crs::ProjDataDir(), "/some/where");
+
+    ddbt::copc::tiler::SetMode(mode);
+    ddbt::cog::tiler::SetTileCacheBudget(tileBudget);
+    ddbt::cog::tiler::SetBlockCacheBudget(blockBudget);
+    ddbt::copc::cache::NodeCache::Global().SetBudget(nodeBudget);
+    ddbt::crs::SetProjDataDir(projDir);
+}
+
+TEST(HostApi, ConfigureRefusesBadSettingsAndChangesNothing) {
+    const auto mode = ddbt::copc::tiler::GetMode();
+    const size_t tileBudget = ddbt::cog::tiler::TileCacheBudget();
+    for (const char* bad : {"", "[1]", "{\"bogus\": 1}", "{\"tileCacheMb\": -1}", "{\"tileCacheMb\": 1.5}",
+                            "{\"tileCacheMb\": \"3\"}", "{\"copcTilerMode\": \"fancy\"}", "{\"projDataDir\": 3}",
+                            "{\"threads\": 5000}", "{\"copcBuildMemMb\": 99999999999}",
+                            // a valid setting next to a bad one is not applied either
+                            "{\"copcTilerMode\": \"modern\", \"tileCacheMb\": -1}"}) {
+        EXPECT_EQ(ddbtConfigure(bad), DDBT_ERR_INVALIDARGS) << bad;
+        EXPECT_STRNE(ddbtLastError(), "") << bad;
+    }
+    EXPECT_EQ(ddbtConfigure(nullptr), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbt::copc::tiler::GetMode(), mode);
+    EXPECT_EQ(ddbt::cog::tiler::TileCacheBudget(), tileBudget);
+}
+
+TEST(HostApi, ConfigureRefusesThreadsOnceThePoolRunsAndChangesNothing) {
+    (void)ddbt::exec::DefaultPool();  // the pool exists from here on
+    const size_t tileBudget = ddbt::cog::tiler::TileCacheBudget();
+    EXPECT_EQ(ddbtConfigure(R"({"threads": 2, "tileCacheMb": 1})"), DDBT_ERR_EXCEPTION);
+    EXPECT_NE(std::string(ddbtLastError()).find("already running"), std::string::npos) << ddbtLastError();
+    EXPECT_EQ(ddbt::cog::tiler::TileCacheBudget(), tileBudget);
+}
+
+TEST(HostApi, TileInfoOfARasterIsGdalTilersBoundsAndZooms) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("tileinfo-raster");
+    const std::string path = (dir / "r.tif").string();
+    syn::WriteSynth(path, syn::Spec(512, 1, 1));
+    for (const int size : {256, 512}) {
+        const json::Value v = TileInfoOf(path, size);
+        ASSERT_NE(v.Find("type"), nullptr);
+        EXPECT_EQ(v.Find("type")->str, "raster");
+        // EPSG:3857 file: GDALTiler's bounds are its geotransform's (0.25 m pixels, 512 x 512).
+        const double gt[6] = {syn::kOriginX, syn::kPixel, 0, syn::kOriginY, 0, -syn::kPixel};
+        const ddbt::tile::compat::RasterTiling t(size, gt, 512, 512);
+        EXPECT_DOUBLE_EQ(Num(v, "minX"), t.bounds.oMinX);
+        EXPECT_DOUBLE_EQ(Num(v, "minY"), t.bounds.oMinY);
+        EXPECT_DOUBLE_EQ(Num(v, "maxX"), t.bounds.oMaxX);
+        EXPECT_DOUBLE_EQ(Num(v, "maxY"), t.bounds.oMaxY);
+        EXPECT_EQ(Num(v, "minZoom"), t.zooms.min);
+        EXPECT_EQ(Num(v, "maxZoom"), t.zooms.max);
+        EXPECT_DOUBLE_EQ(Num(v, "minX"), syn::kOriginX);
+        EXPECT_DOUBLE_EQ(Num(v, "maxX"), syn::kOriginX + 512 * syn::kPixel);
+        EXPECT_GE(Num(v, "maxZoom"), Num(v, "minZoom"));
+    }
+    std::filesystem::remove_all(dir);
+}
+
+TEST(HostApi, TileInfoOfAPointCloudFollowsTheMode) {
+    namespace syn = ddbt::copc::tiler::test;
+    const auto dir = ApiScratch("tileinfo-cloud");
+    syn::CloudSpec spec;
+    spec.points = 2000;
+    const std::string path = syn::WriteCloud(dir, "c", spec);
+    const auto mode = ddbt::copc::tiler::GetMode();
+    for (const auto m : {ddbt::copc::tiler::Mode::kCompat, ddbt::copc::tiler::Mode::kModern}) {
+        ddbt::copc::tiler::SetMode(m);
+        const json::Value v = TileInfoOf(path, 256);
+        ASSERT_NE(v.Find("type"), nullptr);
+        EXPECT_EQ(v.Find("type")->str, "pointcloud");
+        const auto e = ddbt::copc::tiler::Extent(path, 256);
+        EXPECT_DOUBLE_EQ(Num(v, "minX"), e.minX);
+        EXPECT_DOUBLE_EQ(Num(v, "maxY"), e.maxY);
+        const auto z = ddbt::tile::compat::PointCloudZoomRange(ddbt::tile::compat::GlobalMercator(256), e.minX, e.minY,
+                                                               e.maxX, e.maxY, 128);
+        EXPECT_EQ(Num(v, "minZoom"), z.min);
+        EXPECT_EQ(Num(v, "maxZoom"), z.max);
+        // A tile of the reported range renders.
+        uint8_t* buf = nullptr;
+        int size = 0;
+        const ddbt::tile::compat::GlobalMercator merc(256);
+        const auto range = ddbt::tile::compat::MinMaxCoordsForZ(merc, e.minX, e.minY, e.maxX, e.maxY, z.max);
+        EXPECT_EQ(ddbtMemoryTileFmt(path.c_str(), z.max, static_cast<int>(range.min.x), static_cast<int>(range.min.y),
+                                    &buf, &size, 256, false, true, nullptr, "png"),
+                  DDBT_ERR_NONE)
+            << ddbtLastError();
+        ddbtFree(buf);
+    }
+    ddbt::copc::tiler::SetMode(mode);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(HostApi, TileInfoRefusesBadArguments) {
+    char* out = nullptr;
+    EXPECT_EQ(ddbtTileInfo(nullptr, 256, &out), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtTileInfo("x.tif", 256, nullptr), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtTileInfo("/nonexistent.tif", 256, &out), DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(ddbtTileInfo("/nonexistent.copc.laz", 256, &out), DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(ddbtTileInfo("https://example.com/a.tif", 256, &out), DDBT_ERR_NOT_IMPLEMENTED);
+    const auto dir = ApiScratch("tileinfo-args");
+    const std::string path = (dir / "r.tif").string();
+    ddbt::cog::tiler::testing::WriteSynth(path, ddbt::cog::tiler::testing::Spec(16, 1, 1));
+    EXPECT_NE(ddbtTileInfo(path.c_str(), 100, &out), DDBT_ERR_NONE);
+    EXPECT_EQ(out, nullptr);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(HostApi, BuildCog2ReportsProgressToOne) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("cog2");
+    const std::string in = (dir / "in.tif").string(), out = (dir / "out.tif").string();
+    syn::SynthSpec spec = syn::Spec(512, 3, 1);
+    spec.tile = 256;
+    syn::WriteSynth(in, spec);
+    ProgressLog log;
+    ASSERT_EQ(ddbtBuildCog2(in.c_str(), out.c_str(), nullptr, &ProgressLog::Record, &log), DDBT_ERR_NONE)
+        << ddbtLastError();
+    log.ExpectMonotonicTo1({"warping", "overviews", "compressing", "statistics"});
+    EXPECT_TRUE(std::filesystem::exists(out));
+    // Without a callback: the same file.
+    const std::string out2 = (dir / "out2.tif").string();
+    ASSERT_EQ(ddbtBuildCog2(in.c_str(), out2.c_str(), nullptr, nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_EQ(std::filesystem::file_size(out), std::filesystem::file_size(out2));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(HostApi, BuildCopc2ReportsProgressToOne) {
+    namespace syn = ddbt::copc::testing;
+    const auto dir = ApiScratch("copc2");
+    const std::string in = (dir / "in.las").string(), out = (dir / "out.copc.laz").string();
+    syn::SynthLas s;
+    s.format = 3;
+    syn::FillRandom(s, 20000, 7);
+    ASSERT_TRUE(syn::WriteBytes(in, syn::BuildLasBytes(s)));
+    ProgressLog log;
+    ASSERT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), nullptr, &ProgressLog::Record, &log), DDBT_ERR_NONE)
+        << ddbtLastError();
+    log.ExpectMonotonicTo1({"planning", "reading", "building", "writing"});
+    EXPECT_TRUE(std::filesystem::exists(out));
+    EXPECT_EQ(ddbtBuildCopc2("", out.c_str(), nullptr, &ProgressLog::Record, &log), DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
