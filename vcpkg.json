@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "ddbt",
+  "version": "0.1.0",
+  "description": "ddb-tilers: fast, light COG and COPC builders and tilers",
+  "homepage": "https://github.com/DroneDB/ddb-tilers",
+  "license": "MPL-2.0",
+  "dependencies": [
+    {
+      "name": "proj",
+      "default-features": false,
+      "features": ["tiff"]
+    },
+    "libdeflate",
+    "libjpeg-turbo",
+    {
+      "name": "libwebp",
+      "default-features": false,
+      "features": [
+        "simd"
+      ]
+    },
+    "zstd",
+    "openjpeg",
+    "lerc",
+    "highway"
+  ],
+  "features": {
+    "tests": {
+      "description": "Unit and integration tests (GoogleTest)",
+      "dependencies": [
+        "gtest"
+      ]
+    },
+    "bench": {
+      "description": "Microbenchmarks (Google Benchmark)",
+      "dependencies": [
+        "benchmark"
+      ]
+    }
+  }
+}

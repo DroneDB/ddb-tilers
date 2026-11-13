@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The vcpkg commit is the builtin-registry baseline of vcpkg-configuration.json: the tool and
+  # the port versions both come from it.
+  VCPKG_COMMIT: 65514b43a035548911e1789071785a9827470cdc
+  VCPKG_DISABLE_METRICS: 1
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC)
+            os: ubuntu-24.04
+            preset: linux-gcc-release
+          - name: Windows (MSVC)
+            os: windows-2025
+            preset: windows-msvc-release
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # NASM: the libjpeg-turbo overlay port refuses to build without its SIMD code.
+          sudo apt-get install -y --no-install-recommends ninja-build nasm
+
+      - name: Set up the MSVC environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Set up CMake and Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Check out and bootstrap vcpkg
+        shell: bash
+        run: |
+          root="${RUNNER_TEMP//\\//}/vcpkg"
+          git init -q "$root"
+          git -C "$root" remote add origin https://github.com/microsoft/vcpkg.git
+          git -C "$root" fetch -q --depth 1 origin "$VCPKG_COMMIT"
+          git -C "$root" checkout -q FETCH_HEAD
+          if [ "$RUNNER_OS" = Windows ]; then
+            "$root/bootstrap-vcpkg.bat" -disableMetrics
+          else
+            "$root/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
+
+      - name: Compute the vcpkg binary cache key
+        id: vcpkg-key
+        shell: bash
+        run: |
+          dir="${RUNNER_TEMP//\\//}/vcpkg-bincache"
+          mkdir -p "$dir"
+          echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          echo "key=vcpkg-${{ matrix.preset }}-${VCPKG_COMMIT}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'triplets/**', 'ports/**') }}" >> "$GITHUB_OUTPUT"
+          echo "prefix=vcpkg-${{ matrix.preset }}-" >> "$GITHUB_OUTPUT"
+          echo "VCPKG_BINARY_SOURCES=clear;files,$dir,readwrite" >> "$GITHUB_ENV"
+
+      - name: Restore the vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vcpkg-key.outputs.dir }}
+          key: ${{ steps.vcpkg-key.outputs.key }}
+          # A partial match still helps: vcpkg builds only the ports it does not find.
+          restore-keys: ${{ steps.vcpkg-key.outputs.prefix }}
+
+      # Configure, build and test run in the runner's default shell: on Windows, Git Bash's own
+      # link.exe can shadow MSVC's.
+      - name: Configure (installs the vcpkg dependencies)
+        id: configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Save the vcpkg binary cache
+        # Right after the install, so a later build or test failure keeps the built ports.
+        if: always() && steps.configure.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg-key.outputs.dir }}
+          key: ${{ steps.vcpkg-key.outputs.key }}
+
+      - name: Save the ports built by a failed install
+        if: failure() && steps.configure.outcome == 'failure'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg-key.outputs.dir }}
+          key: ${{ steps.vcpkg-key.outputs.key }}-partial-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Print the vcpkg build logs
+        if: failure() && steps.configure.outcome == 'failure'
+        shell: bash
+        run: |
+          find "$VCPKG_ROOT/buildtrees" -name '*.log' -newer "$VCPKG_ROOT/.vcpkg-root" 2>/dev/null \
+            | while read -r f; do echo "::group::$f"; tail -n 80 "$f"; echo "::endgroup::"; done
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: CPU and dispatch information
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then exe=ddbt.exe; else exe=ddbt; fi
+          "build/${{ matrix.preset }}/bin/$exe" info --cpu
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }} --timeout 600

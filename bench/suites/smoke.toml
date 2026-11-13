@@ -1,0 +1,38 @@
+# ddb-tilers benchmark suite: smoke
+# Minutes-long check after every change: small rasters and point clouds, one of each path.
+#
+# Read by the harness (bench/harness). The corpus items (path, sha256, tile zoom range, probe) come from
+# the manifest written by scripts/corpus-manifest.py; this file only picks ids and the scenario matrix.
+# The matrix values are placeholders: the harness profiles (bench/harness/profiles.toml) narrow them.
+
+[suite]
+name = "smoke"
+description = "Minutes-long check after every change: small rasters and point clouds, one of each path."
+corpus_manifest = "/mnt/data/ddb-tilers-work/corpus/manifest.json"
+items = ["R1", "R3", "R4", "P1", "P2"]
+
+# Scenario matrix (placeholders): tile runs take the product of these axes; build runs ignore tile_sizes,
+# formats and cache and take "threads" as the build thread cap where the builder has one.
+[matrix]
+threads = [1, 4, 8, 16, 32]
+formats = ["png", "jpeg", "webp"]
+tile_sizes = [256, 512]
+cache = ["cold", "warm"]
+
+# Scenario families (placeholders): per-zoom sweeps, 1920 x 1080 pan walks, 512 px retina tiles, edge tiles.
+[scenarios]
+tile_requests = ["sweep-per-zoom", "pan-walk-1920x1080", "retina-512", "edge-tiles"]
+builds = ["cog", "copc-untwine", "copc-pdal"]
+
+# Baseline backend: official DroneDB 2.4.1 (a frozen snapshot of its binaries); the candidate is selected by the harness.
+[baseline]
+env_file = "/mnt/data/ddb-tilers-work/baseline/baseline.env"
+manifest = "/mnt/data/ddb-tilers-work/baseline/MANIFEST.json"
+forceRecreate = false
+fresh_ddb_home_per_scenario = true
+
+# Operations the baseline cannot serve for an item (the harness skips them)
+[item.R4]
+tile = false
+build = false
+note = "Not georeferenced (no CRS, no geotransform): DDBMemoryTileFmt fails with \"not a GeoImage\" and a COG build fails with \"no coordinate reference system\". Use it for reader, stretch and band tests, not for tile or build timings."

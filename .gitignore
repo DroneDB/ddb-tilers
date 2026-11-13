@@ -1,0 +1,7 @@
+/build/
+/refs/*
+/vcpkg_installed/
+/bench/results/
+*.swp
+__pycache__/
+.cache/

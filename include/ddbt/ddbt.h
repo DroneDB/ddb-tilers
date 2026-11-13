@@ -1,0 +1,154 @@
+/* ddb-tilers C API.
+ *
+ * Shaped after DroneDB's libddb exports (DDBMemoryTileFmt, DDBVSIFree, DDBBuild) so that the
+ * bench driver can load either backend through dlopen() and so that the later libddb
+ * integration is a thin shim.
+ *
+ * Error handling: every function returns a ddbtErr. The message of the last failed call on the
+ * calling thread is available through ddbtLastError() (never NULL, "" when the last call
+ * succeeded). Outputs are written only on DDBT_ERR_NONE; on any other code an output pointer
+ * is left untouched.
+ *
+ * SPDX-License-Identifier: MPL-2.0 */
+#ifndef DDBT_H
+#define DDBT_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#if defined(_WIN32)
+#if defined(DDBT_BUILDING_SHARED)
+#define DDBT_API __declspec(dllexport)
+#elif defined(DDBT_SHARED)
+#define DDBT_API __declspec(dllimport)
+#else
+#define DDBT_API
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define DDBT_API __attribute__((visibility("default")))
+#else
+#define DDBT_API
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/** Error codes. The values 0..9 that exist in libddb's DDBErr have the same value here, so a
+ * caller can treat the two enums alike; codes from 100 are specific to ddbt. */
+typedef enum ddbtErr
+{
+    DDBT_ERR_NONE = 0,             /* no error */
+    DDBT_ERR_EXCEPTION = 1,        /* generic failure (message in ddbtLastError) */
+    DDBT_ERR_CANCELED = 4,         /* canceled by the caller */
+    DDBT_ERR_NOTFOUND = 6,         /* the input does not exist */
+    DDBT_ERR_INVALIDARGS = 7,      /* an argument is invalid: fix the call, do not retry */
+    DDBT_ERR_NOT_IMPLEMENTED = 100 /* the feature is not implemented (yet) */
+} ddbtErr;
+
+/** Library version, "major.minor.patch": never NULL, static storage. */
+DDBT_API const char *ddbtVersion(void);
+
+/** Message of the last failed call on this thread: never NULL, "" when the last call
+ * succeeded. Owned by the library, valid until the next ddbt call on the same thread. The
+ * accessors ddbtVersion, ddbtLastError and ddbtFree do not touch it. */
+DDBT_API const char *ddbtLastError(void);
+
+/** Generate a tile in memory. Same arguments and semantics as DroneDB 2.4.1's DDBMemoryTileFmt.
+ * PNG tiles are written at zlib level 1, WebP tiles lossy at quality 80, JPEG at quality 75;
+ * tiles without transparent pixels have no alpha band.
+ * Inputs: a GeoTIFF / COG is tiled in place (directly when it is in EPSG:3857, else on the grid of
+ * the EPSG:3857 COG DroneDB would build for it); a COPC point cloud (a name ending in ".copc.laz")
+ * is tiled by the point-cloud tiler. Other rasters need a conversion to a COG first, which ddbt
+ * does not do yet: DDBT_ERR_NOT_IMPLEMENTED (so do remote URLs).
+ * Codes: DDBT_ERR_INVALIDARGS for a bad argument (no path, NULL outputs, negative coordinates or
+ * tile size, a tile size that is not a power of two, an unknown format), DDBT_ERR_NOTFOUND when
+ * the input does not exist, DDBT_ERR_EXCEPTION otherwise (libddb 2.4.1's DDBMemoryTileFmt, a 1.x
+ * export, folds the first two into DDBERR_EXCEPTION; the messages are the same).
+ * @param inputPath path of the input raster (GeoTIFF / COG)
+ * @param tz,tx,ty tile coordinates; ty is an XYZ row (north = 0) when tms is true, a TMS row
+ *        (south = 0) when tms is false: libddb 2.4.1's inverted flag, kept
+ * @param outBuffer receives the encoded tile; release it with ddbtFree
+ * @param outBufferSize receives the size in bytes of *outBuffer
+ * @param tileSize tile size in pixels (a power of two: 256 or 512 on the web)
+ * @param tms see ty
+ * @param forceRecreate bypass the encoded-tile cache
+ * @param inputPathHash optional hash of the resource (may be NULL; unused for local files)
+ * @param outputFormat "png", "jpeg"/"jpg" or "webp" (or their MIME types), NULL or "" for PNG
+ * @return DDBT_ERR_NONE on success, an error otherwise */
+DDBT_API ddbtErr ddbtMemoryTileFmt(const char *inputPath, int tz, int tx, int ty, uint8_t **outBuffer,
+                                   int *outBufferSize, int tileSize, bool tms, bool forceRecreate,
+                                   const char *inputPathHash, const char *outputFormat);
+
+/** Options of ddbtMemoryTileEx2: the same layout and rules as libddb's DDBRasterOptions. Set
+ * structSize to sizeof(ddbtRasterOptions) (at least offsetof(ddbtRasterOptions, formula)) and
+ * every other field explicitly; bytes beyond the known struct must be zero. */
+typedef struct ddbtRasterOptions
+{
+    uint32_t structSize; /* sizeof(ddbtRasterOptions) */
+    uint32_t flags;      /* DDBT_RASTER_OPT_* bits */
+    double nodata;       /* with DDBT_RASTER_OPT_NODATA: a finite NoData value replacing every band's */
+    double bbox[4];      /* with DDBT_RASTER_OPT_BBOX: checked (finite), not used by tiles */
+    const char *formula; /* not used by tiles (the formula is an argument) */
+    const char *rescaleUnit; /* with a thermal formula: the unit of rescale ("K", "C", "F", ...) */
+} ddbtRasterOptions;
+
+#define DDBT_RASTER_OPT_NODATA 0x1u
+#define DDBT_RASTER_OPT_BBOX 0x2u
+
+/** A tile with visualisation parameters: the arguments and semantics of DroneDB 2.4.1's
+ * DDBMemoryTileEx2 (always PNG). A tile out of the raster's bounds fails "Out of bounds" unless
+ * no parameter is set (then it is the plain, transparent tile). A colormap without a formula
+ * paints a raster of one data band, or one band chosen by bands / preset, over the rescale or
+ * the band's exact minimum to maximum. A formula is painted with its colormap (rdylgn by
+ * default) over the rescale, its own range, else the 2nd to 98th percentile of the tile.
+ * Codes: DDBT_ERR_INVALIDARGS for bad arguments and for a formula that does not exist or that
+ * the raster cannot compute ("Unknown formula: X", "Requires bands: RN"), DDBT_ERR_NOTFOUND,
+ * DDBT_ERR_NOT_IMPLEMENTED (as ddbtMemoryTileFmt), DDBT_ERR_EXCEPTION otherwise.
+ * @param preset, bands, formula, bandFilter, colormap, rescale as DDBMemoryTileEx2 (each may be NULL)
+ * @param options NULL, or the NoData override (and the unit of a thermal rescale)
+ * @param outBuffer, outBufferSize the PNG; release it with ddbtFree */
+DDBT_API ddbtErr ddbtMemoryTileEx2(const char *inputPath, int tz, int tx, int ty, int tileSize, bool tms,
+                                   bool forceRecreate, const char *inputPathHash, const char *preset,
+                                   const char *bands, const char *formula, const char *bandFilter,
+                                   const char *colormap, const char *rescale, const ddbtRasterOptions *options,
+                                   uint8_t **outBuffer, int *outBufferSize);
+
+/** ddbtMemoryTileEx2 in a chosen format: the arguments and semantics of libddb 2.5's DDBMemoryTileEx3. The
+ * visualisation tile is encoded once in outputFormat ("png", "jpeg"/"jpg" or "webp", or their MIME types;
+ * NULL or "" for PNG, the bytes of ddbtMemoryTileEx2), so a host that serves WebP does not decode a PNG to
+ * encode it again. An unsupported format is DDBT_ERR_INVALIDARGS, checked after the options. */
+DDBT_API ddbtErr ddbtMemoryTileEx3(const char *inputPath, int tz, int tx, int ty, int tileSize, bool tms,
+                                   bool forceRecreate, const char *inputPathHash, const char *preset,
+                                   const char *bands, const char *formula, const char *bandFilter,
+                                   const char *colormap, const char *rescale, const ddbtRasterOptions *options,
+                                   const char *outputFormat, uint8_t **outBuffer, int *outBufferSize);
+
+/** Release a buffer or string returned by ddbt (counterpart of DDBVSIFree and DDBFree).
+ * NULL is a no-op. */
+DDBT_API ddbtErr ddbtFree(void *ptr);
+
+/** Build a Cloud Optimized GeoTIFF.
+ * @param inputPath source raster
+ * @param outputPath destination file
+ * @param optionsJson JSON object with options, or NULL / "" for the defaults
+ * @return DDBT_ERR_NONE on success, an error otherwise */
+DDBT_API ddbtErr ddbtBuildCog(const char *inputPath, const char *outputPath, const char *optionsJson);
+
+/** Build a Cloud Optimized Point Cloud (COPC).
+ * @param inputPath source point cloud
+ * @param outputPath destination file
+ * @param optionsJson JSON object with options, or NULL / "" for the defaults
+ * @return DDBT_ERR_NONE on success, an error otherwise */
+DDBT_API ddbtErr ddbtBuildCopc(const char *inputPath, const char *outputPath, const char *optionsJson);
+
+/** Information about the build and the CPU dispatch, as a JSON object (Highway targets
+ * compiled in, supported by this CPU, and the one selected at runtime).
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree */
+DDBT_API ddbtErr ddbtCpuInfo(char **outJson);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* DDBT_H */

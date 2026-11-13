@@ -1,0 +1,168 @@
+{
+ "schema": "ddbt-noise/1",
+ "theta_min": 0.03,
+ "generated": "2026-11-11T11:34:04Z",
+ "source_run": "20261111T053416Z-de5d510-std-aa, 20261111T070226Z-dbcd20f-std-aa2, 20261111T034205Z-9670380-smoke-aa",
+ "rule": "theta = max(theta_min, 2 x aa_spread); aa_spread = 90th percentile over the A/A cases of max(CI upper - 1, 1 - CI lower)",
+ "metrics": {
+  "branch_misses": {
+   "aa_spread": 0.02821,
+   "max": 0.05367,
+   "cases": 110
+  },
+  "bytes": {
+   "aa_spread": 0.0,
+   "max": 0.0,
+   "cases": 104
+  },
+  "cache_misses": {
+   "aa_spread": 0.10171,
+   "max": 0.36221,
+   "cases": 110
+  },
+  "cpu_s": {
+   "aa_spread": 0.01146,
+   "max": 0.02627,
+   "cases": 6
+  },
+  "cpu_s_per_round": {
+   "aa_spread": 0.0756,
+   "max": 0.32802,
+   "cases": 104
+  },
+  "cycles": {
+   "aa_spread": 0.05419,
+   "max": 0.25809,
+   "cases": 110
+  },
+  "failures": {
+   "aa_spread": 0.0,
+   "max": 0.0,
+   "cases": 22
+  },
+  "hwm_kb": {
+   "aa_spread": 0.04708,
+   "max": 0.11394,
+   "cases": 104
+  },
+  "init_ms": {
+   "aa_spread": 0.18672,
+   "max": 0.52044,
+   "cases": 104
+  },
+  "instr_per_tile": {
+   "aa_spread": 0.01672,
+   "max": 0.03231,
+   "cases": 104
+  },
+  "instructions": {
+   "aa_spread": 0.0155,
+   "max": 0.03231,
+   "cases": 110
+  },
+  "max_ms": {
+   "aa_spread": 0.24268,
+   "max": 0.66272,
+   "cases": 104
+  },
+  "maxrss_kb": {
+   "aa_spread": 0.04036,
+   "max": 0.07566,
+   "cases": 6
+  },
+  "mean_ms": {
+   "aa_spread": 0.08126,
+   "max": 0.33471,
+   "cases": 104
+  },
+  "output_bytes": {
+   "aa_spread": 0.00051,
+   "max": 0.00176,
+   "cases": 6
+  },
+  "p50_ms": {
+   "aa_spread": 0.1605,
+   "max": 0.27802,
+   "cases": 104
+  },
+  "p50_ok_ms": {
+   "aa_spread": 0.13322,
+   "max": 0.27802,
+   "cases": 104
+  },
+  "p90_ms": {
+   "aa_spread": 0.09032,
+   "max": 0.31764,
+   "cases": 104
+  },
+  "p95_ms": {
+   "aa_spread": 0.10896,
+   "max": 0.31524,
+   "cases": 104
+  },
+  "p999_ms": {
+   "aa_spread": 0.23641,
+   "max": 0.65532,
+   "cases": 104
+  },
+  "p99_ms": {
+   "aa_spread": 0.1691,
+   "max": 0.48823,
+   "cases": 104
+  },
+  "p99_ok_ms": {
+   "aa_spread": 0.18465,
+   "max": 0.48823,
+   "cases": 104
+  },
+  "read_bytes": {
+   "aa_spread": 0.0,
+   "max": 0.0,
+   "cases": 6
+  },
+  "rss_peak_kb": {
+   "aa_spread": 0.04681,
+   "max": 0.11408,
+   "cases": 104
+  },
+  "sys_s": {
+   "aa_spread": 0.2263,
+   "max": 0.23556,
+   "cases": 6
+  },
+  "tiles_per_s": {
+   "aa_spread": 0.07876,
+   "max": 0.50267,
+   "cases": 104
+  },
+  "tree_pss_peak_kb": {
+   "aa_spread": 0.03999,
+   "max": 0.05559,
+   "cases": 6
+  },
+  "tree_rss_peak_kb": {
+   "aa_spread": 0.03624,
+   "max": 0.04826,
+   "cases": 6
+  },
+  "user_s": {
+   "aa_spread": 0.02519,
+   "max": 0.04295,
+   "cases": 6
+  },
+  "wall_s": {
+   "aa_spread": 0.03458,
+   "max": 0.09801,
+   "cases": 6
+  },
+  "write_bytes": {
+   "aa_spread": 5e-05,
+   "max": 0.00178,
+   "cases": 6
+  },
+  "default": {
+   "aa_spread": 0.04708,
+   "note": "median of the metric spreads, for metrics not listed"
+  }
+ }
+}

@@ -1,0 +1,173 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "description": "Ninja + vcpkg manifest (static, overlay triplets). The vcpkg checkout comes from VCPKG_ROOT, else /mnt/data/repos/DroneDB/vcpkg (Linux) or C:/repos/DroneDB/vcpkg (Windows): see cmake/ddbt-vcpkg-toolchain.cmake.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "toolchainFile": "${sourceDir}/cmake/ddbt-vcpkg-toolchain.cmake",
+      "cacheVariables": {
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+        "VCPKG_OVERLAY_PORTS": "${sourceDir}/ports",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/build/${presetName}/vcpkg_installed",
+        "VCPKG_INSTALL_OPTIONS": "--no-print-usage",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-linux-ddbt",
+        "VCPKG_HOST_TRIPLET": "x64-linux-ddbt"
+      }
+    },
+    {
+      "name": "linux-gcc-release",
+      "displayName": "Linux GCC Release (x86-64-v3, LTO)",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "DDBT_BUILD_BENCH": "ON"
+      }
+    },
+    {
+      "name": "linux-gcc-relwithdebinfo",
+      "displayName": "Linux GCC RelWithDebInfo (frame pointers, for perf)",
+      "inherits": "linux-gcc-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo"
+      }
+    },
+    {
+      "name": "linux-gcc13-release",
+      "displayName": "Linux GCC 13 Release",
+      "inherits": "linux-gcc-release",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc-13",
+        "CMAKE_CXX_COMPILER": "g++-13",
+        "VCPKG_TARGET_TRIPLET": "x64-linux-ddbt-gcc13"
+      }
+    },
+    {
+      "name": "linux-asan-ubsan",
+      "displayName": "Linux GCC AddressSanitizer + UBSan",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "DDBT_SANITIZE": "asan-ubsan",
+        "DDBT_BUILD_BENCH": "OFF"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "displayName": "Linux GCC ThreadSanitizer",
+      "inherits": "linux-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++",
+        "DDBT_SANITIZE": "tsan",
+        "DDBT_BUILD_BENCH": "OFF"
+      }
+    },
+    {
+      "name": "linux-pgo-gen",
+      "displayName": "Linux GCC Release, instrumented for PGO",
+      "inherits": "linux-gcc-release",
+      "cacheVariables": {
+        "DDBT_PGO": "GEN"
+      }
+    },
+    {
+      "name": "linux-pgo-use",
+      "displayName": "Linux GCC Release, optimized with the PGO profiles",
+      "inherits": "linux-gcc-release",
+      "cacheVariables": {
+        "DDBT_PGO": "USE"
+      }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" },
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-ddbt",
+        "VCPKG_HOST_TRIPLET": "x64-windows-ddbt",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "displayName": "Windows MSVC Release (AVX2, LTCG)",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DDBT_BUILD_BENCH": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-asan",
+      "displayName": "Windows MSVC AddressSanitizer",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "DDBT_SANITIZE": "asan-ubsan",
+        "DDBT_BUILD_BENCH": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-gcc-release", "configurePreset": "linux-gcc-release" },
+    { "name": "linux-gcc-relwithdebinfo", "configurePreset": "linux-gcc-relwithdebinfo" },
+    { "name": "linux-gcc13-release", "configurePreset": "linux-gcc13-release" },
+    { "name": "linux-asan-ubsan", "configurePreset": "linux-asan-ubsan" },
+    { "name": "linux-tsan", "configurePreset": "linux-tsan" },
+    { "name": "linux-pgo-gen", "configurePreset": "linux-pgo-gen" },
+    { "name": "linux-pgo-use", "configurePreset": "linux-pgo-use" },
+    { "name": "windows-msvc-release", "configurePreset": "windows-msvc-release" },
+    { "name": "windows-msvc-asan", "configurePreset": "windows-msvc-asan" }
+  ],
+  "testPresets": [
+    {
+      "name": "test-base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "jobs": 8 }
+    },
+    { "name": "linux-gcc-release", "inherits": "test-base", "configurePreset": "linux-gcc-release" },
+    { "name": "linux-gcc-relwithdebinfo", "inherits": "test-base", "configurePreset": "linux-gcc-relwithdebinfo" },
+    { "name": "linux-gcc13-release", "inherits": "test-base", "configurePreset": "linux-gcc13-release" },
+    {
+      "name": "linux-asan-ubsan",
+      "inherits": "test-base",
+      "configurePreset": "linux-asan-ubsan",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1:strict_string_checks=1:detect_stack_use_after_return=1",
+        "UBSAN_OPTIONS": "print_stacktrace=1:halt_on_error=1"
+      }
+    },
+    {
+      "name": "linux-tsan",
+      "inherits": "test-base",
+      "configurePreset": "linux-tsan",
+      "environment": { "TSAN_OPTIONS": "halt_on_error=1:second_deadlock_stack=1" }
+    },
+    { "name": "linux-pgo-gen", "inherits": "test-base", "configurePreset": "linux-pgo-gen" },
+    { "name": "linux-pgo-use", "inherits": "test-base", "configurePreset": "linux-pgo-use" },
+    { "name": "windows-msvc-release", "inherits": "test-base", "configurePreset": "windows-msvc-release", "configuration": "Release" },
+    { "name": "windows-msvc-asan", "inherits": "test-base", "configurePreset": "windows-msvc-asan", "configuration": "RelWithDebInfo" }
+  ]
+}

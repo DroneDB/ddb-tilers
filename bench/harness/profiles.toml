@@ -1,0 +1,265 @@
+# SPDX-License-Identifier: MPL-2.0
+# Harness narrowing of the suite matrices (bench/suites/*.toml list items and the full axes; the
+# product of every axis is far too long for a smoke run). For each suite name, a table with:
+#   reps, warmup_rounds, rounds       repetitions per case and rounds per tile invocation
+#   sweep_cap, pan_min_requests, pan_steps, seed
+#   [<suite>.tile.<scenario>]         threads / formats / cache for that scenario family; each list
+#                                     is intersected with the suite [matrix] (a missing key = the
+#                                     suite axis). Scenarios: sweep, pan, retina, edge.
+#   [<suite>.build]                   threads, reps (builds are always measured with a cold cache)
+# Unknown suites use [default]. Command-line options of run.py override everything.
+
+[default]
+reps = 5
+warmup_rounds = 1
+rounds = 3
+sweep_cap = 256
+pan_min_requests = 2000
+pan_steps = 200
+seed = 1
+
+[default.tile.sweep]
+threads = [1, 8, 16, 32]
+formats = ["png", "jpeg", "webp"]
+cache = ["warm", "cold"]
+
+[default.tile.pan]
+threads = [1, 4, 8, 16, 32]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[default.tile.retina]
+threads = [8, 32]
+formats = ["webp"]
+cache = ["warm"]
+
+[default.tile.edge]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[default.build]
+threads = [1, 8, 16, 32]
+reps = 3
+
+# ~5 minutes on the 9950X: one thread count per family, small sets.
+[smoke]
+reps = 3
+warmup_rounds = 1
+rounds = 2
+sweep_cap = 24
+pan_min_requests = 300
+pan_steps = 60
+seed = 1
+
+[smoke.tile.sweep]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[smoke.tile.pan]
+threads = [8]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[smoke.tile.retina]
+threads = [8]
+formats = ["webp"]
+cache = ["warm"]
+
+[smoke.tile.edge]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[smoke.build]
+threads = [8]
+reps = 2
+
+[std]
+reps = 5
+sweep_cap = 128
+
+[std.tile.sweep]
+threads = [1, 8, 32]
+formats = ["png", "jpeg", "webp"]
+cache = ["warm", "cold"]
+
+[std.tile.pan]
+threads = [1, 4, 8, 16, 32]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[std.tile.retina]
+threads = [8, 32]
+formats = ["webp"]
+cache = ["warm"]
+
+[std.tile.edge]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[std.build]
+threads = [1, 8, 16, 32]
+reps = 3
+
+# --- Baseline on CCD0 only (run.py --profile aa|baseline --gate-cpus 0-7,16-23); 16T/32T are deferred.
+# A/A noise study: std items, 1T and 8T, cold and warm, png/webp at 256 and webp at 512.
+[aa]
+reps = 5
+warmup_rounds = 1
+rounds = 2
+sweep_cap = 128
+pan_min_requests = 1000
+pan_steps = 100
+seed = 1
+
+[aa.tile.sweep]
+threads = [1, 8]
+formats = ["png", "webp"]
+cache = ["warm", "cold"]
+
+[aa.tile.pan]
+threads = [1, 8]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[aa.tile.retina]
+threads = [8]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[aa.tile.edge]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[aa.build]
+threads = [8]
+reps = 3
+
+# Baseline tile scenarios of the std tier: threads 1/4/8, every format, cold and warm.
+[baseline]
+reps = 5
+warmup_rounds = 1
+rounds = 2
+sweep_cap = 128
+pan_min_requests = 1000
+pan_steps = 100
+seed = 1
+
+[baseline.tile.sweep]
+threads = [1, 4, 8]
+formats = ["png", "jpeg", "webp"]
+cache = ["warm", "cold"]
+
+[baseline.tile.pan]
+threads = [1, 4, 8]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[baseline.tile.retina]
+threads = [1, 8]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[baseline.tile.edge]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[baseline.build]
+threads = [8]
+reps = 3
+
+# P3 and P4 (COPC with ~200 ms tiles at 1T): fewer requests and repetitions, same scenarios at 1T and 8T.
+[baseline-heavy]
+reps = 3
+warmup_rounds = 1
+rounds = 1
+sweep_cap = 16
+pan_min_requests = 300
+pan_steps = 60
+seed = 1
+
+[baseline-heavy.tile.sweep]
+threads = [1, 8]
+formats = ["png", "webp"]
+cache = ["warm", "cold"]
+
+[baseline-heavy.tile.pan]
+threads = [8]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[baseline-heavy.tile.retina]
+threads = [8]
+formats = ["webp"]
+cache = ["warm"]
+
+[baseline-heavy.tile.edge]
+threads = []
+
+# A/B up to 16 threads on CCD0 (run.py --profile ab16 --pin-set 16T=16Tsmt --gate-cpus 0-7,16-23): the baseline
+# scenarios plus 16 threads (both SMT threads of the 8 CCD0 cores) for sweep, pan and retina; builds at 8 and 16.
+[ab16]
+reps = 5
+warmup_rounds = 1
+rounds = 2
+sweep_cap = 128
+pan_min_requests = 1000
+pan_steps = 100
+seed = 1
+
+[ab16.tile.sweep]
+threads = [1, 4, 8, 16]
+formats = ["png", "jpeg", "webp"]
+cache = ["warm", "cold"]
+
+[ab16.tile.pan]
+threads = [1, 4, 8, 16]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[ab16.tile.retina]
+threads = [1, 8, 16]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[ab16.tile.edge]
+threads = [1]
+formats = ["png"]
+cache = ["warm"]
+
+[ab16.build]
+threads = [8, 16]
+reps = 3
+
+# P3 and P4 with the heavy-profile request counts, at 1, 8 and 16 threads.
+[ab16-heavy]
+reps = 3
+warmup_rounds = 1
+rounds = 1
+sweep_cap = 16
+pan_min_requests = 300
+pan_steps = 60
+seed = 1
+
+[ab16-heavy.tile.sweep]
+threads = [1, 8, 16]
+formats = ["png", "webp"]
+cache = ["warm", "cold"]
+
+[ab16-heavy.tile.pan]
+threads = [8, 16]
+formats = ["webp"]
+cache = ["warm", "cold"]
+
+[ab16-heavy.tile.retina]
+threads = [8, 16]
+formats = ["webp"]
+cache = ["warm"]
+
+[ab16-heavy.tile.edge]
+threads = []

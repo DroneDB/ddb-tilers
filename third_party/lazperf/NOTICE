@@ -1,0 +1,20 @@
+laz-perf (in-tree fork for ddb-tilers)
+=====================================
+
+This directory contains a modified copy of laz-perf 3.4.0
+(https://github.com/hobu/laz-perf, commit 2b68700d33bf981d257d6101d96714620c64019c),
+distributed under the Apache License, Version 2.0 (see LICENSE).
+
+Copyright holders named in the upstream sources:
+  (c) 2007-2014, Martin Isenburg, rapidlasso - tools to catch reality (LASzip algorithms)
+  (c) 2014, Uday Verma, Hobu, Inc.
+  Copyright (c) 2014, 2022, Hobu Inc. (files carrying a BSD-style notice: charbuf, Extractor,
+    Inserter, lazperf.cpp)
+  Copyright (c) 2019 by Amir Said and William A. Pearlman (arithmetic coder in decoder.hpp and
+    encoder.hpp, BSD-style notice)
+  (c) Mathias Panzenboeck (portable_endian.hpp)
+
+Each file keeps its original notice. Files changed by ddb-tilers are listed in FORK.md, and
+every changed region is marked with a "ddbt fork" comment, as section 4(b) of the Apache
+License requires. New files added by ddb-tilers are licensed under the Apache License 2.0 as
+well, so the fork stays under a single license.

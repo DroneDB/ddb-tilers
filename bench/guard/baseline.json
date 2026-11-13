@@ -1,0 +1,11 @@
+{
+ "schema": "ddbt-guard/1",
+ "note": "Reference values of scripts/bench-guard.sh, per backend (kind:library file name). Fill or refresh with: scripts/bench-guard.sh --update [--mode timed|cachegrind|both] [--backend SPEC]. Thresholds are ratios current/reference.",
+ "thresholds": {
+  "time_ratio_max": 1.1,
+  "rss_ratio_max": 1.1,
+  "instr_ratio_max": 1.01,
+  "hash_must_match": true
+ },
+ "references": {}
+}
