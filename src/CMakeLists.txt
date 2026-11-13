@@ -37,6 +37,8 @@ if(MSVC)
   add_library(ddbt STATIC ${DDBT_SOURCES})
   ddbt_configure_core(ddbt)
   target_compile_definitions(ddbt PUBLIC DDBT_STATIC)
+  # ddbt.dll's import library is ddbt.lib: the static library needs another name.
+  set_target_properties(ddbt PROPERTIES OUTPUT_NAME ddbt_static)
   if(DDBT_BUILD_SHARED)
     add_library(ddbt_shared SHARED ${DDBT_SOURCES})
     ddbt_configure_core(ddbt_shared)

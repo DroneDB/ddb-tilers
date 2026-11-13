@@ -113,7 +113,8 @@ Presets (`CMakePresets.json`):
 | `linux-asan-ubsan`, `linux-tsan`, `windows-msvc-asan` | Sanitizers |
 | `linux-pgo-gen`, `linux-pgo-use` | Profile-guided optimisation |
 
-The build produces `libddbt.a`, the shared library `libddbt.so` / `ddbt.dll` (C API only), the
+The build produces the static library `libddbt.a` / `ddbt_static.lib`, the shared library `libddbt.so` /
+`ddbt.dll` (C API only), the
 `ddbt` command line tool and the test binaries.
 
 ## Use
