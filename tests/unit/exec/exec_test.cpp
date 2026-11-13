@@ -652,16 +652,23 @@ TEST(ParallelFor, BulkHelpersYieldToInteractiveRequests) {
         constexpr size_t kChunks = 3000;
         std::vector<std::atomic<int>> hits(kChunks);
         std::atomic<size_t> chunksDone{0};
+        std::atomic<bool> started{false};
         std::thread build([&] {
             ParallelFor(pool, 0, kChunks, 1, [&](size_t i) {
                 const auto end = std::chrono::steady_clock::now() + 50us;
                 while (std::chrono::steady_clock::now() < end) {
                 }
                 hits[i].fetch_add(1, std::memory_order_relaxed);
-                chunksDone.fetch_add(1, std::memory_order_relaxed);
+                if (chunksDone.fetch_add(1, std::memory_order_relaxed) + 1 == 50) {
+                    started = true;
+                    started.notify_one();
+                }
             });
         });
-        while (chunksDone.load() < 50) std::this_thread::yield();
+        // A blocking wait, not a yield loop: on Windows std::this_thread::yield (SwitchToThread)
+        // hands the rest of the quantum to any thread ready on the CPU, a busy worker included,
+        // so the request would be submitted only once the range is nearly done.
+        started.wait(false);
         std::atomic<size_t> doneWhenServed{0};
         std::atomic<bool> served{false};
         pool.Submit(
