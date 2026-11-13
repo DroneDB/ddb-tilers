@@ -17,8 +17,12 @@ option(DDBT_BUILD_BENCH "Build bench/ (vcpkg feature: bench)" OFF)
 option(DDBT_BUILD_SHARED "Also build libddbt.so / ddbt.dll (ddbt_shared)" ${_ddbt_top})
 option(DDBT_LTO "Link time optimization for our code (Release-like configs, no sanitizer)" ${_ddbt_top})
 option(DDBT_WERROR "Treat warnings in our code as errors" OFF)
-set(DDBT_ISA_BASELINE "x86-64-v3" CACHE STRING "Baseline ISA of our code: x86-64-v2, x86-64-v3 or native (Highway dispatches above it)")
-set_property(CACHE DDBT_ISA_BASELINE PROPERTY STRINGS x86-64-v2 x86-64-v3 native)
+# The baseline is the least CPU the library runs on. Its SIMD kernels (Highway) and the other
+# hand-written fast paths (CRC-32C, fpnge) are compiled for SSE4, AVX2, AVX-512 and Zen 4 as well
+# and chosen at run time for the CPU, so plain x86-64 loses only the compiler's own use of newer
+# instructions in the rest of the code.
+set(DDBT_ISA_BASELINE "x86-64" CACHE STRING "Baseline ISA of our code: x86-64, x86-64-v2, x86-64-v3 or native (Highway dispatches above it)")
+set_property(CACHE DDBT_ISA_BASELINE PROPERTY STRINGS x86-64 x86-64-v2 x86-64-v3 native)
 set(DDBT_PGO "OFF" CACHE STRING "Profile guided optimization: OFF, GEN (instrumented) or USE")
 set_property(CACHE DDBT_PGO PROPERTY STRINGS OFF GEN USE)
 set(DDBT_PGO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/pgo-profiles" CACHE PATH "Where PGO profiles are written (GEN) and read (USE)")

@@ -13,7 +13,8 @@ using PngRowFilter = kernels::PngRowFilter;
 enum class PngEngine : uint8_t {
     kDefault,  ///< the process default: $DDBT_PNG_ENGINE (fpnge or deflate), else kDeflate
     kDeflate,  ///< our filters (PngOptions::filter) + libdeflate at PngOptions::level
-    kFpnge,    ///< fpnge (third_party/fpnge): SIMD filters + Huffman / RLE, at fpngeLevel
+    kFpnge,    ///< fpnge (third_party/fpnge): SIMD filters + Huffman / RLE, at fpngeLevel; its AVX2
+               ///< or SSE 4.1 build as the CPU allows, libdeflate on a CPU without SSE 4.1 + CLMUL
 };
 
 /// The engine kDefault stands for in this process.

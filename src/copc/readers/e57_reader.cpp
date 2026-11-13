@@ -13,7 +13,10 @@
 #include "core/util/checked_math.h"
 #include "core/util/endian.h"
 
-#if defined(__SSE4_2__)
+#include "core/simd/simd.h"
+#include "core/simd/target_attr.h"
+
+#if DDBT_X86_64
 #include <nmmintrin.h>
 #endif
 
@@ -32,20 +35,31 @@ struct Crc32cTable {
         }
     }
 };
-}  // namespace
 
-uint32_t Crc32c(const uint8_t* p, size_t n) noexcept {
-    uint32_t crc = 0xFFFFFFFFu;
-#if defined(__SSE4_2__) && defined(__x86_64__)
+#if DDBT_X86_64
+// The SSE 4.2 CRC32 instruction computes CRC-32C (the Castagnoli polynomial) 8 bytes at a time.
+DDBT_TARGET("sse4.2") uint32_t Crc32cSse42(uint32_t crc, const uint8_t* p, size_t n) noexcept {
     uint64_t c = crc;
     for (; n >= 8; n -= 8, p += 8) c = _mm_crc32_u64(c, LoadLE<uint64_t>(p));
     crc = static_cast<uint32_t>(c);
     for (; n > 0; --n, ++p) crc = _mm_crc32_u8(crc, *p);
-#else
+    return crc;
+}
+#endif
+
+uint32_t Crc32cPortable(uint32_t crc, const uint8_t* p, size_t n) noexcept {
     static const Crc32cTable table;
     for (; n > 0; --n, ++p) crc = table.t[(crc ^ *p) & 0xFFu] ^ (crc >> 8);
+    return crc;
+}
+}  // namespace
+
+uint32_t Crc32c(const uint8_t* p, size_t n) noexcept {
+    uint32_t crc = 0xFFFFFFFFu;
+#if DDBT_X86_64
+    if (simd::HasSse4()) return Crc32cSse42(crc, p, n) ^ 0xFFFFFFFFu;
 #endif
-    return crc ^ 0xFFFFFFFFu;
+    return Crc32cPortable(crc, p, n) ^ 0xFFFFFFFFu;
 }
 
 // ------------------------------------------------------------------ XML

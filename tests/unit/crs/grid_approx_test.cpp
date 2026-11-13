@@ -202,7 +202,8 @@ TEST(GridApprox, SimdMatchesTheScalarCodeOnEveryTarget) {
 
 TEST(GridApprox, SharedCellKernelInterpolatesWholeGroups) {
     // One accepted cell: every full SIMD group is interpolated by the kernel (fused multiply-adds,
-    // as the scalar code); only the tail is left. An exact cell and a refined cell are left whole.
+    // as the scalar code); only the tail is left. An exact cell and a refined cell are left whole,
+    // and so is every point on a target without a native FMA.
     GridApprox::Node nodes[3];
     const double cx[4] = {1000.25, 1100.5, 990.125, 1105.75}, cy[4] = {-50.5, -48.25, 40.125, 45.0};
     for (int k = 0; k < 4; ++k) {
@@ -236,7 +237,7 @@ TEST(GridApprox, SharedCellKernelInterpolatesWholeGroups) {
             const size_t r = kernels::InterpolateSharedCells(grid, x.data(), y.data(), n, rest.data());
             std::vector<bool> left(n, false);
             for (size_t k = 0; k < r; ++k) left[rest[k]] = true;
-            if (which != 0) {
+            if (which != 0 || !kernels::SharedCellKernelInterpolates()) {
                 EXPECT_EQ(r, n) << simd::TargetNameOf(bit);
                 continue;
             }

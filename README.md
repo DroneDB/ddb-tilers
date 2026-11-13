@@ -90,8 +90,11 @@ Requirements:
   baseline in `vcpkg-configuration.json`. All dependencies are static and release-only.
 - NASM on Linux (`apt install nasm`): the libjpeg-turbo overlay port in `ports/` refuses to build
   without its SIMD code. On Windows vcpkg downloads NASM.
-- A CPU with AVX2 (x86-64-v3) for the default build. Highway selects AVX-512 kernels at run
-  time when the CPU has them. `-DDDBT_ISA_BASELINE=x86-64-v2` builds for older CPUs.
+- Any x86-64 CPU. The SIMD code (Highway kernels, the fpnge PNG encoder, CRC-32C) is compiled
+  for SSE2, SSSE3, SSE4, AVX2, AVX-512 and Zen 4 and the best variant the CPU runs is chosen at
+  start-up; the rest of the code is compiled for plain x86-64 (`DDBT_ISA_BASELINE`: `x86-64-v2`,
+  `x86-64-v3` or `native` raise it). `scripts/check-baseline-isa.py` checks a build for
+  instructions above the baseline outside that dispatched code.
 
 ```sh
 export VCPKG_ROOT=/path/to/vcpkg
@@ -107,7 +110,7 @@ Presets (`CMakePresets.json`):
 
 | Preset | Use |
 |---|---|
-| `linux-gcc-release`, `windows-msvc-release` | Release, LTO, x86-64-v3, benchmarks included |
+| `linux-gcc-release`, `windows-msvc-release` | Release, LTO, x86-64 baseline with run-time SIMD dispatch, benchmarks included |
 | `linux-gcc-relwithdebinfo` | Release with frame pointers and debug information (profiling) |
 | `linux-gcc13-release` | Release with GCC 13 |
 | `linux-asan-ubsan`, `linux-tsan`, `windows-msvc-asan` | Sanitizers |

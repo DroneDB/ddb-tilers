@@ -90,6 +90,21 @@ std::string TargetNameOf(int64_t targetBit) { return hwy::TargetName(targetBit);
 
 void ForceTargetForTest(int64_t targetBit) { hwy::SetSupportedTargetsForTest(targetBit); }
 
+namespace {
+#if HWY_ARCH_X86
+// Every x86 target at least as capable as AVX2, then as SSE4 (a CPU, or a forced target, that runs
+// one of them has the instructions of the lesser one).
+constexpr int64_t kAvx2OrBetter = HWY_AVX2 | HWY_AVX3 | HWY_AVX3_DL | HWY_AVX3_ZEN4 | HWY_AVX3_SPR | HWY_AVX10_2;
+constexpr int64_t kSse4OrBetter = HWY_SSE4 | kAvx2OrBetter;
+#else
+constexpr int64_t kAvx2OrBetter = 0;
+constexpr int64_t kSse4OrBetter = 0;
+#endif
+}  // namespace
+
+bool HasSse4() noexcept { return (hwy::SupportedTargets() & kSse4OrBetter) != 0; }
+bool HasAvx2() noexcept { return (hwy::SupportedTargets() & kAvx2OrBetter) != 0; }
+
 }  // namespace ddbt::simd
 
 #endif  // HWY_ONCE

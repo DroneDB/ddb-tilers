@@ -120,6 +120,14 @@ jobs:
         # -k 0: report every compile error of the run, not only the first one.
         run: cmake --build --preset ${{ matrix.preset }} -- -k 0
 
+      - name: Check that the build runs on any x86-64 CPU
+        # Instructions above x86-64 only in code chosen at run time for the CPU (Highway kernels,
+        # the fpnge variants, the CRC-32C instruction, the libraries' own dispatch).
+        if: runner.os == 'Linux'
+        run: |
+          python3 -I scripts/check-baseline-isa.py "build/${{ matrix.preset }}/lib/libddbt.so"
+          python3 -I scripts/check-baseline-isa.py "build/${{ matrix.preset }}/bin/ddbt"
+
       - name: CPU and dispatch information
         shell: bash
         run: |

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "core/encode/png_encoder.h"
 
-#include <fpnge.h>
+#include <variants/fpnge_variants.h>
 #include <libdeflate.h>
 
 #include <array>
@@ -15,6 +15,7 @@
 #include <string>
 
 #include "core/encode/kernels.h"
+#include "core/simd/simd.h"
 
 namespace ddbt::encode {
 
@@ -110,7 +111,8 @@ void EncodeFpnge(const TileImage& image, uint32_t dstChannels, int level, ByteBu
     FPNGEFillOptions(&o, level, FPNGE_CICP_NONE);
     out.clear();
     out.resize(FPNGEOutputAllocSize(1, dstChannels, image.width, image.height));
-    const size_t n = FPNGEEncode(1, dstChannels, pixels, image.width, stride, image.height, out.data(), &o);
+    const auto encode = simd::HasAvx2() ? &ddbt_fpnge_encode_avx2 : &ddbt_fpnge_encode_sse4;
+    const size_t n = encode(1, dstChannels, pixels, image.width, stride, image.height, out.data(), &o);
     if (n == 0) throw std::runtime_error("PNG: fpnge failed");
     out.resize(n);
 }
@@ -158,7 +160,8 @@ void EncodePng(const TileImage& input, const PngOptions& options, ByteBuffer& ou
     }
 
     const PngEngine engine = options.engine == PngEngine::kDefault ? DefaultPngEngine() : options.engine;
-    if (engine == PngEngine::kFpnge && !image.IsPalette()) {
+    // fpnge needs at least SSE 4.1 and CLMUL: an older CPU encodes with libdeflate (same pixels).
+    if (engine == PngEngine::kFpnge && !image.IsPalette() && simd::HasSse4()) {
         EncodeFpnge(image, dstChannels, options.fpngeLevel, out);
         return;
     }

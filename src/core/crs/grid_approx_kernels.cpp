@@ -74,6 +74,8 @@ void InterpolateSharedCellsImpl(const CellGrid& g, double* HWY_RESTRICT xs, doub
     *restCount = k;
 }
 
+bool KernelInterpolatesImpl() { return HWY_NATIVE_FMA != 0; }
+
 }  // namespace HWY_NAMESPACE
 }  // namespace ddbt::crs::kernels
 HWY_AFTER_NAMESPACE();
@@ -82,6 +84,9 @@ HWY_AFTER_NAMESPACE();
 namespace ddbt::crs::kernels {
 
 HWY_EXPORT(InterpolateSharedCellsImpl);
+HWY_EXPORT(KernelInterpolatesImpl);
+
+bool SharedCellKernelInterpolates() { return HWY_DYNAMIC_DISPATCH(KernelInterpolatesImpl)(); }
 
 size_t InterpolateSharedCells(const CellGrid& g, double* xs, double* ys, size_t n, uint32_t* rest) {
     size_t count = 0;

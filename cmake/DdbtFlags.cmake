@@ -13,8 +13,8 @@ if("${DDBT_SANITIZE}" STREQUAL "")
 endif()
 
 # ---- ISA baseline ----------------------------------------------------------------------
-if(NOT DDBT_ISA_BASELINE MATCHES "^(x86-64-v2|x86-64-v3|native)$")
-  message(FATAL_ERROR "DDBT_ISA_BASELINE must be x86-64-v2, x86-64-v3 or native (got '${DDBT_ISA_BASELINE}')")
+if(NOT DDBT_ISA_BASELINE MATCHES "^(x86-64|x86-64-v2|x86-64-v3|native)$")
+  message(FATAL_ERROR "DDBT_ISA_BASELINE must be x86-64, x86-64-v2, x86-64-v3 or native (got '${DDBT_ISA_BASELINE}')")
 endif()
 set(DDBT_ISA_BASELINE_NAME "${DDBT_ISA_BASELINE}")
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _proc)
@@ -68,9 +68,13 @@ else()
     -fvisibility=hidden $<$<COMPILE_LANGUAGE:CXX>:-fvisibility-inlines-hidden>
     -fno-math-errno)           # no -ffast-math: results must stay reproducible
   if(_is_x86)
-    # x86-64-v2/v3 do not include PCLMUL and AES, which Highway requires before it treats
-    # SSE4 / AVX2 as the static baseline (every CPU with SSE4.2 or AVX2 has them).
-    target_compile_options(ddbt_flags INTERFACE -march=${DDBT_ISA_BASELINE} -mpclmul -maes -mtune=generic)
+    if(DDBT_ISA_BASELINE STREQUAL "x86-64")
+      target_compile_options(ddbt_flags INTERFACE -march=x86-64 -mtune=generic)
+    else()
+      # x86-64-v2/v3 do not include PCLMUL and AES, which Highway requires before it treats
+      # SSE4 / AVX2 as the static baseline (every CPU with SSE4.2 or AVX2 has them).
+      target_compile_options(ddbt_flags INTERFACE -march=${DDBT_ISA_BASELINE} -mpclmul -maes -mtune=generic)
+    endif()
   endif()
   if(NOT _sanitize)
     target_compile_options(ddbt_flags INTERFACE

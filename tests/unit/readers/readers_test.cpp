@@ -22,6 +22,7 @@
 #include "copc/readers/e57_reader.h"
 #include "copc/readers/las_reader.h"
 #include "copc/readers/point_reader.h"
+#include "core/simd/simd.h"
 #include "core/util/endian.h"
 
 namespace ddbt::copc::readers {
@@ -260,6 +261,31 @@ TEST(CopcReaders, PtsCountsScansAndIntensity) {
     EXPECT_EQ(U16(rb, s7, 0, rec::kRgb), 10 * 257);
     EXPECT_EQ(X(rb, s7, 2, 2), 9000);
     fs::remove_all(dir);
+}
+
+// CRC-32C on every target the CPU runs (the SSE 4.2 instruction from SSE4 on, the table below):
+// the bitwise definition, for every length up to 70 and every alignment of the start.
+TEST(CopcReaders, Crc32cOnEveryTarget) {
+    const auto reference = [](const uint8_t* p, size_t n) {
+        uint32_t crc = 0xFFFFFFFFu;
+        for (size_t i = 0; i < n; ++i) {
+            crc ^= p[i];
+            for (int k = 0; k < 8; ++k) crc = (crc >> 1) ^ ((crc & 1u) ? 0x82F63B78u : 0u);
+        }
+        return crc ^ 0xFFFFFFFFu;
+    };
+    std::vector<uint8_t> bytes(80);
+    for (size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<uint8_t>(i * 131u + 7u);
+    struct Guard {
+        ~Guard() { ddbt::simd::ForceTargetForTest(0); }
+    } guard;
+    for (const int64_t bit : ddbt::simd::SupportedTargetBits()) {
+        ddbt::simd::ForceTargetForTest(bit);
+        for (size_t start = 0; start < 8; ++start)
+            for (size_t n = 0; n + start <= 70; ++n)
+                ASSERT_EQ(Crc32c(bytes.data() + start, n), reference(bytes.data() + start, n))
+                    << ddbt::simd::TargetNameOf(bit) << " start " << start << " length " << n;
+    }
 }
 
 TEST(CopcReaders, Crc32cAndXml) {

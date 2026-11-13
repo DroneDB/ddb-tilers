@@ -29,7 +29,7 @@
     },
     {
       "name": "linux-gcc-release",
-      "displayName": "Linux GCC Release (x86-64-v3, LTO)",
+      "displayName": "Linux GCC Release (x86-64 baseline, run-time SIMD dispatch, LTO)",
       "inherits": "linux-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
@@ -111,7 +111,7 @@
     },
     {
       "name": "windows-msvc-release",
-      "displayName": "Windows MSVC Release (AVX2, LTCG)",
+      "displayName": "Windows MSVC Release (x86-64 baseline, run-time SIMD dispatch, LTCG)",
       "inherits": "windows-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",

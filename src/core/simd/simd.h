@@ -37,4 +37,10 @@ std::string TargetNameOf(int64_t targetBit);
 /// Force dispatch to the given target bit (tests only); 0 restores the CPU detection.
 void ForceTargetForTest(int64_t targetBit);
 
+/// Whether the running CPU runs Highway's SSE4 target (SSE4.2, CLMUL, AES) / AVX2 target (AVX2,
+/// BMI1, BMI2, FMA, F16C). The hand-written paths outside Highway (CRC-32C, fpnge) are chosen
+/// with these, so they follow ForceTargetForTest like the Highway kernels.
+bool HasSse4() noexcept;
+bool HasAvx2() noexcept;
+
 }  // namespace ddbt::simd

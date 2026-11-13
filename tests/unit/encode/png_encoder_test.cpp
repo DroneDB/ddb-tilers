@@ -249,6 +249,38 @@ TEST(PngEncoder, PaletteWithAndWithoutTransparency) {
     EXPECT_EQ(d.pixels[1], 5);
 }
 
+// fpnge on every target the CPU runs: its AVX2 build on AVX2 and better, its SSE 4.1 build on
+// SSE4, libdeflate below (the same bytes as the libdeflate engine). The pixels are the image's.
+TEST(PngEncoder, FpngeEngineOnEveryTarget) {
+    struct Guard {
+        ~Guard() { ddbt::simd::ForceTargetForTest(0); }
+    } guard;
+    ByteBuffer out, ref;
+    for (const int64_t bit : ddbt::simd::SupportedTargetBits()) {
+        ddbt::simd::ForceTargetForTest(bit);
+        const std::string target = ddbt::simd::TargetNameOf(bit);
+        for (const uint32_t ch : {1u, 3u, 4u}) {
+            const uint32_t w = 61, h = 23;
+            const auto img = MakeImage(w, h, ch, w * ch, w + ch, true);
+            const TileImage t = TileImage::Packed(img.data(), w, h, ch);
+            PngOptions o;
+            o.engine = PngEngine::kFpnge;
+            EncodePng(t, o, out);
+            PngOptions deflate;
+            deflate.engine = PngEngine::kDeflate;
+            EncodePng(t, deflate, ref);
+            const auto d = DecodePng(out.data(), out.size());
+            const auto r = DecodePng(ref.data(), ref.size());
+            ASSERT_TRUE(d.ok && r.ok) << target << " " << ch;
+            EXPECT_EQ(d.pixels, r.pixels) << target << " " << ch;
+            if (!ddbt::simd::HasSse4()) {
+                ASSERT_EQ(out.size(), ref.size()) << target << " " << ch;
+                EXPECT_EQ(std::memcmp(out.data(), ref.data(), ref.size()), 0) << target << " " << ch;
+            }
+        }
+    }
+}
+
 TEST(PngEncoder, EveryTargetGivesTheSameBytes) {
     const uint32_t w = 256, h = 64;
     const auto img = MakeImage(w, h, 4, w * 4, 77, true);

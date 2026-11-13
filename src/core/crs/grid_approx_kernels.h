@@ -26,4 +26,8 @@ struct CellGrid {
 /// number; the caller transforms those point by point. On a target without FMA, every point.
 size_t InterpolateSharedCells(const CellGrid& g, double* xs, double* ys, size_t n, uint32_t* rest);
 
+/// Whether the target InterpolateSharedCells dispatches to has a native FMA, i.e. interpolates
+/// at all (SSE2 to SSE4 do not: their points all go to the scalar code).
+bool SharedCellKernelInterpolates();
+
 }  // namespace ddbt::crs::kernels

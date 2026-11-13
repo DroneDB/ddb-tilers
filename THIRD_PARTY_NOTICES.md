@@ -13,7 +13,7 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | Component | Where | Licence | Notes |
 |---|---|---|---|
 | laz-perf 3.4.0, modified | `third_party/lazperf` | Apache-2.0 | `LICENSE` and `NOTICE` in the folder; every change is listed in `FORK.md` and marked with a `ddbt fork` comment |
-| fpnge (commit 097ebccf) | `third_party/fpnge` | Apache-2.0 | Unmodified; `LICENSE` in the folder |
+| fpnge (commit 097ebccf) | `third_party/fpnge` | Apache-2.0 | Unmodified (compiled twice for SSE 4.1 and AVX2 by the wrappers in `variants/`); `LICENSE` in the folder |
 | vcpkg port of libjpeg-turbo, modified | `ports/libjpeg-turbo` | MIT | Build script only, not linked; see `ports/NOTICE.libjpeg-turbo` |
 
 ## Libraries linked through vcpkg (static)
