@@ -45,8 +45,8 @@ public:
     /// (posix_fadvise WILLNEED; no-op on Windows, where the cache manager reads ahead itself).
     void Prefetch(uint64_t offset, uint64_t length) const noexcept;
 
-    /// Drops the file's clean pages from the page cache (cold-cache benchmarks; Linux only,
-    /// Unsupported elsewhere).
+    /// Drops the file's clean pages from the page cache (cold-cache benchmarks). posix_fadvise
+    /// DONTNEED where it exists; elsewhere (Windows) a no-op that succeeds: a hint, like Prefetch.
     Status DropCache() const;
 
     void Close() noexcept;

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "copc/readers/fields.h"
+#include "copc/readers/mapped_input.h"
 #include "copc/readers/text_util.h"
 #include "core/io/byte_source.h"
 #include "core/util/endian.h"
@@ -96,8 +97,8 @@ PlyReader::PlyReader() = default;
 PlyReader::~PlyReader() = default;
 
 Expected<std::unique_ptr<PlyReader>> PlyReader::Open(const std::string& path, const ReaderOptions& options) {
-    DDBT_ASSIGN_OR_RETURN(std::unique_ptr<io::ByteSource> src, io::OpenByteSource(path));
-    if (src->Data() == nullptr) return Unsupported("PLY reader needs a memory-mapped file");
+    DDBT_ASSIGN_OR_RETURN(std::unique_ptr<io::ByteSource> src, OpenMappedInput(path, "PLY"));
+    if (src->Size() == 0) return InvalidArgument(path + ": empty file");
     std::unique_ptr<PlyReader> r(new PlyReader());
     r->source_ = std::shared_ptr<const io::ByteSource>(std::move(src));
     const char* data = reinterpret_cast<const char*>(r->source_->Data());

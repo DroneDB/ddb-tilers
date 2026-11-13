@@ -31,6 +31,7 @@
 #include "core/tile/compat.h"
 #include "ddbt/ddbt.h"
 #include "../test_env.h"
+#include "core/io/platform.h"
 #include "synth_raster.h"
 
 namespace fs = std::filesystem;
@@ -408,10 +409,12 @@ TEST(CogTilerLimits, ReplacedFileWithTheSameSizeAndMtimeIsANewSource) {
     const fs::path b = dir.path() / "b.tif";
     fs::copy_file(SamplingTif(), a);
     const auto s1 = CogSource::Get(a.string());
-    // Another file of the same size with the same mtime, renamed over the first.
+    // Another file of the same size with the same mtime, renamed over the first while the source
+    // holds it open (the library's own rename: on Windows std::filesystem::rename cannot replace
+    // an open file, the POSIX-semantics rename the writers publish with can).
     fs::copy_file(SamplingTif(), b);
     fs::last_write_time(b, fs::last_write_time(a));
-    fs::rename(b, a);
+    ASSERT_TRUE(ddbt::io::detail::RenameReplace(b.string(), a.string()).ok());
     const auto s2 = CogSource::Get(a.string());
     EXPECT_NE(s1->Id(), s2->Id());
     EXPECT_EQ(CogSource::Get(a.string())->Id(), s2->Id());

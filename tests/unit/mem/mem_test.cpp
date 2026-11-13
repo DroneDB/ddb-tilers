@@ -37,9 +37,11 @@ TEST(Aligned, LargeAllocZeroedAndHuge) {
         auto* p = static_cast<uint8_t*>(LargeAlloc(n, huge));
         ASSERT_NE(p, nullptr);
         EXPECT_EQ(reinterpret_cast<uintptr_t>(p) % PageSize(), 0u);
+#ifdef __linux__
         if (huge) {
-            EXPECT_EQ(reinterpret_cast<uintptr_t>(p) % kHugePageSize, 0u);
+            EXPECT_EQ(reinterpret_cast<uintptr_t>(p) % kHugePageSize, 0u);  // the flag's alignment is Linux's
         }
+#endif
         EXPECT_EQ(p[0], 0);
         EXPECT_EQ(p[n - 1], 0);
         std::memset(p, 1, n);
@@ -176,7 +178,9 @@ TEST(Arena, HugePageChunks) {
     std::memset(p, 7, 1 << 20);
     auto* q = static_cast<uint8_t*>(a.Allocate(size_t{5} << 20));  // dedicated, >= 2 MiB
     std::memset(q, 7, size_t{5} << 20);
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(q) % kHugePageSize, 0u);
+#ifdef __linux__
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(q) % kHugePageSize, 0u);  // the flag's alignment is Linux's
+#endif
     EXPECT_EQ(a.BytesReserved(), size_t{9} << 20);
 }
 

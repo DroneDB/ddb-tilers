@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "copc/readers/fields.h"
+#include "copc/readers/mapped_input.h"
 #include "copc/readers/text_util.h"
 #include "core/io/byte_source.h"
 
@@ -139,13 +140,12 @@ TextReader::TextReader() = default;
 TextReader::~TextReader() = default;
 
 Expected<std::unique_ptr<TextReader>> TextReader::Open(const std::string& path, bool pts, const ReaderOptions& options) {
-    DDBT_ASSIGN_OR_RETURN(std::unique_ptr<io::ByteSource> src, io::OpenByteSource(path));
+    DDBT_ASSIGN_OR_RETURN(std::unique_ptr<io::ByteSource> src, OpenMappedInput(path, "text"));
     std::unique_ptr<TextReader> r(new TextReader());
     r->pts_ = pts;
     r->source_ = std::shared_ptr<const io::ByteSource>(std::move(src));
     const uint64_t size = r->source_->Size();
     if (size == 0) return InvalidArgument(path + ": empty file");
-    if (r->source_->Data() == nullptr) return Unsupported("text reader needs a memory-mapped file");
     const char* data = reinterpret_cast<const char*>(r->source_->Data());
     // The first lines.
     std::vector<std::string_view> lines;

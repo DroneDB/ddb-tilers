@@ -107,14 +107,12 @@ void File::Prefetch(uint64_t offset, uint64_t length) const noexcept {
 }
 
 Status File::DropCache() const {
-#if !defined(_WIN32) && defined(POSIX_FADV_DONTNEED)
     if (!IsOpen()) return InvalidArgument("DropCache on a closed File");
+#if !defined(_WIN32) && defined(POSIX_FADV_DONTNEED)
     const int rc = ::posix_fadvise(handle_, 0, 0, POSIX_FADV_DONTNEED);
     if (rc != 0) return ErrnoStatus("posix_fadvise(DONTNEED) '" + path_ + "'", rc);
-    return Status::Ok();
-#else
-    return Unsupported("DropCache is not supported on this platform");
 #endif
+    return Status::Ok();
 }
 
 }  // namespace ddbt::io

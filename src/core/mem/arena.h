@@ -24,8 +24,9 @@ class MemBudget;
 struct ArenaOptions {
     /// Size of a regular chunk. Requests larger than chunkSize / 4 get a dedicated chunk.
     size_t chunkSize = size_t{256} << 10;
-    /// Chunks of at least 2 MiB are mapped 2 MiB aligned with MADV_HUGEPAGE (off by default: to
-    /// be turned on per use only where it measures faster).
+    /// Chunks of at least 2 MiB are mapped with LargeAlloc's huge-page flag: 2 MiB aligned with
+    /// MADV_HUGEPAGE on Linux, ignored on Windows (off by default: to be turned on per use only
+    /// where it measures faster).
     bool hugePages = false;
     /// Charged (ForceReserve) for every chunk held; released when chunks are freed.
     MemBudget* budget = nullptr;

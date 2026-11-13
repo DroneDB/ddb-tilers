@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "../test_float.h"
 #include "core/crs/crs.h"
 #include "core/crs/transform.h"
 #include "core/crs/web_mercator_analytic.h"
@@ -251,7 +252,8 @@ TEST(CrsTransform, AnalyticWebMercatorIsPROJBitForBit) {
 }
 
 TEST(CrsTransform, WebMercatorToLonLatIsGdal) {
-    // GDAL's 3857 -> 4326 shortcut is what the reference (osr) ran: bit for bit.
+    // GDAL's 3857 -> 4326 shortcut is what the reference (osr) ran: bit for bit with glibc
+    // (test_float.h).
     for (const auto& c : kCrsCases) {
         if (std::string(c.name) != "webmercator_to_wgs84") continue;
         const auto t = Transform::Create(Crs::FromEpsg(3857), Crs::FromEpsg(4326));
@@ -259,8 +261,8 @@ TEST(CrsTransform, WebMercatorToLonLatIsGdal) {
         for (int i = 0; i < c.n; ++i) {
             double x = c.in[3 * i], y = c.in[3 * i + 1];
             ASSERT_TRUE(t->TransformPoint(x, y));
-            EXPECT_EQ(Bits(x), Bits(c.gdal[3 * i])) << i;
-            EXPECT_EQ(Bits(y), Bits(c.gdal[3 * i + 1])) << i;
+            EXPECT_LIBM_EQ(x, c.gdal[3 * i]) << " point " << i;
+            EXPECT_LIBM_EQ(y, c.gdal[3 * i + 1]) << " point " << i;
         }
     }
     // Longitudes beyond the world wrap (GDAL), the inverse is PROJ's forward.

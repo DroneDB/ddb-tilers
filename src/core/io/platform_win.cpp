@@ -6,7 +6,10 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstddef>
+#include <cstring>
 #include <string>
+#include <vector>
 
 #include "core/io/io_stats.h"
 #include "core/io/platform.h"
@@ -161,6 +164,32 @@ Status SyncData(NativeHandle h, std::string_view path) {
 Status RenameReplace(const std::string& from, const std::string& to) {
     DDBT_ASSIGN_OR_RETURN(std::wstring wfrom, ToWidePath(from));
     DDBT_ASSIGN_OR_RETURN(std::wstring wto, ToWidePath(to));
+    // POSIX semantics, as rename(2): the target is replaced even while other handles hold it
+    // open (they were opened with FILE_SHARE_DELETE, as io::File opens files) and keep reading
+    // the old file. MoveFileEx refuses to replace an open file ("Access is denied"); it remains
+    // the fallback for file systems without POSIX renames (FAT) and Windows before 10 1607.
+    HANDLE h = CreateFileW(wfrom.c_str(), DELETE | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return Win32Status("open '" + from + "' to rename it", GetLastError());
+    constexpr DWORD kReplaceIfExists = 0x1;  // FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+    constexpr DWORD kPosixSemantics = 0x2;   // FILE_RENAME_FLAG_POSIX_SEMANTICS
+    constexpr auto kFileRenameInfoEx = static_cast<FILE_INFO_BY_HANDLE_CLASS>(22);  // FileRenameInfoEx
+    const size_t nameBytes = wto.size() * sizeof(wchar_t);
+    std::vector<uint8_t> buffer(offsetof(FILE_RENAME_INFO, FileName) + nameBytes + sizeof(wchar_t), 0);
+    auto* info = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
+    // FileRenameInfoEx reads the first member as a DWORD of flags (a union with ReplaceIfExists
+    // in newer SDKs).
+    const DWORD flags = kReplaceIfExists | kPosixSemantics;
+    std::memcpy(buffer.data(), &flags, sizeof(flags));
+    info->RootDirectory = nullptr;
+    info->FileNameLength = static_cast<DWORD>(nameBytes);
+    std::memcpy(info->FileName, wto.data(), nameBytes);
+    const BOOL renamed = SetFileInformationByHandle(h, kFileRenameInfoEx, info, static_cast<DWORD>(buffer.size()));
+    const DWORD err = renamed ? ERROR_SUCCESS : GetLastError();
+    ::CloseHandle(h);
+    if (renamed) return Status::Ok();
+    if (err != ERROR_INVALID_PARAMETER && err != ERROR_NOT_SUPPORTED && err != ERROR_INVALID_FUNCTION)
+        return Win32Status("rename '" + from + "' to '" + to + "'", err);
     if (!MoveFileExW(wfrom.c_str(), wto.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         return Win32Status("rename '" + from + "' to '" + to + "'", GetLastError());
     return Status::Ok();

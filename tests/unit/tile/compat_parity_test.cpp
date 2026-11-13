@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <limits>
 
+#include "../test_float.h"
 #include "core/tile/compat.h"
 #include "core/tile/web_mercator.h"
 
@@ -115,10 +116,11 @@ TEST(TileCompatParity, ZoomForPixelSize) {
 
 TEST(TileCompatParity, LatLonMeters) {
     for (const auto& c : kLatLonCases) {
-        EXPECT_SAME_BITS(ddbt::tile::LonToMeters(c.lon), c.mx);
-        EXPECT_SAME_BITS(ddbt::tile::LatToMeters(c.lat), c.my);
-        EXPECT_SAME_BITS(ddbt::tile::MetersToLon(c.mx), c.backLon);
-        EXPECT_SAME_BITS(ddbt::tile::MetersToLat(c.my), c.backLat);
+        // Reference values from gdal2tiles on glibc: bit for bit there (test_float.h).
+        EXPECT_LIBM_EQ(ddbt::tile::LonToMeters(c.lon), c.mx);
+        EXPECT_LIBM_EQ(ddbt::tile::LatToMeters(c.lat), c.my);
+        EXPECT_LIBM_EQ(ddbt::tile::MetersToLon(c.mx), c.backLon);
+        EXPECT_LIBM_EQ(ddbt::tile::MetersToLat(c.my), c.backLat);
     }
 }
 

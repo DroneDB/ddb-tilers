@@ -9,6 +9,7 @@
 #include <string>
 
 #include "copc/readers/fields.h"
+#include "copc/readers/mapped_input.h"
 #include "core/util/checked_math.h"
 #include "core/util/endian.h"
 
@@ -336,8 +337,8 @@ Status E57Reader::ReadLogical(uint64_t logical, uint8_t* out, size_t n) const {
 }
 
 Expected<std::unique_ptr<E57Reader>> E57Reader::Open(const std::string& path, const ReaderOptions& options) {
-    DDBT_ASSIGN_OR_RETURN(std::unique_ptr<io::ByteSource> src, io::OpenByteSource(path));
-    if (src->Data() == nullptr) return Unsupported("E57 reader needs a memory-mapped file");
+    DDBT_ASSIGN_OR_RETURN(std::unique_ptr<io::ByteSource> src, OpenMappedInput(path, "E57"));
+    if (src->Size() == 0) return InvalidArgument(path + ": empty file");
     std::unique_ptr<E57Reader> r(new E57Reader());
     r->source_ = std::shared_ptr<const io::ByteSource>(std::move(src));
     const uint8_t* d = r->source_->Data();

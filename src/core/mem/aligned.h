@@ -34,10 +34,11 @@ inline AlignedBytes MakeAlignedBytes(size_t size, size_t alignment = kCacheLine)
     return AlignedBytes(static_cast<uint8_t*>(AlignedAlloc(size, alignment)));
 }
 
-/// Large zero-filled region straight from the OS (mmap / VirtualAlloc), page aligned; when
-/// `hugePages` is set, the region is 2 MiB aligned and advised MADV_HUGEPAGE (Linux THP; on
-/// Windows large pages need SeLockMemoryPrivilege, so the hint is ignored). Throws
-/// std::bad_alloc. Free with LargeFree using the same size and flag.
+/// Large zero-filled region straight from the OS (mmap / VirtualAlloc), page aligned. With
+/// `hugePages` on Linux the region is also 2 MiB aligned and advised MADV_HUGEPAGE (THP backs
+/// only aligned 2 MiB extents). On Windows large pages need SeLockMemoryPrivilege, so the flag
+/// is ignored there: the region is only page aligned. Throws std::bad_alloc. Free with
+/// LargeFree using the same size and flag.
 void* LargeAlloc(size_t size, bool hugePages = false);
 void LargeFree(void* p, size_t size, bool hugePages = false) noexcept;
 
