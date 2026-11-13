@@ -62,10 +62,12 @@ PREPARED_ROOT = os.path.join(common.WORK, "prepared")
 # --------------------------------------------------------------------------- configuration
 
 class Backend:
-    def __init__(self, name, kind, lib=None, cli=None):
+    def __init__(self, name, kind, lib=None, cli=None, env_file=None):
         if kind not in ("legacy", "ddbt"):
             raise SystemExit("backend %s: kind must be legacy or ddbt" % name)
-        self.name, self.kind, self.lib, self.cli = name, kind, lib, cli
+        if env_file and not os.path.isfile(env_file):
+            raise SystemExit("backend %s: no env file %s" % (name, env_file))
+        self.name, self.kind, self.lib, self.cli, self.env_file = name, kind, lib, cli, env_file
         if kind == "legacy":
             self.lib = self.lib or common.baseline_lib()
             self.cli = self.cli or os.path.join(common.BASELINE_DIR, "usr", "bin", "ddb")
@@ -75,6 +77,8 @@ class Backend:
 
     def describe(self):
         d = {"kind": self.kind, "lib": self.lib, "cli": self.cli}
+        if self.env_file:
+            d["env_file"] = self.env_file
         if self.lib and os.path.isfile(self.lib):
             d["lib_size"] = os.path.getsize(self.lib)
             d["lib_sha256"] = sha256_file(self.lib)
@@ -82,13 +86,17 @@ class Backend:
 
 
 def parse_backend(spec):
-    """name=kind:lib[:cli] | kind (legacy/ddbt with default paths) | name=kind."""
+    """name=kind:lib[:cli[:env]] | kind (legacy/ddbt with default paths) | name=kind.
+
+    env: a file sourced (bash) for the runs of this backend instead of the suite's baseline env
+    (legacy) or the current environment (ddbt), e.g. a snapshot of another libddb build
+    (scripts/snapshot-build.sh)."""
     if "=" not in spec:
         return Backend(spec, spec)
     name, rest = spec.split("=", 1)
     parts = rest.split(":")
-    return Backend(name, parts[0], parts[1] if len(parts) > 1 and parts[1] else None,
-                   parts[2] if len(parts) > 2 and parts[2] else None)
+    part = lambda i: parts[i] if len(parts) > i and parts[i] else None
+    return Backend(name, parts[0], part(1), part(2), part(3))
 
 
 def sha256_file(path, limit=None):
@@ -285,7 +293,9 @@ class Runner:
 
     # ---- environment
     def env_for(self, backend, home, extra=None):
-        if backend.kind == "legacy":
+        if backend.env_file:
+            env = self.backend_env(backend.env_file)
+        elif backend.kind == "legacy":
             env = dict(self.legacy_env)
         else:
             env = {k: v for k, v in os.environ.items() if not k.startswith("DDB_")}
@@ -296,6 +306,13 @@ class Runner:
         env["DDB_HOME"] = home
         env.update(extra or {})
         return env
+
+    def backend_env(self, env_file):
+        """The environment of a backend's own env file, sourced once per run."""
+        cache = self.__dict__.setdefault("_backend_envs", {})
+        if env_file not in cache:
+            cache[env_file] = common.baseline_env(env_file)
+        return dict(cache[env_file])
 
     def fresh_dir(self, path):
         """Create an empty directory below one of our own roots (never elsewhere)."""
@@ -909,7 +926,7 @@ def build_argparser():
     ap.add_argument("--suite", required=True, help="suite name (bench/suites/<name>.toml) or path")
     ap.add_argument("--manifest", help="corpus manifest (default: the suite's corpus_manifest)")
     ap.add_argument("--backend", action="append",
-                    help="name=kind:lib[:cli], or legacy / ddbt with the default paths (repeatable; default legacy)")
+                    help="name=kind:lib[:cli[:env]], or legacy / ddbt with the default paths (repeatable; default legacy)")
     ap.add_argument("--base", help="backend name used as the base of comparisons (default: the first)")
     ap.add_argument("--aa", action="store_true", help="A/A noise run: the first backend twice")
     ap.add_argument("--driver", help="ddbt-bench executable")
