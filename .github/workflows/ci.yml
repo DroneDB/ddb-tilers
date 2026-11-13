@@ -117,7 +117,8 @@ jobs:
             | while read -r f; do echo "::group::$f"; tail -n 80 "$f"; echo "::endgroup::"; done
 
       - name: Build
-        run: cmake --build --preset ${{ matrix.preset }}
+        # -k 0: report every compile error of the run, not only the first one.
+        run: cmake --build --preset ${{ matrix.preset }} -- -k 0
 
       - name: CPU and dispatch information
         shell: bash
