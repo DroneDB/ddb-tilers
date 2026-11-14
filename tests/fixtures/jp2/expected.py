@@ -17,6 +17,11 @@ PAM (.aux.xml) is disabled, as libddb disables it. Lines (tab-separated):
     size     FILE WIDTH HEIGHT BANDS TYPE
     band     FILE BAND INTERP NBITS CRC        CRC-32 of band.ReadRaster() (host order); NBITS "-" when none
     window   FILE BAND X Y W H CRC             the same for a window, for rasters too large to read whole
+    grid     FILE BAND STEP HEX                a lossy file (the 9/7 wavelet): the band's samples at every
+                                               STEP-th column and row, in hex (host order). Its decoding is
+                                               floating-point, and OpenJPEG builds round it differently
+                                               (1 level in a few pixels): the CRC is exact where the
+                                               expectations were made (Linux), the grid within 1 elsewhere
     ct       FILE ENTRIES CRC                  the colour table of band 1 (CRC-32 of its R, G, B bytes)
     gt       FILE GT0 .. GT5                   the geotransform (%.17g), when there is one
     gcp      FILE PIXEL LINE X Y Z             each ground control point (%.17g)
@@ -26,6 +31,7 @@ PAM (.aux.xml) is disabled, as libddb disables it. Lines (tab-separated):
     refused  FILE                              GDAL cannot open or read the file
 """
 import argparse
+import math
 import os
 import subprocess
 import zlib
@@ -36,6 +42,7 @@ from osgeo import gdal  # noqa: E402
 gdal.UseExceptions()
 HERE = os.path.dirname(os.path.abspath(__file__))
 WHOLE_LIMIT = 64 << 20  # bytes of a band read whole; larger rasters are checked on windows
+GRID_SAMPLES = 1024  # samples of a band on the grid of a lossy file, at most
 
 
 def g(v):
@@ -80,6 +87,11 @@ def describe(path, name, tool):
         lines.append(["band", name, b, interp, nbits, whole.get(b, "-")])
         for (x, y, w, h), c in per_window:
             lines.append(["window", name, b, x, y, w, h, c[b]])
+        reversibility = ds.GetMetadataItem("COMPRESSION_REVERSIBILITY", "IMAGE_STRUCTURE") or ""
+        if reversibility.startswith("LOSSY") and not windows:
+            step = max(1, math.ceil(math.sqrt(W * H / GRID_SAMPLES)))
+            grid = band.ReadAsArray()[::step, ::step]
+            lines.append(["grid", name, b, step, grid.tobytes().hex()])
     ct = b1.GetColorTable()
     if ct is not None:
         rgb = bytearray()

@@ -3,7 +3,10 @@
 // JPEG 2000 files as GDAL's JP2OpenJPEG driver reads them (tests/fixtures/jp2, expected.tsv
 // written by expected.py with the system GDAL): the size, band type, every band's samples
 // (CRC-32 of band.ReadRaster()), colour interpretations and NBITS, the colour table, the
-// geotransform or GCPs, the CRS and RPC presence, and the files GDAL refuses. The same check runs
+// geotransform or GCPs, the CRS and RPC presence, and the files GDAL refuses. The samples of a
+// lossy file (the 9/7 wavelet) come from floating-point arithmetic that OpenJPEG builds round
+// differently (MSVC's build decodes 1 level apart in a few pixels): their CRC is exact on Linux,
+// where the expectations are made, and a grid of their samples is within 1 everywhere. The same check runs
 // on any folder with DDBT_JP2_PARITY_DIR (the files) and DDBT_JP2_PARITY_TSV (expected.py's
 // output for it), e.g. on all of GDAL's own JPEG 2000 samples.
 
@@ -13,6 +16,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -87,6 +91,44 @@ std::string Crc(const std::vector<uint8_t>& v) {
 
 double D(const std::string& s) { return std::strtod(s.c_str(), nullptr); }
 
+// Sample i of a band read by ReadBand, as a number.
+double SampleAt(const std::vector<uint8_t>& v, tiff::SampleType t, size_t i) {
+    const auto get = [&](auto tag) {
+        decltype(tag) x;
+        std::memcpy(&x, v.data() + i * sizeof(x), sizeof(x));
+        return static_cast<double>(x);
+    };
+    switch (t) {
+        case tiff::SampleType::kU8: return get(uint8_t{});
+        case tiff::SampleType::kI16: return get(int16_t{});
+        case tiff::SampleType::kU16: return get(uint16_t{});
+        case tiff::SampleType::kI32: return get(int32_t{});
+        case tiff::SampleType::kU32: return get(uint32_t{});
+        default: ADD_FAILURE() << "sample type"; return 0;
+    }
+}
+
+std::vector<uint8_t> FromHex(const std::string& hex) {
+    std::vector<uint8_t> out(hex.size() / 2);
+    for (size_t i = 0; i < out.size(); ++i) out[i] = static_cast<uint8_t>(std::stoul(hex.substr(2 * i, 2), nullptr, 16));
+    return out;
+}
+
+// The samples of `band` (W x H) at every step-th column and row are within 1 of `expected`.
+void ExpectGridWithinOne(const std::vector<uint8_t>& band, uint32_t width, uint32_t height, tiff::SampleType t,
+                         uint32_t step, const std::vector<uint8_t>& expected) {
+    size_t k = 0, off = 0;
+    double worst = 0;
+    for (uint32_t y = 0; y < height; y += step)
+        for (uint32_t x = 0; x < width; x += step, ++k)
+            if (std::abs(SampleAt(band, t, static_cast<size_t>(y) * width + x) - SampleAt(expected, t, k)) > 1) {
+                ++off;
+                worst = std::max(worst, std::abs(SampleAt(band, t, static_cast<size_t>(y) * width + x) - SampleAt(expected, t, k)));
+            }
+    EXPECT_EQ(k * tiff::SampleTypeSize(t), expected.size()) << "grid size";
+    EXPECT_EQ(off, 0u) << "samples more than 1 apart (worst " << worst << ")";
+}
+
 // expected.py's escapes of a field: \\, \n, \t.
 std::string Unescape(const std::string& s) {
     std::string out;
@@ -123,6 +165,10 @@ void CheckFile(const std::string& dir, const std::string& name, const std::vecto
         ASSERT_NE(jp2, nullptr);
         std::vector<std::array<double, 5>> gcps;
         bool hasGt = false, hasCrs = false, rpc = false;
+        // The sample grids of the bands of a lossy file, by band row
+        std::map<std::string, const std::vector<std::string>*> grids;
+        for (const auto& l : lines)
+            if (l[0] == "grid") grids[l[2]] = &l;
         for (const auto& l : lines) {
             const std::string& kind = l[0];
             if (kind == "size") {
@@ -137,7 +183,18 @@ void CheckFile(const std::string& dir, const std::string& name, const std::vecto
                 const auto nbits = jp2->Nbits(b);
                 EXPECT_EQ(nbits ? std::to_string(*nbits) : "-", l[4]);
                 if (l[5] != "-") {
-                    EXPECT_EQ(Crc(ReadBand(s, b, 0, 0, s.Width(), s.Height())), l[5]);
+                    const auto v = ReadBand(s, b, 0, 0, s.Width(), s.Height());
+                    const auto grid = grids.find(l[2]);
+                    if (grid == grids.end()) {
+                        EXPECT_EQ(Crc(v), l[5]);
+                    } else {
+#if defined(__linux__)
+                        EXPECT_EQ(Crc(v), l[5]);
+#endif
+                        const auto& g = *grid->second;
+                        ExpectGridWithinOne(v, s.Width(), s.Height(), s.Type(),
+                                            static_cast<uint32_t>(std::stoul(g[3])), FromHex(g[4]));
+                    }
                 }
             } else if (kind == "window") {
                 SCOPED_TRACE("window " + l[3] + "," + l[4]);
