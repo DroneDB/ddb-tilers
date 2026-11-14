@@ -33,6 +33,10 @@ using BlockPtr = std::shared_ptr<const CachedBlock>;
 /// cannot be read or decoded.
 BlockPtr GetBlock(const CogSource& source, uint32_t ifd, uint32_t index);
 
+/// A decoded block of complex samples as the tiler reads it: the magnitude sqrt(re^2 + im^2) of
+/// each sample, Float64 (the measure of GDAL's statistics of complex bands).
+tiff::DecodedBlock ComplexMagnitudes(const tiff::DecodedBlock& decoded);
+
 /// The default budget of the block cache for a host with `physicalBytes` of memory: 3 % of it,
 /// between 64 MiB and 1 GiB (1 GiB when unknown), so a large server keeps the warm working set of
 /// big rasters and a small instance does not give a third of its memory to decoded blocks.

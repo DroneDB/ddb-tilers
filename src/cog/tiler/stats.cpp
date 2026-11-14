@@ -2,6 +2,8 @@
 // The arithmetic is in stats_kernel.cpp (compiled without floating-point contraction).
 #include "cog/tiler/stats.h"
 
+#include "cog/tiler/block_cache.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -303,7 +305,8 @@ std::string DecodeRegionBlock(const PassPlan& pp, Region& g, size_t k) {
     const uint32_t plane = pp.planes[k / cols];
     auto d = pp.r->ReadBlock(pp.ifd, pp.info->BlockIndex(bc, g.br, plane));
     if (!d.ok()) return "Cannot read the bands to compute their statistics: " + std::string(d.status().message());
-    g.blocks[k] = std::move(*d);
+    // A complex raster is measured by its magnitudes, as the tiler reads it
+    g.blocks[k] = pp.info->complex ? ComplexMagnitudes(*d) : std::move(*d);
     return {};
 }
 

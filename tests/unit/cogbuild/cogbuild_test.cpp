@@ -37,7 +37,9 @@
 #include "cog/pyramid/overview.h"
 #include "cog/tiff/geotiff.h"
 #include "cog/tiff/tiff_reader.h"
+#include "cog/tiler/cog_source.h"
 #include "cog/tiler/json_lite.h"
+#include "cog/tiler/stats.h"
 #include "cog/writer/cog_writer.h"
 #include "ddbt/ddbt.h"
 
@@ -575,6 +577,45 @@ TEST(CogBuild, AComplexRasterIsTiledByItsMagnitude) {
             ++tiles;
         }
     EXPECT_EQ(tiles, 4);
+}
+
+// The statistics the tiler computes for a complex raster without a sidecar are those of its
+// magnitudes, in both arithmetics, with and without a mask
+TEST(CogBuild, TheStatisticsOfAComplexRasterAreThoseOfItsMagnitudes) {
+    TempDir dir;
+    for (const bool mask : {false, true}) {
+        SourceCog cpx(tiff::SampleType::kF32, 4, mask, std::nullopt);
+        cpx.complex = true;
+        SourceCog mag(tiff::SampleType::kF64, 2, mask, std::nullopt);
+        auto* v = reinterpret_cast<float*>(cpx.pixels.data());
+        auto* m = reinterpret_cast<double*>(mag.pixels.data());
+        for (size_t i = 0; i < mag.pixels.size() / sizeof(double); ++i) {
+            v[2 * i] = static_cast<float>(static_cast<int>((i * 37) % 2000) - 1000) * 0.25f;
+            v[2 * i + 1] = static_cast<float>(static_cast<int>((i * 11) % 600) - 300) * 0.5f;
+            m[i] = std::sqrt(double(v[2 * i]) * v[2 * i] + double(v[2 * i + 1]) * v[2 * i + 1]);
+        }
+        const std::string tag = mask ? "m" : "n";
+        const std::string cin = dir.File(tag + "c.tif"), cout = dir.File(tag + "c.cog.tif"), min = dir.File(tag + "m.tif"),
+                          mout = dir.File(tag + "m.cog.tif");
+        cpx.Write(cin);
+        mag.Write(min);
+        ASSERT_TRUE(build::BuildCog(cin, cout, {}).ok());
+        ASSERT_TRUE(build::BuildCog(min, mout, {}).ok());
+        const auto c = tiler::CogSource::Open(cout), g = tiler::CogSource::Open(mout);
+        ASSERT_EQ(c->BandCount(), 2);
+        for (const auto mode : {stats::StatsMode::kCompat, stats::StatsMode::kExact}) {
+            const auto a = tiler::ComputeBandStatistics(*c, {1, 2}, std::nullopt, mode);
+            const auto b = tiler::ComputeBandStatistics(*g, {1, 2}, std::nullopt, mode);
+            for (size_t k = 0; k < 2; ++k) {
+                ASSERT_TRUE(a[k] && b[k]);
+                EXPECT_EQ(a[k]->min, b[k]->min);
+                EXPECT_EQ(a[k]->max, b[k]->max);
+                EXPECT_EQ(a[k]->mean, b[k]->mean);
+                EXPECT_EQ(a[k]->stdDev, b[k]->stdDev);
+                EXPECT_EQ(a[k]->validCount, b[k]->validCount);
+            }
+        }
+    }
 }
 
 // GDAL_METADATA of an output: OVERVIEW_RESAMPLING only with overviews; the colour

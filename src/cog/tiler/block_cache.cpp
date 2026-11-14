@@ -93,38 +93,8 @@ CachedBlock Decode(const CogSource& source, uint32_t ifd, uint32_t index) {
         return cb;
     }
     if (info.complex) {
-        // A complex raster is tiled by the magnitude of its samples, sqrt(re^2 + im^2) in Float64:
-        // what GDAL's statistics of a complex band measure
-        const uint32_t w = decoded->width, h = decoded->height, n = decoded->samples / 2;
-        tiff::DecodedBlock mag;
-        mag.buffer = tiff::BlockBuffer::Allocate(static_cast<size_t>(w) * h * n * sizeof(double), nullptr);
-        mag.width = w;
-        mag.height = h;
-        mag.samples = n;
-        mag.bitsPerSample = 64;
-        mag.sampleType = tiff::SampleType::kF64;
-        mag.rowStride = static_cast<size_t>(w) * n * sizeof(double);
-        mag.sparse = decoded->sparse;
-        auto run = [&](auto tag) {
-            using T = decltype(tag);
-            for (uint32_t y = 0; y < h; ++y) {
-                const T* src = reinterpret_cast<const T*>(decoded->data() + static_cast<size_t>(y) * decoded->rowStride);
-                auto* dst = reinterpret_cast<double*>(mag.data() + static_cast<size_t>(y) * mag.rowStride);
-                for (size_t i = 0; i < static_cast<size_t>(w) * n; ++i) {
-                    const double re = static_cast<double>(src[2 * i]), im = static_cast<double>(src[2 * i + 1]);
-                    dst[i] = std::sqrt(re * re + im * im);
-                }
-            }
-        };
-        switch (decoded->sampleType) {
-            case tiff::SampleType::kI16: run(int16_t{}); break;
-            case tiff::SampleType::kI32: run(int32_t{}); break;
-            case tiff::SampleType::kF32: run(float{}); break;
-            case tiff::SampleType::kF64: run(double{}); break;
-            default: throw TileError(TileErrorCode::kException, "Unsupported complex samples in " + source.Path());
-        }
-        cb.block = std::move(mag);
-        cb.pixelBytes = static_cast<size_t>(n) * sizeof(double);
+        cb.block = ComplexMagnitudes(*decoded);
+        cb.pixelBytes = static_cast<size_t>(cb.block.samples) * sizeof(double);
         return cb;
     }
     cb.block = std::move(*decoded);
@@ -154,5 +124,37 @@ cache::CacheStats BlockCacheStats() { return TheCache().Stats(); }
 void SetBlockCacheBudget(size_t bytes) { TheCache().SetBudget(bytes); }
 size_t BlockCacheBudget() { return TheCache().BudgetBytes(); }
 void ClearBlockCache() { TheCache().Clear(); }
+
+tiff::DecodedBlock ComplexMagnitudes(const tiff::DecodedBlock& decoded) {
+    const uint32_t w = decoded.width, h = decoded.height, n = decoded.samples / 2;
+    tiff::DecodedBlock mag;
+    mag.buffer = tiff::BlockBuffer::Allocate(static_cast<size_t>(w) * h * n * sizeof(double), nullptr);
+    mag.width = w;
+    mag.height = h;
+    mag.samples = n;
+    mag.bitsPerSample = 64;
+    mag.sampleType = tiff::SampleType::kF64;
+    mag.rowStride = static_cast<size_t>(w) * n * sizeof(double);
+    mag.sparse = decoded.sparse;
+    auto run = [&](auto tag) {
+        using T = decltype(tag);
+        for (uint32_t y = 0; y < h; ++y) {
+            const T* src = reinterpret_cast<const T*>(decoded.data() + static_cast<size_t>(y) * decoded.rowStride);
+            auto* dst = reinterpret_cast<double*>(mag.data() + static_cast<size_t>(y) * mag.rowStride);
+            for (size_t i = 0; i < static_cast<size_t>(w) * n; ++i) {
+                const double re = static_cast<double>(src[2 * i]), im = static_cast<double>(src[2 * i + 1]);
+                dst[i] = std::sqrt(re * re + im * im);
+            }
+        }
+    };
+    switch (decoded.sampleType) {
+        case tiff::SampleType::kI16: run(int16_t{}); break;
+        case tiff::SampleType::kI32: run(int32_t{}); break;
+        case tiff::SampleType::kF32: run(float{}); break;
+        case tiff::SampleType::kF64: run(double{}); break;
+        default: throw TileError(TileErrorCode::kException, "Unsupported complex samples");
+    }
+    return mag;
+}
 
 }  // namespace ddbt::cog::tiler
