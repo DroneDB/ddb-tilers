@@ -31,7 +31,7 @@
 #include "../test_env.h"
 #include "cog/build/cog_builder.h"
 #include "cog/build/pipeline.h"
-#include "cog/build/source.h"
+#include "cog/build/tiff_source.h"
 #include "cog/build/stats.h"
 #include "cog/encode/block_encoder.h"
 #include "cog/pyramid/overview.h"
@@ -666,7 +666,7 @@ TEST(CogBuild, SourcesGetGdalsColourTables) {
         for (size_t i = 0; i < rows.size(); ++i) rows[i] = bits == 1 ? 0xA5 : static_cast<uint8_t>(i);
         TIFFWriteEncodedStrip(t, 0, rows.data(), static_cast<tmsize_t>(rows.size()));
         TIFFClose(t);
-        auto src = build::SourceRaster::Open(path);
+        auto src = build::TiffSource::Open(path);
         EXPECT_TRUE(src.ok()) << src.status().message();
         return std::move(src).value();
     };

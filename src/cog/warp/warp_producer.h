@@ -26,14 +26,14 @@ struct WarpSettings {
 };
 
 /// The plan of the warped COG of `source` (everything but the GDAL metadata).
-Expected<build::Plan> WarpPlan(const build::SourceRaster& source, const WarpSettings& settings);
+Expected<build::Plan> WarpPlan(const build::RasterSource& source, const WarpSettings& settings);
 
 /// The producer of the plan's full-resolution strips.
-Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::SourceRaster& source, const build::Plan& plan,
+Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::RasterSource& source, const build::Plan& plan,
                                                                 uint64_t memoryBudget);
 
 /// The chunks of GDAL's warper the producer follows for a source georeferenced by GCPs (none for a
 /// source with a geotransform): for tests.
-Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::SourceRaster& source, const build::Plan& plan);
+Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::RasterSource& source, const build::Plan& plan);
 
 }  // namespace ddbt::cog::warp

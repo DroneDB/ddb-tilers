@@ -136,7 +136,7 @@ void SetLossless(Plan& p, const BuildOptions& o) {
 }
 
 
-Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
+Expected<Plan> OwnGridPlan(const RasterSource& src, const BuildOptions& o) {
     Plan p;
     p.ownGrid = true;
     p.width = src.Width();
@@ -153,7 +153,7 @@ Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
         p.transparency = Transparency::kNoData;
         p.nodata = src.NoData();
         p.nodataText = src.NoDataText();
-    } else if (src.MaskIfd()) {
+    } else if (src.HasMask()) {
         p.transparency = Transparency::kMask;
     } else if (src.AlphaBand() >= 0) {
         p.transparency = Transparency::kAlpha;
@@ -178,7 +178,7 @@ Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
     } else {
         SetLossless(p, o);
     }
-    p.gdalMetadata = OutputMetadata(src.Main().gdalMetadata, p, false);
+    p.gdalMetadata = OutputMetadata(src.GdalMetadata(), p, false);
     return p;
 }
 
@@ -187,7 +187,7 @@ Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
 
 class OwnGridProducer final : public TileProducer {
 public:
-    OwnGridProducer(const SourceRaster& src, const Plan& plan) : src_(src), plan_(plan) {}
+    OwnGridProducer(const RasterSource& src, const Plan& plan) : src_(src), plan_(plan) {}
 
     void Produce(uint32_t col, Strip& s) override {
         thread_local std::vector<uint8_t> block, mask;
@@ -212,7 +212,7 @@ public:
     uint64_t BlocksDecoded() const override { return decoded_.load(); }
 
 private:
-    const SourceRaster& src_;
+    const RasterSource& src_;
     const Plan& plan_;
     std::atomic<uint64_t> decoded_{0};
 };
@@ -785,9 +785,9 @@ public:
 
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options, BuildReport* report) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto src = SourceRaster::Open(input);
+    auto src = OpenRasterSource(input);
     if (!src.ok()) return src.status();
-    const SourceRaster& source = **src;
+    const RasterSource& source = **src;
     if (!source.Georef().crs) return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no coordinate reference system: " + input);
     // A raster without a geotransform is warped through its ground control points.
     if (!source.Georef().geoTransform && source.Georef().gcps.empty())
@@ -811,7 +811,7 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         auto p = warp::WarpPlan(source, ws);
         if (!p.ok()) return p.status();
         plan = std::move(*p);
-        plan.gdalMetadata = OutputMetadata(source.Main().gdalMetadata, plan, true);
+        plan.gdalMetadata = OutputMetadata(source.GdalMetadata(), plan, true);
         auto prod = warp::MakeWarpProducer(source, plan, options.memoryBudget);
         if (!prod.ok()) return prod.status();
         producer = std::move(*prod);

@@ -149,7 +149,7 @@ TEST_P(GcpCog, IsGdalsCog) {
     ASSERT_TRUE(s.ok()) << s.message();
 
     // GDAL's grid, to the bit.
-    auto src = build::SourceRaster::Open(input);
+    auto src = build::OpenRasterSource(input);
     ASSERT_TRUE(src.ok());
     auto plan = WarpPlan(**src, {});
     ASSERT_TRUE(plan.ok()) << plan.status().message();

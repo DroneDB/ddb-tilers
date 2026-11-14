@@ -3,6 +3,7 @@
 # warped). Paths relative to src/.
 list(APPEND DDBT_SOURCES
   cog/build/source.cpp
+  cog/build/tiff_source.cpp
   cog/build/stats.cpp
   cog/build/cog_builder.cpp)
 # The statistics arithmetic is cog/tiler/stats_kernel.cpp (compiled without contraction or LTO).

@@ -47,13 +47,11 @@
 namespace ddbt::cog::warp {
 
 using build::Plan;
-using build::SourceRaster;
+using build::RasterSource;
 using build::Strip;
 using build::Transparency;
 
 namespace {
-
-constexpr uint16_t kRpcCoefficientTag = 50844;  // RPCCoefficientTag: GDAL's RPC metadata
 
 // The source as the warper reads it.
 struct SourceSpec {
@@ -68,7 +66,7 @@ struct SourceSpec {
     bool NoMasks() const { return alpha < 0 && !mask && !nodata; }
 };
 
-SourceSpec Analyse(const SourceRaster& src) {
+SourceSpec Analyse(const RasterSource& src) {
     SourceSpec s;
     s.bands = src.Bands();
     // gdalwarp takes the last band as the source alpha when it is an alpha band.
@@ -84,7 +82,7 @@ SourceSpec Analyse(const SourceRaster& src) {
         } else {
             s.dstAlpha = true;
         }
-    } else if (src.MaskIfd() && s.alpha < 0) {
+    } else if (src.HasMask() && s.alpha < 0) {
         s.mask = true;
         s.dstAlpha = true;
     }
@@ -92,7 +90,7 @@ SourceSpec Analyse(const SourceRaster& src) {
     return s;
 }
 
-bool JpegEligible(const SourceRaster& src) {
+bool JpegEligible(const RasterSource& src) {
     const int n = src.Bands();
     if ((n != 3 && n != 4) || src.NoData()) return false;
     if (src.Type() != tiff::SampleType::kU8) return false;
@@ -129,7 +127,7 @@ struct Rect {
 
 class WarpProducer final : public build::TileProducer {
 public:
-    WarpProducer(const SourceRaster& src, const Plan& plan, SourceSpec spec, SourceGeoreference geo,
+    WarpProducer(const RasterSource& src, const Plan& plan, SourceSpec spec, SourceGeoreference geo,
                  std::shared_ptr<const crs::Transform> t)
         : src_(src), plan_(plan), spec_(std::move(spec)), geo_(std::move(geo)), transform_(std::move(t)) {}
 
@@ -332,8 +330,7 @@ private:
         // when its GCPs georeference it, gdalwarp reads 5 more source pixels around each window
         // and warps only within the suggested extent of the source, 5 pixels around it.
         int wx = 0, wy = 0, ww = static_cast<int>(plan_.width), wh = static_cast<int>(plan_.height);
-        const tiff::TagEntry* rpc = src_.Main().FindTag(kRpcCoefficientTag);
-        if (rpc != nullptr && rpc->count == 92) {
+        if (src_.HasRpc()) {
             o.sourceExtra = 5;
             if (!RestrictToRpcExtent(wx, wy, ww, wh)) return;
         }
@@ -644,7 +641,7 @@ private:
         p.alphaOut = spec_.dstAlpha ? (plan_.MaskOut() ? -1 : plan_.alphaBand) : -2;
     }
 
-    const SourceRaster& src_;
+    const RasterSource& src_;
     const Plan& plan_;
     SourceSpec spec_;
     SourceGeoreference geo_;
@@ -670,7 +667,7 @@ struct SourceGrid {
     TargetGrid grid;
 };
 
-Expected<SourceGrid> GridOf(const SourceRaster& src, bool evenTileOrigin) {
+Expected<SourceGrid> GridOf(const RasterSource& src, bool evenTileOrigin) {
     if (!src.Georef().crs)
         return Status(StatusCode::kInvalidArgument,
                       "Cannot build COG: input file has no coordinate reference system: " + src.Path());
@@ -685,7 +682,7 @@ Expected<SourceGrid> GridOf(const SourceRaster& src, bool evenTileOrigin) {
 
 }  // namespace
 
-Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSettings& settings) {
+Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSettings& settings) {
     auto sg = GridOf(src, settings.evenTileOrigin);
     if (!sg.ok()) return sg.status();
     const TargetGrid& grid = sg->grid;
@@ -739,7 +736,7 @@ Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSetting
 
 namespace {
 
-Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::SourceRaster& src, const build::Plan& plan) {
+Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::RasterSource& src, const build::Plan& plan) {
     auto sg = GridOf(src, false);
     if (!sg.ok()) return sg.status();
     auto p = std::make_unique<WarpProducer>(src, plan, Analyse(src), std::move(sg->geo), sg->grid.transform);
@@ -749,7 +746,7 @@ Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::SourceRaster& 
 
 }  // namespace
 
-Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::SourceRaster& src, const build::Plan& plan,
+Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::RasterSource& src, const build::Plan& plan,
                                                                 uint64_t memoryBudget) {
     (void)memoryBudget;
     auto p = MakeProducer(src, plan);
@@ -757,7 +754,7 @@ Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::Sou
     return std::unique_ptr<build::TileProducer>(std::move(*p));
 }
 
-Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::SourceRaster& src, const build::Plan& plan) {
+Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::RasterSource& src, const build::Plan& plan) {
     auto p = MakeProducer(src, plan);
     if (!p.ok()) return p.status();
     return (*p)->Chunks();

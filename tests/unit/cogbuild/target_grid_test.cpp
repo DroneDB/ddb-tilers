@@ -45,9 +45,9 @@ class TargetGridCorpus : public testing::TestWithParam<GridCase> {};
 TEST_P(TargetGridCorpus, EqualsLibddbsCogGrid) {
     const GridCase& c = GetParam();
     if (!std::filesystem::exists(c.path)) GTEST_SKIP() << c.id << " not on this machine";
-    auto src = build::SourceRaster::Open(c.path);
+    auto src = build::OpenRasterSource(c.path);
     ASSERT_TRUE(src.ok()) << src.status().message();
-    const build::SourceRaster& s = **src;
+    const build::RasterSource& s = **src;
     ASSERT_TRUE(s.Georef().crs.has_value());
     auto geo = SourceGeoreference::FromGeoTransform(*s.Georef().geoTransform);
     ASSERT_TRUE(geo.ok());

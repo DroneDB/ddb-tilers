@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// SourceRaster: the input GeoTIFF of a COG build as the builder (and GDAL's warper) sees it:
-// bands, sample type, transparency (internal mask, alpha band, nodata), georeferencing, and
-// decoded full-resolution blocks (tiles or strips) as pixel-interleaved samples of every band.
+// RasterSource: the input raster of a COG build as the builder (and GDAL's warper) sees it,
+// whatever its format: bands, sample type, transparency (a per-dataset mask, an alpha band,
+// nodata), colour interpretation and table, georeferencing, the metadata GDAL copies to the
+// output, and decoded full-resolution blocks as pixel-interleaved samples of every band.
+//
+// The builder and the warper depend on this interface only. Each format reads its file the way
+// GDAL's driver for it does, so that the COG is the one GDAL would build:
+//   - TiffSource (tiff_source.h): GeoTIFF, GDAL's GTiff driver;
+//   - Jp2Source (jp2_source.h): JPEG 2000 (JP2 file or raw codestream), GDAL's JP2OpenJPEG driver.
 #pragma once
 
 #include <array>
@@ -19,77 +25,90 @@
 
 namespace ddbt::cog::build {
 
-class SourceRaster {
+class RasterSource {
 public:
-    static Expected<std::unique_ptr<SourceRaster>> Open(const std::string& path);
+    virtual ~RasterSource() = default;
+    RasterSource(const RasterSource&) = delete;
+    RasterSource& operator=(const RasterSource&) = delete;
 
-    const std::string& Path() const noexcept { return path_; }
-    const tiff::TiffReader& Reader() const noexcept { return *reader_; }
-    const tiff::IfdInfo& Main() const noexcept { return reader_->Ifd(reader_->MainImage()); }
-    const tiff::Georeferencing& Georef() const noexcept { return georef_; }
+    virtual const std::string& Path() const noexcept = 0;
+    /// Geotransform or ground control points, and the CRS, as GDAL reports them.
+    virtual const tiff::Georeferencing& Georef() const noexcept = 0;
 
-    uint32_t Width() const noexcept { return Main().width; }
-    uint32_t Height() const noexcept { return Main().height; }
+    virtual uint32_t Width() const noexcept = 0;
+    virtual uint32_t Height() const noexcept = 0;
     /// The values of a pixel: its bands, each complex band counting its two components (real,
     /// imaginary), which the builder warps and resamples as separate values.
-    int Bands() const noexcept { return Main().samplesPerPixel * static_cast<int>(Main().Components()); }
+    virtual int Bands() const noexcept = 0;
     /// Complex samples (GDAL's CInt16 ... CFloat64): Bands() / 2 complex bands.
-    bool Complex() const noexcept { return Main().complex; }
-    /// The sample type of the bands; a 1-bit image reads as bytes 0 / 1 (GDAL's Byte).
-    tiff::SampleType Type() const noexcept {
-        return Main().sampleType == tiff::SampleType::kBit1 ? tiff::SampleType::kU8 : Main().sampleType;
-    }
+    virtual bool Complex() const noexcept = 0;
+    /// The sample type of the bands as GDAL reads them (a 1-bit image reads as bytes 0 / 1).
+    virtual tiff::SampleType Type() const noexcept = 0;
     size_t SampleSize() const noexcept { return tiff::SampleTypeSize(Type()); }
     size_t PixelBytes() const noexcept { return SampleSize() * static_cast<size_t>(Bands()); }
-    uint32_t BlockWidth() const noexcept { return Main().blockWidth; }
-    uint32_t BlockHeight() const noexcept { return Main().blockHeight; }
-    uint32_t BlocksAcross() const noexcept { return Main().blocksAcross; }
-    uint32_t BlocksDown() const noexcept { return Main().blocksDown; }
 
-    /// GDAL_NODATA of the main image.
-    std::optional<double> NoData() const noexcept { return Main().noData; }
-    const std::string& NoDataText() const noexcept { return Main().noDataText; }
-    /// The 1-bit internal mask IFD of the main image (GDAL's per-dataset mask).
-    std::optional<uint32_t> MaskIfd() const noexcept { return maskIfd_; }
-    /// 0-based index of the alpha band (ExtraSamples associated / unassociated alpha), -1 if none.
-    int AlphaBand() const noexcept { return alphaBand_; }
+    /// The blocks ReadBlock decodes: GDAL's blocks of the raster.
+    virtual uint32_t BlockWidth() const noexcept = 0;
+    virtual uint32_t BlockHeight() const noexcept = 0;
+    uint32_t BlocksAcross() const noexcept {
+        return static_cast<uint32_t>((uint64_t{Width()} + BlockWidth() - 1) / BlockWidth());
+    }
+    uint32_t BlocksDown() const noexcept {
+        return static_cast<uint32_t>((uint64_t{Height()} + BlockHeight() - 1) / BlockHeight());
+    }
+    /// Bytes ReadBlock writes (a full block).
+    size_t BlockBytes() const noexcept { return static_cast<size_t>(BlockWidth()) * BlockHeight() * PixelBytes(); }
+
+    /// The nodata value of the bands, and its text as stored.
+    virtual std::optional<double> NoData() const noexcept = 0;
+    virtual const std::string& NoDataText() const noexcept = 0;
+    /// A per-dataset mask (GDAL's GMF_PER_DATASET mask band that is not an alpha band).
+    virtual bool HasMask() const noexcept = 0;
+    /// 0-based index of the alpha band, -1 if none.
+    virtual int AlphaBand() const noexcept = 0;
     /// Colour interpretation of band b (0-based) as GDAL reports it: "Red", "Green", "Blue",
     /// "Gray", "Alpha", "Undefined", "Palette".
-    std::string ColorInterp(int b) const;
-    /// The colour table GDAL gives a 1-band raster of up to 16 bits: its ColorMap (scaled to 8
-    /// bits as GDAL scales it), else black and white for a 1-bit image, an inverted grey ramp for
-    /// min-is-white. None otherwise.
-    std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const;
+    virtual std::string ColorInterp(int b) const = 0;
+    /// The colour table of the first band, when it has one (RGB, 8 bits per component).
+    virtual std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const = 0;
 
-    /// DroneDB's isOptimizedCogDataset: EPSG:3857, square 256 / 512 tiles, overviews.
-    bool IsOptimizedCog() const;
+    /// DroneDB's isOptimizedCogDataset: a COG in EPSG:3857 with square 256 / 512 tiles and
+    /// overviews, re-encoded at its own grid instead of warped.
+    virtual bool IsOptimizedCog() const { return false; }
     /// The source's JPEG quality (GDAL's JPEG_QUALITY estimate) when it is JPEG-compressed.
-    std::optional<int> JpegQuality() const;
-    bool IsJpeg() const noexcept { return Main().compression == 7; }
+    virtual std::optional<int> JpegQuality() const { return std::nullopt; }
+    virtual bool IsJpeg() const noexcept { return false; }
+    /// RPC metadata (GDAL's RPC domain): gdalwarp then reads more source pixels around its
+    /// windows and warps only within the suggested extent of the source.
+    virtual bool HasRpc() const noexcept { return false; }
 
-    /// The TIFF tags GDAL exposes as TIFFTAG_* metadata items and writes back to a copy
-    /// (DocumentName, ImageDescription, Software, DateTime, Artist, HostComputer, Copyright,
-    /// X / YResolution, ResolutionUnit, Min / MaxSampleValue), as little-endian raw tags.
-    std::vector<writer::RawTag> MetadataTags() const;
+    /// The dataset and band metadata GDAL copies to the output, as a GTiff GDAL_METADATA
+    /// document ("<GDALMetadata><Item ...>...</GDALMetadata>"), "" when none.
+    virtual const std::string& GdalMetadata() const noexcept = 0;
+    /// The TIFF tags GDAL writes back from TIFFTAG_* metadata items (DocumentName,
+    /// ImageDescription, Software, DateTime, Artist, HostComputer, Copyright, X / YResolution,
+    /// ResolutionUnit, Min / MaxSampleValue), as little-endian raw tags.
+    virtual std::vector<writer::RawTag> MetadataTags() const = 0;
 
-    /// Decodes block (col, row) of the full resolution into `out`: BlockWidth() x rows of the
-    /// block, every band interleaved (BAND-interleaved files are interleaved here), host order.
-    /// Returns the number of rows of the block (strips: the last one may be shorter).
-    Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const;
-    /// Bytes ReadBlock writes (a full block).
-    size_t BlockBytes() const noexcept {
-        return static_cast<size_t>(BlockWidth()) * BlockHeight() * PixelBytes();
-    }
-    /// Decodes block (col, row) of the internal mask as bytes 0 / 255 (rows of BlockWidth()).
-    /// The mask's blocks are those of the image (GDAL writes them so); Unsupported otherwise.
-    Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const;
+    /// Decodes block (col, row) of the full resolution into `out` (BlockBytes() bytes): rows of
+    /// BlockWidth() pixels, every band interleaved, host order. Returns the number of rows of
+    /// the block (the last ones may be shorter). Safe to call concurrently.
+    virtual Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
+    /// Decodes block (col, row) of the per-dataset mask as bytes 0 / 255 (rows of BlockWidth()).
+    virtual Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
 
-private:
-    std::string path_;
-    std::shared_ptr<const tiff::TiffReader> reader_;
-    tiff::Georeferencing georef_;
-    std::optional<uint32_t> maskIfd_;
-    int alphaBand_ = -1;
+protected:
+    RasterSource() = default;
 };
+
+/// Opens `path` with the reader of its format (TIFF / BigTIFF, JPEG 2000), recognised by its
+/// first bytes as GDAL recognises it.
+Expected<std::unique_ptr<RasterSource>> OpenRasterSource(const std::string& path);
+
+/// TIFF tags as GDAL's GTiff driver writes TIFFTAG_* metadata items: ASCII (NUL-terminated),
+/// SHORT, and RATIONAL from the double GDAL sets (integers as n / 1).
+writer::RawTag AsciiTag(uint16_t tag, const std::string& value);
+writer::RawTag ShortTag(uint16_t tag, uint16_t value);
+writer::RawTag RationalTag(uint16_t tag, double value);
 
 }  // namespace ddbt::cog::build
