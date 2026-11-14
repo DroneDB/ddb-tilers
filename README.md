@@ -11,13 +11,13 @@ less memory, and output that does not depend on the number of threads. The outpu
 DroneDB's: the same COG grid, codecs and statistics sidecar, the same tile coordinates and
 pixels, so a tile server can switch between the two and compare them.
 
-Status: version 0.8.0, under active development. The C API is not stable yet.
+Status: version 0.9.0, under active development. The C API is not stable yet.
 
 ## What it does
 
 | Component | Input | Output |
 |---|---|---|
-| COG builder | GeoTIFF (any sample type and band count), JPEG 2000 (JP2 or codestream, GeoJP2 / GMLJP2 georeferencing) | EPSG:3857 COG on the GoogleMapsCompatible grid, overviews, `<output>.stats.json` |
+| COG builder | GeoTIFF (any sample type and band count), JPEG 2000 (JP2 or codestream, GeoJP2 / GMLJP2 georeferencing), photos georeferenced by GCPs (JPEG, PNG, GIF, WebP, TIFF, DNG) | EPSG:3857 COG on the GoogleMapsCompatible grid, overviews, `<output>.stats.json`; a photo also in the CRS of its GCPs (`"targetSrs": "source"`) |
 | COG tiler | GeoTIFF / COG | 256 or 512 px XYZ / TMS tiles in PNG, JPEG or WebP |
 | COPC builder | LAS / LAZ (point formats 0-10), PLY, E57, XYZ, PTS, one or several | COPC (LAS 1.4, point format 6, 7 or 8), `<output>.meta.json` |
 | COPC tiler | COPC | 256 or 512 px XYZ / TMS tiles in PNG, JPEG or WebP |
@@ -190,8 +190,8 @@ selects its work directory.
   (Apache-2.0) with layer-selective decoding, decoder reuse and point formats 4, 5, 9 and 10.
   `third_party/lazperf/FORK.md` lists every change.
 - `third_party/fpnge`: [fpnge](https://github.com/veluca93/fpnge) (Apache-2.0), unmodified.
-- Through vcpkg: PROJ, libdeflate, libjpeg-turbo, libwebp, zstd, OpenJPEG, LERC, libtiff, libjxl, Google Highway,
-  GoogleTest and Google Benchmark.
+- Through vcpkg: PROJ, libdeflate, libjpeg-turbo, libspng, giflib, libwebp, zstd, OpenJPEG, LERC, libtiff, libjxl,
+  Google Highway, GoogleTest and Google Benchmark.
 
 ## License
 
