@@ -23,7 +23,16 @@
     "zstd",
     "openjpeg",
     "lerc",
-    "highway"
+    "highway",
+    {
+      "name": "tiff",
+      "default-features": false,
+      "features": [
+        "jpeg",
+        "lzma",
+        "zip"
+      ]
+    }
   ],
   "features": {
     "tests": {

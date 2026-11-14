@@ -3,7 +3,8 @@
 # geotransform, CRS and sidecar files. Paths relative to src/.
 list(APPEND DDBT_SOURCES
   cog/tiff/tiff_reader.cpp
-  cog/tiff/block_reader.cpp)
+  cog/tiff/block_reader.cpp
+  cog/tiff/libtiff_codec.cpp)
 list(APPEND DDBT_SOURCES
   cog/tiff/geotiff.cpp
   cog/tiff/geotiff_crs.cpp)

@@ -32,6 +32,7 @@
 #include <string_view>
 #include <vector>
 
+#include "cog/tiff/libtiff_codec.h"
 #include "cog/tiff/tiff_tags.h"
 #include "core/io/byte_source.h"
 #include "core/mem/aligned.h"
@@ -155,8 +156,13 @@ struct IfdInfo {
     uint32_t BlockPlane(uint32_t block) const noexcept { return block / (blocksAcross * blocksDown); }
     /// Rows a block holds: blockHeight for tiles; the last strip may hold fewer.
     uint32_t BlockRows(uint32_t block) const noexcept;
+    /// Samples stored with another width than their type's (NBITS: 2 to 31 bits, packed), which
+    /// decode to the unsigned type that holds them.
+    bool IsPacked() const noexcept;
     /// Bytes per decoded row of a block (packed bits rounded up to bytes for 1-bit data).
     uint64_t BlockRowBytes() const noexcept;
+    /// Bytes per stored row of a block, before packed samples are unpacked.
+    uint64_t StoredRowBytes() const noexcept;
     /// Decoded size of block `index` (BlockRows * BlockRowBytes, before any JPEG YCbCr->RGB,
     /// which keeps 3 samples). 0 on overflow.
     uint64_t DecodedBlockBytes(uint32_t block) const noexcept;
@@ -331,11 +337,20 @@ private:
     std::vector<IfdInfo> ifds_;
     std::vector<std::unique_ptr<IfdState>> states_;
     uint32_t main_ = 0;
+    // The blocks of the compressions ddbt has no codec for (libtiff_codec.h), opened on first use
+    mutable std::once_flag libtiffOnce_;
+    mutable std::unique_ptr<LibtiffCodec> libtiff_;
+    const LibtiffCodec& Libtiff() const;
 };
 
 /// The value GDAL fills a sparse block with, converted to the sample type (rounded and clamped
 /// for integers), written into `out` (count samples). Sets 0 when `value` is not set.
 void FillSamples(std::span<uint8_t> out, SampleType type, std::optional<double> value);
+
+/// Unpacks rows of `samples` samples of `bits` bits (2 to 31, MSB first, each row padded to a
+/// byte) into unsigned samples of `outBytes` bytes (1, 2 or 4), host order.
+void UnpackSamples(const uint8_t* in, size_t inRowStride, uint64_t samples, uint32_t rows, uint32_t bits,
+                   size_t outBytes, uint8_t* out, size_t outRowStride);
 
 /// Expands rows of packed 1-bit samples (MSB first) to bytes 0 / `one` (GDAL reads a 1-bit
 /// mask as 0 / 255).

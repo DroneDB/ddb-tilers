@@ -463,9 +463,11 @@ TEST(TiffReader, MalformedFilesGiveErrors) {
         EXPECT_EQ((*r)->ReadBlock(0, 0).code(), StatusCode::kCorrupt);
     }
     {
+        // 12-bit integers are packed samples (read as UInt16); 12-bit floats are not read
         TiffBuilder b(false, false);
         b.AddIfd({b.Long(tag::kImageWidth, {4}), b.Long(tag::kImageLength, {4}), b.Short(tag::kBitsPerSample, {12}),
-                  b.Long(tag::kStripOffsets, {8}), b.Long(tag::kStripByteCounts, {24})});
+                  b.Short(tag::kSampleFormat, {3}), b.Long(tag::kStripOffsets, {8}),
+                  b.Long(tag::kStripByteCounts, {24})});
         auto r = TiffReader::Open(Memory(b.bytes()));
         ASSERT_TRUE(r.ok());
         EXPECT_EQ((*r)->ReadBlock(0, 0).code(), StatusCode::kUnsupported);

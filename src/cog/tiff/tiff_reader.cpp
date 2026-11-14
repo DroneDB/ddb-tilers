@@ -111,6 +111,10 @@ double DecodeDoubleValue(const uint8_t* p, uint16_t type, bool be) {
 SampleType ToSampleType(uint16_t format, uint16_t bits) {
     // SampleFormat 4 (void) reads as unsigned, as GDAL does.
     const bool isUint = format == 1 || format == 4;
+    // Integer samples of another width (NBITS: 2 to 31 bits, packed) read as the unsigned type
+    // that holds them, as GDAL reads them (Byte, UInt16, UInt32)
+    if (bits >= 2 && bits < 32 && bits != 8 && bits != 16 && (format == 1 || format == 2 || format == 4))
+        return bits < 8 ? SampleType::kU8 : bits < 16 ? SampleType::kU16 : SampleType::kU32;
     switch (bits) {
         case 1: return isUint ? SampleType::kBit1 : SampleType::kUnknown;
         case 8: return isUint ? SampleType::kU8 : format == 2 ? SampleType::kI8 : SampleType::kUnknown;
@@ -190,10 +194,26 @@ uint32_t IfdInfo::BlockRows(uint32_t block) const noexcept {
     return static_cast<uint32_t>(std::min<uint64_t>(blockHeight, height - first));
 }
 
+namespace {
+// Bytes of a row of `samples` samples of `bits` bits, packed and padded to a byte
+uint64_t PackedRowBytes(uint64_t samples, uint64_t bits) noexcept {
+    uint64_t total = 0;
+    if (!CheckedMul<uint64_t>(samples, bits, &total)) return 0;
+    return (total + 7) / 8;
+}
+}  // namespace
+
+bool IfdInfo::IsPacked() const noexcept {
+    return sampleType != SampleType::kBit1 && SampleTypeSize(sampleType) * 8 != bitsPerSample;
+}
+
 uint64_t IfdInfo::BlockRowBytes() const noexcept {
-    uint64_t bits = 0;
-    if (!CheckedMul<uint64_t>(uint64_t{blockWidth} * SamplesPerBlockPixel(), bitsPerSample, &bits)) return 0;
-    return (bits + 7) / 8;
+    const uint64_t bits = IsPacked() ? SampleTypeSize(sampleType) * 8 : bitsPerSample;
+    return PackedRowBytes(uint64_t{blockWidth} * SamplesPerBlockPixel(), bits);
+}
+
+uint64_t IfdInfo::StoredRowBytes() const noexcept {
+    return PackedRowBytes(uint64_t{blockWidth} * SamplesPerBlockPixel(), bitsPerSample);
 }
 
 uint64_t IfdInfo::DecodedBlockBytes(uint32_t block) const noexcept {

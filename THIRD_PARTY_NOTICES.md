@@ -28,7 +28,7 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | OpenJPEG | BSD-2-Clause | ddbt |
 | LERC | Apache-2.0 | ddbt |
 | Highway | Apache-2.0 or BSD-3-Clause | ddbt |
-| libtiff | libtiff (BSD-style) | PROJ |
+| libtiff | libtiff (BSD-style) | ddbt (the TIFF compressions without a codec of its own), PROJ |
 | SQLite | Public domain | PROJ |
 | nlohmann/json | MIT (header-only) | PROJ |
 | zlib | zlib | libtiff, libspng |

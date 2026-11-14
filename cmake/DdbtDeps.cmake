@@ -38,5 +38,6 @@ target_link_libraries(ddbt_deps INTERFACE
   openjp2
   unofficial::Lerc::Lerc
   hwy::hwy
+  TIFF::TIFF
   ddbt::lazperf
   ddbt::fpnge)

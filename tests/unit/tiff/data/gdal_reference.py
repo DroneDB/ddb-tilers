@@ -150,6 +150,16 @@ SYNTHETIC = [
     ("jpeg_gray_band", 300, 200, 2, "Byte", ["COMPRESS=JPEG", "INTERLEAVE=BAND", "TILED=YES", "JPEGTABLESMODE=3"], {}),
     ("jpeg_rgba", 300, 200, 4, "Byte", ["COMPRESS=JPEG", "TILED=YES", "JPEGTABLESMODE=0"], {"alpha": True}),
     ("nbits1", 301, 203, 1, "Byte", ["NBITS=1", "COMPRESS=DEFLATE"], {"nbits1": True}),
+    # decoded by libtiff (CCITT, LZMA) and packed samples (NBITS)
+    ("ccitt_rle", 301, 203, 1, "Byte", ["NBITS=1", "COMPRESS=CCITTRLE"], {"nbits1": True}),
+    ("ccitt_fax3", 301, 203, 1, "Byte", ["NBITS=1", "COMPRESS=CCITTFAX3"], {"nbits1": True}),
+    ("ccitt_fax4_tiled", 301, 203, 1, "Byte", ["NBITS=1", "COMPRESS=CCITTFAX4", "TILED=YES", "BLOCKXSIZE=64", "BLOCKYSIZE=64"], {"nbits1": True}),
+    ("lzma_u8x3", 301, 203, 3, "Byte", ["COMPRESS=LZMA"], {}),
+    ("lzma_f32_pred3_be", 300, 200, 1, "Float32", ["COMPRESS=LZMA", "PREDICTOR=3", "ENDIANNESS=BIG", "TILED=YES"], {}),
+    ("nbits4_u8x3", 301, 203, 3, "Byte", ["NBITS=4"], {"nbits": 4}),
+    ("nbits12_u16_lzw_be", 260, 190, 2, "UInt16", ["NBITS=12", "COMPRESS=LZW", "ENDIANNESS=BIG"], {"nbits": 12}),
+    ("nbits12_u16_lzma_band", 260, 190, 3, "UInt16", ["NBITS=12", "COMPRESS=LZMA", "INTERLEAVE=BAND", "TILED=YES"], {"nbits": 12}),
+    ("nbits20_u32_deflate", 130, 70, 1, "UInt32", ["NBITS=20", "COMPRESS=DEFLATE"], {"nbits": 20}),
     ("palette_lzw", 301, 203, 1, "Byte", ["COMPRESS=LZW", "TILED=YES"], {"palette": True}),
     ("sparse_u8_nodata", 300, 200, 1, "Byte", ["COMPRESS=DEFLATE", "TILED=YES", "BLOCKXSIZE=64", "BLOCKYSIZE=64", "SPARSE_OK=TRUE"], {"nodata": 7, "sparse": True}),
     ("sparse_f32_nodata", 300, 200, 1, "Float32", ["COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=64", "BLOCKYSIZE=64", "SPARSE_OK=TRUE"], {"nodata": -32767.0, "sparse": True}),
@@ -272,6 +282,10 @@ def build_synthetic(outdir):
         if extra.get("nbits1"):
             band = src.GetRasterBand(1)
             band.WriteArray((band.ReadAsArray() > 128).astype(np.uint8))
+        if extra.get("nbits"):
+            for b in range(bands):
+                band = src.GetRasterBand(b + 1)
+                band.WriteArray(band.ReadAsArray() % (1 << extra["nbits"]))
         if extra.get("palette"):
             band = src.GetRasterBand(1)
             ct = gdal.ColorTable()

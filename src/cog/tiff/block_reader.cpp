@@ -27,6 +27,7 @@ using codecs::Compression;
 
 thread_local std::vector<uint8_t> tlsCompressed;  // pread staging
 thread_local std::vector<uint8_t> tlsReversed;    // FillOrder=2 bit reversal
+thread_local std::vector<uint8_t> tlsPacked;      // packed (NBITS) samples before unpacking
 
 uint8_t ReverseBits(uint8_t b) {
     b = static_cast<uint8_t>((b & 0xF0) >> 4 | (b & 0x0F) << 4);
@@ -177,11 +178,12 @@ Status TiffReader::CheckDecodable(uint32_t ifd) const {
     if (i.sampleType == SampleType::kUnknown) {
         return Unsupported(std::to_string(i.bitsPerSample) + "-bit samples of SampleFormat " + std::to_string(i.sampleFormat));
     }
-    if (!codecs::IsSupportedCompression(i.compression)) {
+    if (!codecs::IsSupportedCompression(i.compression) && !LibtiffCodec::Supports(i.compression)) {
         return Unsupported(std::string("compression ") + std::string(codecs::CompressionName(i.compression)) + " (" +
                            std::to_string(i.compression) + ")");
     }
     const auto c = static_cast<Compression>(i.compression);
+    if (i.IsPacked() && i.predictor != 1) return Unsupported("predictor on " + std::to_string(i.bitsPerSample) + "-bit data");
     if (i.sampleType == SampleType::kBit1) {
         if (c == Compression::kJpeg || c == Compression::kWebp || c == Compression::kLerc) {
             return Unsupported("1-bit data with " + std::string(codecs::CompressionName(i.compression)));
@@ -194,13 +196,16 @@ Status TiffReader::CheckDecodable(uint32_t ifd) const {
         return Unsupported("floating-point predictor on " + std::to_string(i.bitsPerSample) + "-bit data");
     }
     if (c == Compression::kJpeg) {
-        if (i.bitsPerSample != 8) return Unsupported("JPEG with " + std::to_string(i.bitsPerSample) + "-bit samples");
+        // 12-bit JPEG goes to libtiff (built with libjpeg-turbo's 12-bit API)
+        if (i.bitsPerSample != 8 && i.bitsPerSample != 12)
+            return Unsupported("JPEG with " + std::to_string(i.bitsPerSample) + "-bit samples");
         if (i.photometric == photometric::kYCbCr && (!i.IsPixelInterleaved() || i.samplesPerPixel != 3)) {
             return Unsupported("JPEG YCbCr needs 3 pixel-interleaved samples");
         }
     } else if (i.photometric == photometric::kYCbCr && i.samplesPerPixel >= 3) {
         return Unsupported("YCbCr data without JPEG compression");
     }
+    if (c == Compression::kWebp && i.IsPacked()) return Unsupported("WebP with packed samples");
     if (c == Compression::kWebp) {
         if (i.bitsPerSample != 8 || !i.IsPixelInterleaved() || (i.samplesPerPixel != 3 && i.samplesPerPixel != 4)) {
             return Unsupported("WebP needs 3 or 4 pixel-interleaved 8-bit samples");
@@ -291,55 +296,81 @@ Status TiffReader::DecodeBlock(uint32_t ifd, uint32_t index, std::span<const uin
     const size_t bps = SampleTypeSize(i.sampleType);
     if (bps > 1 && reinterpret_cast<uintptr_t>(out.data()) % bps != 0) return InvalidArgument("output buffer misaligned");
 
-    if (i.fillOrder == 2) {
-        // libtiff reverses the bits of the raw data before decoding.
-        std::vector<uint8_t>& rev = tlsReversed;
-        rev.resize(compressed.size());
-        for (size_t k = 0; k < compressed.size(); ++k) rev[k] = ReverseBits(compressed[k]);
-        compressed = std::span<const uint8_t>(rev);
-    }
-
     const uint32_t rows = i.BlockRows(index);
     const uint32_t spp = i.SamplesPerBlockPixel();
     const auto c = static_cast<Compression>(i.compression);
+
+    // Packed samples are decoded as stored, then unpacked into `out`
+    std::span<uint8_t> stored = out;
+    if (i.IsPacked()) {
+        std::vector<uint8_t>& packed = tlsPacked;
+        packed.resize(static_cast<size_t>(i.StoredRowBytes() * rows));
+        stored = std::span<uint8_t>(packed);
+    }
+
+    // The compressions ddbt decodes itself, and the others (libtiff_codec.h): old-style LZW
+    // (its first code is a byte-swapped 9-bit Clear, libtiff's test) and 12-bit JPEG go to libtiff
+    const bool oldLzw = c == Compression::kLzw && compressed.size() >= 2 && compressed[0] == 0 && (compressed[1] & 1);
+    const bool viaLibtiff = !codecs::IsSupportedCompression(i.compression) || oldLzw ||
+                            (c == Compression::kJpeg && i.bitsPerSample != 8);
     Status st;
     bool nativeOrder = false;  // decoder output is already in host order
-    switch (c) {
-        case Compression::kNone: st = codecs::DecodeNone(compressed, out); break;
-        case Compression::kLzw: st = codecs::DecodeLzw(compressed, out); break;
-        case Compression::kPackBits: st = codecs::DecodePackBits(compressed, out); break;
-        case Compression::kAdobeDeflate:
-        case Compression::kDeflate: st = codecs::DecodeDeflate(compressed, out); break;
-        case Compression::kZstd: st = codecs::DecodeZstd(compressed, out); break;
-        case Compression::kLerc: {
-            codecs::LercBlockInfo li;
-            li.width = i.blockWidth;
-            li.height = rows;
-            li.samples = spp;
-            li.bitsPerSample = i.bitsPerSample;
-            li.sampleFormat = i.sampleFormat;
-            li.lastSampleIsUnassociatedAlpha = i.IsPixelInterleaved() && !i.extraSamples.empty() &&
-                                               i.extraSamples.back() == extrasample::kUnassociatedAlpha;
-            li.additionalCompression = i.hasLercParameters ? i.lercParameters[1] : 0;
-            st = codecs::DecodeLerc(compressed, li, out);
-            break;
+    if (viaLibtiff) {
+        // libtiff restores FillOrder 2, swaps to host order and undoes the predictor itself
+        st = Libtiff().Decode(i.offset, index, compressed, stored);
+        nativeOrder = true;
+    } else {
+        if (i.fillOrder == 2) {
+            // libtiff reverses the bits of the raw data before decoding.
+            std::vector<uint8_t>& rev = tlsReversed;
+            rev.resize(compressed.size());
+            for (size_t k = 0; k < compressed.size(); ++k) rev[k] = ReverseBits(compressed[k]);
+            compressed = std::span<const uint8_t>(rev);
         }
-        case Compression::kWebp:
-            st = codecs::DecodeWebp(compressed, i.blockWidth, rows, i.samplesPerPixel, out);
-            nativeOrder = true;
-            break;
-        case Compression::kJpeg: {
-            codecs::JpegDecodeOptions jo;
-            jo.tables = i.jpegTables;
-            jo.ycbcrToRgb = i.photometric == photometric::kYCbCr && i.IsPixelInterleaved() && i.samplesPerPixel == 3;
-            st = codecs::DecodeJpeg(compressed, jo, spp, 0, 0, i.blockWidth, rows, out.data(),
-                                    static_cast<size_t>(i.BlockRowBytes()));
-            nativeOrder = true;
-            break;
+        switch (c) {
+            case Compression::kNone: st = codecs::DecodeNone(compressed, stored); break;
+            case Compression::kLzw: st = codecs::DecodeLzw(compressed, stored); break;
+            case Compression::kPackBits: st = codecs::DecodePackBits(compressed, stored); break;
+            case Compression::kAdobeDeflate:
+            case Compression::kDeflate: st = codecs::DecodeDeflate(compressed, stored); break;
+            case Compression::kZstd: st = codecs::DecodeZstd(compressed, stored); break;
+            case Compression::kLerc: {
+                codecs::LercBlockInfo li;
+                li.width = i.blockWidth;
+                li.height = rows;
+                li.samples = spp;
+                li.bitsPerSample = i.bitsPerSample;
+                li.sampleFormat = i.sampleFormat;
+                li.lastSampleIsUnassociatedAlpha = i.IsPixelInterleaved() && !i.extraSamples.empty() &&
+                                                   i.extraSamples.back() == extrasample::kUnassociatedAlpha;
+                li.additionalCompression = i.hasLercParameters ? i.lercParameters[1] : 0;
+                st = codecs::DecodeLerc(compressed, li, stored);
+                break;
+            }
+            case Compression::kWebp:
+                st = codecs::DecodeWebp(compressed, i.blockWidth, rows, i.samplesPerPixel, stored);
+                nativeOrder = true;
+                break;
+            case Compression::kJpeg: {
+                codecs::JpegDecodeOptions jo;
+                jo.tables = i.jpegTables;
+                jo.ycbcrToRgb = i.photometric == photometric::kYCbCr && i.IsPixelInterleaved() && i.samplesPerPixel == 3;
+                st = codecs::DecodeJpeg(compressed, jo, spp, 0, 0, i.blockWidth, rows, stored.data(),
+                                        static_cast<size_t>(i.BlockRowBytes()));
+                nativeOrder = true;
+                break;
+            }
+            default: st = Unsupported("compression " + std::to_string(i.compression)); break;
         }
-        default: st = Unsupported("compression " + std::to_string(i.compression)); break;
     }
     if (!st.ok()) return st.WithContext("block " + std::to_string(index) + " of IFD " + std::to_string(ifd));
+    if (i.IsPacked()) {
+        // Bits of a packed stream are in file order whatever the byte order (libtiff swaps only
+        // whole 16, 32 and 64-bit samples), and no predictor applies to them
+        UnpackSamples(stored.data(), static_cast<size_t>(i.StoredRowBytes()), uint64_t{i.blockWidth} * spp, rows,
+                      i.bitsPerSample, bps, out.data(), static_cast<size_t>(i.BlockRowBytes()));
+        return Status::Ok();
+    }
     if (nativeOrder || bps == 0) return Status::Ok();
 
     const size_t rowStride = static_cast<size_t>(i.BlockRowBytes());
@@ -351,6 +382,29 @@ Status TiffReader::DecodeBlock(uint32_t ifd, uint32_t index, std::span<const uin
     if (bigEndian_ && bps > 1) codecs::ByteSwapSamples(out.data(), out.size() / bps, bps);
     if (i.predictor == 2) codecs::UndoHorizontalPredictor(out.data(), rows, rowStride, i.blockWidth, spp, bps);
     return Status::Ok();
+}
+
+const LibtiffCodec& TiffReader::Libtiff() const {
+    std::call_once(libtiffOnce_, [this] { libtiff_ = std::make_unique<LibtiffCodec>(source_); });
+    return *libtiff_;
+}
+
+void UnpackSamples(const uint8_t* in, size_t inRowStride, uint64_t samples, uint32_t rows, uint32_t bits,
+                   size_t outBytes, uint8_t* out, size_t outRowStride) {
+    for (uint32_t r = 0; r < rows; ++r) {
+        const uint8_t* src = in + static_cast<size_t>(r) * inRowStride;
+        uint8_t* dst = out + static_cast<size_t>(r) * outRowStride;
+        uint64_t bit = 0;
+        for (uint64_t s = 0; s < samples; ++s) {
+            uint32_t v = 0;
+            for (uint32_t k = 0; k < bits; ++k, ++bit) v = (v << 1) | ((src[bit >> 3] >> (7 - (bit & 7))) & 1u);
+            switch (outBytes) {
+                case 1: dst[s] = static_cast<uint8_t>(v); break;
+                case 2: reinterpret_cast<uint16_t*>(dst)[s] = static_cast<uint16_t>(v); break;
+                default: reinterpret_cast<uint32_t*>(dst)[s] = v; break;
+            }
+        }
+    }
 }
 
 Expected<bool> TiffReader::ReadBlockInto(uint32_t ifd, uint32_t index, std::span<uint8_t> out) const {
