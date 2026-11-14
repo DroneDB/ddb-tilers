@@ -50,6 +50,9 @@ public:
     uint32_t BlockWidth() const noexcept override { return width_; }
     uint32_t BlockHeight() const noexcept override { return blockHeight_; }
     bool IsOptimizedCog() const override { return false; }
+    // Its blocks are made here, not kept.
+    const uint8_t* ResidentBlock(uint32_t, uint32_t) const override { return nullptr; }
+    const uint8_t* ResidentMaskBlock(uint32_t, uint32_t) const override { return nullptr; }
 
     Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const override {
         if (col != 0 || row >= BlocksDown()) return Status(StatusCode::kOutOfRange, "block out of range");

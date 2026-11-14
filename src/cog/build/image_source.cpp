@@ -136,6 +136,16 @@ Expected<uint32_t> ImageSource::ReadBlock(uint32_t col, uint32_t row, uint8_t* o
     return rows;
 }
 
+const uint8_t* ImageSource::ResidentBlock(uint32_t col, uint32_t row) const {
+    if (col != 0 || row >= BlocksDown() || !Load().ok() || spilled_) return nullptr;
+    return pixels_.get() + static_cast<size_t>(row) * blockHeight_ * RowBytes();
+}
+
+const uint8_t* ImageSource::ResidentMaskBlock(uint32_t col, uint32_t row) const {
+    if (!info_.mask || col != 0 || row >= BlocksDown() || !Load().ok() || spilled_) return nullptr;
+    return mask_.get() + static_cast<size_t>(row) * blockHeight_ * info_.width;
+}
+
 Status ImageSource::ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const {
     if (!info_.mask) return Status(StatusCode::kInvalidArgument, "no mask");
     if (col != 0 || row >= BlocksDown()) return Status(StatusCode::kOutOfRange, "block out of range");

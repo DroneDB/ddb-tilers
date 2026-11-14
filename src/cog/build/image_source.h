@@ -78,6 +78,9 @@ public:
 
     Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const override;
     Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const override;
+    /// The rows in memory (not when they went to the scratch file).
+    const uint8_t* ResidentBlock(uint32_t col, uint32_t row) const override;
+    const uint8_t* ResidentMaskBlock(uint32_t col, uint32_t row) const override;
 
     /// Decodes the image now (the first block read does it otherwise): the decoding error, if any.
     Status Load() const;

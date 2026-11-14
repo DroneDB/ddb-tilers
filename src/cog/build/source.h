@@ -104,6 +104,14 @@ public:
     /// Decodes block (col, row) of the per-dataset mask as bytes 0 / 255 (rows of BlockWidth()).
     virtual Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
 
+    /// The samples of block (col, row) as ReadBlock writes them, in place, when the source keeps
+    /// its whole decoded image in memory (only the rows inside the raster: a last, shorter block
+    /// ends with the raster); nullptr otherwise, or when decoding failed (ReadBlock then reports
+    /// why). Readers use them instead of a copy. Valid while the source lives.
+    virtual const uint8_t* ResidentBlock(uint32_t /*col*/, uint32_t /*row*/) const { return nullptr; }
+    /// Likewise for the mask's block.
+    virtual const uint8_t* ResidentMaskBlock(uint32_t /*col*/, uint32_t /*row*/) const { return nullptr; }
+
 protected:
     RasterSource() = default;
 };

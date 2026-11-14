@@ -21,7 +21,8 @@
 // tile, the source window it reads (its edges transformed exactly, plus a margin), and counts
 // the tiles that use each block; a block is decoded by the first tile that needs it (single
 // flight) and freed when its last tile is done. A tile whose pixels reach outside its planned
-// window (not expected for smooth transforms) reads the missing blocks without the cache.
+// window (not expected for smooth transforms) reads the missing blocks without the cache. The
+// blocks of a source that keeps its decoded image in memory (a photo) are read in place.
 #include "cog/warp/warp_producer.h"
 
 #include <algorithm>
@@ -576,9 +577,12 @@ private:
                 const size_t b = static_cast<size_t>(by) * static_cast<size_t>(across_) + static_cast<size_t>(bx);
                 const bool inPlan = !planned.Empty() && bx >= planned.x0 / bw_ && bx <= (planned.x1 - 1) / bw_ &&
                                     by >= planned.y0 / bh_ && by <= (planned.y1 - 1) / bh_;
-                const uint8_t* data;
-                const uint8_t* mask = nullptr;
-                if (inPlan) {
+                const uint8_t* data = src_.ResidentBlock(static_cast<uint32_t>(bx), static_cast<uint32_t>(by));
+                const uint8_t* mask =
+                    spec_.mask ? src_.ResidentMaskBlock(static_cast<uint32_t>(bx), static_cast<uint32_t>(by)) : nullptr;
+                if (data != nullptr && (!spec_.mask || mask != nullptr)) {
+                    // A source that keeps its image in memory: no copy of the block.
+                } else if (inPlan) {
                     BlockCache::Entry& e = Acquire(b);
                     data = e.data.get();
                     mask = e.mask.get();

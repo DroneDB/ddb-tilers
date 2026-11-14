@@ -57,6 +57,10 @@ public:
     Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const override {
         return inner_->ReadMaskBlock(col, row, out);
     }
+    const uint8_t* ResidentBlock(uint32_t col, uint32_t row) const override { return inner_->ResidentBlock(col, row); }
+    const uint8_t* ResidentMaskBlock(uint32_t col, uint32_t row) const override {
+        return inner_->ResidentMaskBlock(col, row);
+    }
 
 protected:
     const RasterSource& Inner() const noexcept { return *inner_; }
