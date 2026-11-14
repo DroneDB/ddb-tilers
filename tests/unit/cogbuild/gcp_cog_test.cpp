@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "../test_env.h"
 #include "../tiff/tiff_test_util.h"
 #include "cog/build/cog_builder.h"
 #include "cog/build/source.h"
@@ -61,23 +62,8 @@ std::string SourcePath(const GcpCase& c) {
     return fs::path(c.source).is_absolute() ? std::string(c.source) : std::string(DDBT_TEST_FIXTURES) + "/" + c.source;
 }
 
-class TempDir {
-public:
-    TempDir() {
-        const char* base = std::getenv("DDBT_TEST_TMP");
-        const fs::path root = base ? fs::path(base) : fs::temp_directory_path();
-        path_ = root / ("ddbt-gcpcog-" + std::to_string(std::random_device{}()) + "-" + std::to_string(counter_++));
-        fs::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ec;
-        fs::remove_all(path_, ec);
-    }
-    std::string File(const std::string& name) const { return (path_ / name).string(); }
-
-private:
-    static inline std::atomic<int> counter_{0};
-    fs::path path_;
+struct TempDir : ddbt::test::TempDir {
+    TempDir() : ddbt::test::TempDir("ddbt-gcpcog") {}
 };
 
 // Every band of every level (full resolution first) as GDAL reads it: the samples of the band,

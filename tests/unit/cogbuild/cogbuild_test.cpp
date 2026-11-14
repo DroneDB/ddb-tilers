@@ -49,23 +49,8 @@ namespace {
 namespace fs = std::filesystem;
 using encode::ByteBuffer;
 
-class TempDir {
-public:
-    TempDir() {
-        const char* base = std::getenv("DDBT_TEST_TMP");
-        fs::path root = base ? fs::path(base) : fs::temp_directory_path();
-        path_ = root / ("ddbt-cogbuild-" + std::to_string(std::random_device{}()) + "-" + std::to_string(counter_++));
-        fs::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ec;
-        fs::remove_all(path_, ec);
-    }
-    std::string File(const std::string& name) const { return (path_ / name).string(); }
-
-private:
-    static inline std::atomic<int> counter_{0};
-    fs::path path_;
+struct TempDir : ddbt::test::TempDir {
+    TempDir() : ddbt::test::TempDir("ddbt-cogbuild") {}
 };
 
 TEST(Overview, CubicTapsAtFactorTwo) {

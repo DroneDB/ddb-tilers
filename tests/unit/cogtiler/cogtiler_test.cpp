@@ -26,6 +26,7 @@
 #include <typeinfo>
 #include <vector>
 
+#include "../test_env.h"
 #include "../encode/decode_helpers.h"
 #include "cog/tiler/block_cache.h"
 #include "cog/tiler/cog_source.h"
@@ -71,23 +72,8 @@ const SamplingCase kSampling[] = {
 };
 
 // A scratch directory of our own (removed by the fixture).
-class TempDir {
-public:
-    TempDir() {
-        const char* base = std::getenv("DDBT_TEST_TMP");
-        fs::path root = base ? fs::path(base) : fs::temp_directory_path();
-        path_ = root / ("ddbt-cogtiler-" + std::to_string(std::random_device{}()) + "-" + std::to_string(counter_++));
-        fs::create_directories(path_);
-    }
-    ~TempDir() {
-        std::error_code ec;
-        fs::remove_all(path_, ec);
-    }
-    const fs::path& path() const { return path_; }
-
-private:
-    static inline std::atomic<int> counter_{0};
-    fs::path path_;
+struct TempDir : ddbt::test::TempDir {
+    TempDir() : ddbt::test::TempDir("ddbt-cogtiler") {}
 };
 
 ddbt::encode::ByteBuffer Render(const std::string& path, int z, int x, int y, ddbt::encode::TileFormat f =
