@@ -56,6 +56,48 @@ void SetPhotometric(Plan& p, const std::vector<std::string>& interps) {
                                      : tiff::extrasample::kUnspecified);
 }
 
+void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table) {
+    p.photometric = tiff::photometric::kPalette;
+    p.extraSamples.clear();
+    // CreateTIFFColorTable: 256 entries for 8-bit samples, 65536 for 16-bit
+    const size_t n = tiff::SampleTypeSize(p.type) == 1 ? 256 : 65536;
+    p.colorMap.assign(3 * n, 0);
+    for (size_t i = 0; i < std::min(n, table.size()); ++i)
+        for (size_t c = 0; c < 3; ++c) p.colorMap[c * n + i] = static_cast<uint16_t>(table[i][c] * 257u);
+    p.nearestOverviews = true;
+}
+
+std::string OutputMetadata(const std::string& src, const Plan& plan, bool dropStatistics) {
+    // The colour interpretations GTiff stores in GDAL_METADATA are those the photometric does not
+    // give: a YCbCr JPEG is RGB, a palette image is a palette
+    const bool interpsGiven = plan.photometric == tiff::photometric::kYCbCr || plan.photometric == tiff::photometric::kPalette;
+    std::string items;
+    if (!src.empty()) {
+        const size_t open = src.find("<GDALMetadata>");
+        const size_t close = src.rfind("</GDALMetadata>");
+        if (open != std::string::npos && close != std::string::npos && close > open) {
+            std::string body = src.substr(open + 14, close - open - 14);
+            size_t pos = 0;
+            while (pos < body.size()) {
+                size_t nl = body.find('\n', pos);
+                if (nl == std::string::npos) nl = body.size();
+                const std::string line = body.substr(pos, nl - pos);
+                // gdalwarp does not copy band statistics (STATISTICS_*): the warp changes them.
+                const bool stats = dropStatistics && line.find("name=\"STATISTICS_") != std::string::npos;
+                const bool interp = interpsGiven && line.find("role=\"colorinterp\"") != std::string::npos;
+                if (line.find("<Item") != std::string::npos && line.find("domain=\"IMAGE_STRUCTURE\"") == std::string::npos &&
+                    !stats && !interp)
+                    items += line + "\n";
+                pos = nl + 1;
+            }
+        }
+    }
+    if (!plan.overviews.empty())
+        items += std::string("  <Item name=\"OVERVIEW_RESAMPLING\" domain=\"IMAGE_STRUCTURE\">") +
+                 (plan.nearestOverviews ? "NEAREST" : "CUBIC") + "</Item>\n";
+    return items.empty() ? std::string() : "<GDALMetadata>\n" + items + "</GDALMetadata>\n";
+}
+
 // GDAL's GetMaskBand alpha rule: the last band of a 2 / 4 band 8 / 16-bit raster.
 bool AlphaMaskRule(int bands, int alphaBand, tiff::SampleType t) {
     return (bands == 2 || bands == 4) && alphaBand == bands - 1 &&
@@ -74,34 +116,6 @@ int ConfiguredJpegQuality() {
     const char* e = std::getenv("DDB_COG_JPEG_QUALITY");
     if (e == nullptr) return 75;
     return std::clamp(std::atoi(e), 1, 100);
-}
-
-
-// GDAL_METADATA of the output: the source's items (minus its IMAGE_STRUCTURE domain) and the
-// COG driver's OVERVIEW_RESAMPLING=CUBIC last.
-std::string OutputMetadata(const std::string& src, bool dropStatistics) {
-    std::string items;
-    if (!src.empty()) {
-        const size_t open = src.find("<GDALMetadata>");
-        const size_t close = src.rfind("</GDALMetadata>");
-        if (open != std::string::npos && close != std::string::npos && close > open) {
-            std::string body = src.substr(open + 14, close - open - 14);
-            size_t pos = 0;
-            while (pos < body.size()) {
-                size_t nl = body.find('\n', pos);
-                if (nl == std::string::npos) nl = body.size();
-                const std::string line = body.substr(pos, nl - pos);
-                // gdalwarp does not copy band statistics (STATISTICS_*): the warp changes them.
-                const bool stats = dropStatistics && line.find("name=\"STATISTICS_") != std::string::npos;
-                if (line.find("<Item") != std::string::npos && line.find("domain=\"IMAGE_STRUCTURE\"") == std::string::npos &&
-                    !stats)
-                    items += line + "\n";
-                pos = nl + 1;
-            }
-        }
-    }
-    return "<GDALMetadata>\n" + items +
-           "  <Item name=\"OVERVIEW_RESAMPLING\" domain=\"IMAGE_STRUCTURE\">CUBIC</Item>\n</GDALMetadata>\n";
 }
 
 
@@ -136,6 +150,7 @@ Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
         p.alphaBand = src.AlphaBand();
         p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
     }
+    if (const auto table = src.ColorTable(); table && p.bands == 1) SetPalette(p, *table);
     // cogOwnGridCreationOptions: JPEG at the source's quality for a 3-band 8-bit JPEG source
     // without nodata, LZW + predictor otherwise.
     const std::optional<int> q = src.IsJpeg() ? std::optional<int>(src.JpegQuality().value_or(ConfiguredJpegQuality()))
@@ -148,7 +163,7 @@ Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
     } else {
         SetLossless(p, o);
     }
-    p.gdalMetadata = OutputMetadata(src.Main().gdalMetadata, false);
+    p.gdalMetadata = OutputMetadata(src.Main().gdalMetadata, p, false);
     return p;
 }
 
@@ -396,8 +411,15 @@ private:
         return l;
     }
 
-    // Source rows [first, end) the cubic taps of destination rows [d0, d1) read.
-    static std::pair<int, int> TapRange(uint32_t srcSize, uint32_t dstSize, int d0, int d1) {
+    // GDALResampleChunk_Near: destination pixel d takes source pixel int(0.5 + d * src / dst)
+    static int NearestSource(uint32_t srcSize, uint32_t dstSize, int d) {
+        return static_cast<int>(0.5 + d * (static_cast<double>(srcSize) / dstSize));
+    }
+
+    // Source rows [first, end) destination rows [d0, d1) read (the cubic taps, or the nearest row).
+    std::pair<int, int> TapRange(uint32_t srcSize, uint32_t dstSize, int d0, int d1) const {
+        if (plan_.nearestOverviews)
+            return {NearestSource(srcSize, dstSize, d0), NearestSource(srcSize, dstSize, d1 - 1) + 1};
         const pyramid::Taps t = pyramid::CubicTaps(static_cast<int>(srcSize), static_cast<int>(dstSize), d0, d1);
         return {t.SrcBegin(), t.SrcEnd()};
     }
@@ -427,10 +449,15 @@ private:
             Strip& child = *P.child;
             const uint32_t chunkEnd = std::min(yEnd, child.y0 + child.rows);
             const int d0 = static_cast<int>(P.childNextY), d1 = static_cast<int>(chunkEnd);
-            const pyramid::Taps rowTaps =
-                pyramid::CubicTaps(static_cast<int>(P.height), static_cast<int>(C.height), d0, d1);
-            exec::ParallelFor(0, C.blocksAcross, 1,
-                              [&](size_t c) { DownsampleTile(P, child, static_cast<uint32_t>(c), rowTaps, d0, d1); });
+            if (plan_.nearestOverviews) {
+                exec::ParallelFor(0, C.blocksAcross, 1,
+                                  [&](size_t c) { NearestTile(P, child, static_cast<uint32_t>(c), d0, d1); });
+            } else {
+                const pyramid::Taps rowTaps =
+                    pyramid::CubicTaps(static_cast<int>(P.height), static_cast<int>(C.height), d0, d1);
+                exec::ParallelFor(0, C.blocksAcross, 1,
+                                  [&](size_t c) { DownsampleTile(P, child, static_cast<uint32_t>(c), rowTaps, d0, d1); });
+            }
             P.childNextY = chunkEnd;
             if (chunkEnd == child.y0 + child.rows) {
                 if (plan_.transparency == Transparency::kAlpha && plan_.alphaMasksOverviews)
@@ -487,6 +514,27 @@ private:
         Level& L = levels_[k];
         L.cur = s;
         Cascade(k, g);
+    }
+
+    // Rows [d0, d1) of tile `col` of level k + 1 by nearest neighbour: every band and the mask
+    // copied from the source pixel GDAL picks (GDALResampleChunk_Near, the mask as its own band).
+    void NearestTile(const Level& P, Strip& child, uint32_t col, int d0, int d1) {
+        const uint32_t B = plan_.blockSize;
+        const uint32_t x0 = col * B, x1 = std::min((col + 1) * B, child.width);
+        const size_t pb = plan_.PixelBytes();
+        const bool hasMask = plan_.StripMask();
+        for (int y = d0; y < d1; ++y) {
+            const uint32_t sy = static_cast<uint32_t>(NearestSource(P.height, levels_[child.level].height, y));
+            const uint8_t* src = RowOf(P, sy);
+            const uint8_t* srcMask = hasMask ? MaskRowOf(P, sy) : nullptr;
+            uint8_t* dst = child.Pixel(0, static_cast<uint32_t>(y) - child.y0);
+            uint8_t* dstMask = hasMask ? child.MaskAt(0, static_cast<uint32_t>(y) - child.y0) : nullptr;
+            for (uint32_t x = x0; x < x1; ++x) {
+                const size_t sx = static_cast<size_t>(NearestSource(P.width, child.width, static_cast<int>(x)));
+                std::memcpy(dst + x * pb, src + sx * pb, pb);
+                if (hasMask) dstMask[x] = srcMask[sx];
+            }
+        }
     }
 
     // Rows [d0, d1) of tile `col` of level k + 1 from the window of level k.
@@ -702,7 +750,7 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         auto p = warp::WarpPlan(source, ws);
         if (!p.ok()) return p.status();
         plan = std::move(*p);
-        plan.gdalMetadata = OutputMetadata(source.Main().gdalMetadata, true);
+        plan.gdalMetadata = OutputMetadata(source.Main().gdalMetadata, plan, true);
         auto prod = warp::MakeWarpProducer(source, plan, options.memoryBudget);
         if (!prod.ok()) return prod.status();
         producer = std::move(*prod);
@@ -716,6 +764,7 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
     spec.type = plan.type;
     spec.photometric = plan.photometric;
     spec.extraSamples = plan.extraSamples;
+    spec.colorMap = plan.colorMap;
     spec.codec = plan.codec;
     spec.predictor = plan.predictor;
     if (plan.codec == Codec::kJpeg) spec.jpegTables = encode::JpegTables(plan.jpegQuality);

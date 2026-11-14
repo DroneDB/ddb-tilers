@@ -31,7 +31,10 @@ public:
     uint32_t Width() const noexcept { return Main().width; }
     uint32_t Height() const noexcept { return Main().height; }
     int Bands() const noexcept { return Main().samplesPerPixel; }
-    tiff::SampleType Type() const noexcept { return Main().sampleType; }
+    /// The sample type of the bands; a 1-bit image reads as bytes 0 / 1 (GDAL's Byte).
+    tiff::SampleType Type() const noexcept {
+        return Main().sampleType == tiff::SampleType::kBit1 ? tiff::SampleType::kU8 : Main().sampleType;
+    }
     size_t SampleSize() const noexcept { return tiff::SampleTypeSize(Type()); }
     size_t PixelBytes() const noexcept { return SampleSize() * static_cast<size_t>(Bands()); }
     uint32_t BlockWidth() const noexcept { return Main().blockWidth; }
@@ -49,6 +52,10 @@ public:
     /// Colour interpretation of band b (0-based) as GDAL reports it: "Red", "Green", "Blue",
     /// "Gray", "Alpha", "Undefined", "Palette".
     std::string ColorInterp(int b) const;
+    /// The colour table GDAL gives a 1-band raster of up to 16 bits: its ColorMap (scaled to 8
+    /// bits as GDAL scales it), else black and white for a 1-bit image, an inverted grey ramp for
+    /// min-is-white. None otherwise.
+    std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const;
 
     /// DroneDB's isOptimizedCogDataset: EPSG:3857, square 256 / 512 tiles, overviews.
     bool IsOptimizedCog() const;

@@ -24,7 +24,7 @@ Expected<std::unique_ptr<SourceRaster>> SourceRaster::Open(const std::string& pa
     s->reader_ = std::move(*reader);
     const tiff::IfdInfo& m = s->Main();
     DDBT_TRY(s->reader_->CheckDecodable(m.index));
-    if (tiff::SampleTypeSize(m.sampleType) == 0)
+    if (tiff::SampleTypeSize(s->Type()) == 0 || (m.sampleType == tiff::SampleType::kBit1 && m.samplesPerPixel != 1))
         return Status(StatusCode::kUnsupported, "Unsupported sample type in " + path);
     auto geo = tiff::ReadGeoreferencing(*s->reader_, path);
     if (!geo.ok()) return geo.status();
@@ -45,6 +45,9 @@ Expected<std::unique_ptr<SourceRaster>> SourceRaster::Open(const std::string& pa
 std::string SourceRaster::ColorInterp(int b) const {
     const tiff::IfdInfo& m = Main();
     if (b == alphaBand_) return "Alpha";
+    // A colour table (the ColorMap, GDAL's black and white table of a 1-bit image, its inverted
+    // ramp of a min-is-white one) makes the band a palette
+    if (b == 0 && ColorTable()) return "Palette";
     const int nExtra = static_cast<int>(m.extraSamples.size());
     const int colour = m.samplesPerPixel - nExtra;
     switch (m.photometric) {
@@ -59,6 +62,46 @@ std::string SourceRaster::ColorInterp(int b) const {
             if (b == 0 && colour >= 1) return "Gray";
             return "Undefined";
     }
+}
+
+std::optional<std::vector<std::array<uint8_t, 3>>> SourceRaster::ColorTable() const {
+    const tiff::IfdInfo& m = Main();
+    if (m.samplesPerPixel != 1 || m.bitsPerSample > 16) return std::nullopt;
+    std::vector<std::array<uint8_t, 3>> table;
+    if (!m.colorMap.empty()) {
+        // TIFFColorMapTagToColorTable: values in [0, 255] are 8-bit already, multiples of 256 (and
+        // not all of 257) are divided by 256, the others by 257
+        const size_t n = m.colorMap.size() / 3;
+        uint16_t maxColor = 0;
+        bool any = false, all256 = true;
+        for (const uint16_t v : m.colorMap) {
+            maxColor = std::max(maxColor, v);
+            any = any || v > 0;
+            all256 = all256 && v % 256 == 0;
+        }
+        const unsigned divisor = maxColor > 0 && maxColor < 256 ? 1u : (any && all256 ? 256u : 257u);
+        table.resize(n);
+        for (size_t i = 0; i < n; ++i)
+            for (size_t c = 0; c < 3; ++c) table[i][c] = static_cast<uint8_t>(m.colorMap[c * n + i] / divisor);
+        return table;
+    }
+    if (m.sampleType == tiff::SampleType::kBit1) {
+        // GTiffBitmapBand
+        const bool white0 = m.photometric == tiff::photometric::kMinIsWhite;
+        table = {white0 ? std::array<uint8_t, 3>{255, 255, 255} : std::array<uint8_t, 3>{0, 0, 0},
+                 white0 ? std::array<uint8_t, 3>{0, 0, 0} : std::array<uint8_t, 3>{255, 255, 255}};
+        return table;
+    }
+    if (m.photometric == tiff::photometric::kMinIsWhite) {
+        const unsigned n = 1u << m.bitsPerSample;
+        table.resize(n);
+        for (unsigned i = 0; i < n; ++i) {
+            const auto v = static_cast<uint8_t>((255u * (n - 1 - i)) / (n - 1));
+            table[i] = {v, v, v};
+        }
+        return table;
+    }
+    return std::nullopt;
 }
 
 bool SourceRaster::IsOptimizedCog() const {
@@ -143,6 +186,14 @@ std::vector<writer::RawTag> SourceRaster::MetadataTags() const {
 Expected<uint32_t> SourceRaster::ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const {
     const tiff::IfdInfo& m = Main();
     const uint32_t ifd = m.index;
+    if (m.sampleType == tiff::SampleType::kBit1) {
+        // A 1-bit image: bytes 0 / 1
+        const uint32_t index = m.BlockIndex(col, row, 0);
+        auto b = reader_->ReadBlock(ifd, index);
+        if (!b.ok()) return b.status();
+        tiff::ExpandBits(b->data(), b->rowStride, m.blockWidth, b->height, 1, out, m.blockWidth);
+        return b->height;
+    }
     if (m.IsPixelInterleaved() || m.samplesPerPixel == 1) {
         const uint32_t index = m.BlockIndex(col, row, 0);
         const uint64_t size = reader_->DecodedSize(ifd, index);

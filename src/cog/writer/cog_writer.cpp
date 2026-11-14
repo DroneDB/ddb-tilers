@@ -272,6 +272,7 @@ struct CogWriter::Impl {
             d.entries.push_back(ShortOrLong(tiff::tag::kTileLength, spec.blockSize));
             blockArrays(d, static_cast<size_t>(l.across) * l.down);
             if (!spec.extraSamples.empty()) d.entries.push_back(Shorts(tiff::tag::kExtraSamples, spec.extraSamples));
+            if (!spec.colorMap.empty()) d.entries.push_back(Shorts(tiff::tag::kColorMap, spec.colorMap));
             d.entries.push_back(Shorts(tiff::tag::kSampleFormat, std::vector<uint16_t>(spec.samples, format)));
             if (spec.codec == encode::Codec::kJpeg) {
                 if (!spec.jpegTables.empty()) d.entries.push_back(Undefined(tiff::tag::kJpegTables, spec.jpegTables));

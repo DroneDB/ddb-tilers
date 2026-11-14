@@ -543,6 +543,8 @@ Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSetting
             p.alphaBand = p.bands - 1;
         }
         build::SetPhotometric(p, interps);
+        // gdalwarp keeps the colour table of a 1-band source (its indices are warped as values)
+        if (const auto table = src.ColorTable(); table && p.bands == 1) build::SetPalette(p, *table);
         p.codec = settings.losslessCodec;
         p.predictor = build::IsFloatType(p.type) ? 3 : 2;
         p.level = settings.level;

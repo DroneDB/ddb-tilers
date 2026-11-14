@@ -50,6 +50,8 @@ struct Plan {
     int jpegQuality = 75;
     uint16_t photometric = 1;
     std::vector<uint16_t> extraSamples;
+    std::vector<uint16_t> colorMap;  // the ColorMap of a palette output (TIFF's R, G, B values)
+    bool nearestOverviews = false;   // the COG driver's NEAREST (palette), else CUBIC
     std::string gdalMetadata;
 
     bool MaskOut() const noexcept { return transparency == Transparency::kMask; }
@@ -114,6 +116,15 @@ struct Strip {
 };
 
 bool IsFloatType(tiff::SampleType t);
+/// A palette output (GTiff's CreateCopy of a 1-band raster with a colour table): photometric
+/// palette, the ColorMap GDAL writes for `table` (8-bit entries times 257, 2^bits entries, the
+/// missing ones black), overviews by nearest neighbour (the COG driver's rule).
+void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table);
+/// GDAL_METADATA of the output: the source's items (minus its IMAGE_STRUCTURE domain, without
+/// the band statistics when `dropStatistics`, and without the colour interpretations when the
+/// photometric gives them: RGB of YCbCr JPEG, palette), and the COG driver's
+/// OVERVIEW_RESAMPLING when the output has overviews.
+std::string OutputMetadata(const std::string& source, const Plan& plan, bool dropStatistics);
 /// Photometric (RGB when the first three bands are red, green, blue; else min-is-black) and
 /// ExtraSamples (alpha bands: unassociated alpha) GDAL's GTiff CreateCopy writes for bands with
 /// these colour interpretations ("Red", "Alpha", ...).

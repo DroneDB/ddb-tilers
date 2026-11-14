@@ -8,11 +8,14 @@
 
 #include <gtest/gtest.h>
 
+#include <tiffio.h>
+
 // Index arithmetic of the synthetic images mixes int and size_t freely.
 #pragma GCC diagnostic ignored "-Wsign-conversion"
 #pragma GCC diagnostic ignored "-Wconversion"
 #pragma GCC diagnostic ignored "-Wdouble-promotion"
 
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -27,6 +30,8 @@
 
 #include "../test_env.h"
 #include "cog/build/cog_builder.h"
+#include "cog/build/pipeline.h"
+#include "cog/build/source.h"
 #include "cog/build/stats.h"
 #include "cog/encode/block_encoder.h"
 #include "cog/pyramid/overview.h"
@@ -276,6 +281,7 @@ struct SourceCog {
     std::optional<double> nodata;
     std::vector<uint8_t> pixels;
     std::vector<uint8_t> maskBytes;
+    std::vector<uint16_t> colorMap;  // a palette source (1 band, 8-bit)
 
     SourceCog(tiff::SampleType t, int n, bool m, std::optional<double> nd) : type(t), bands(n), mask(m), nodata(nd) {
         const size_t ss = tiff::SampleTypeSize(t);
@@ -305,7 +311,8 @@ struct SourceCog {
         s.blockSize = B;
         s.samples = static_cast<uint16_t>(bands);
         s.type = type;
-        s.photometric = bands >= 3 ? 2 : 1;
+        s.photometric = !colorMap.empty() ? 3 : bands >= 3 ? 2 : 1;
+        s.colorMap = colorMap;
         s.codec = encode::Codec::kDeflate;
         s.predictor = 1;
         s.hasMask = mask;
@@ -418,6 +425,147 @@ TEST(CogBuild, OwnGridFloatNodataWithZstdOption) {
     ASSERT_TRUE(s.ok()) << s.message();
     EXPECT_EQ(rep.transparency, "nodata");
     CheckOwnGrid(src, out, "ZSTD");
+}
+
+// A palette source keeps its colour table (GDAL reads 8-bit values times 257 back as 8-bit and
+// writes them times 257 again), its overviews are by nearest neighbour (the COG driver's rule for a
+// colour table) and say so
+TEST(CogBuild, OwnGridPaletteKeepsItsColorMapAndNearestOverviews) {
+    TempDir dir;
+    SourceCog src(tiff::SampleType::kU8, 1, false, std::nullopt);
+    src.colorMap.resize(3 * 256);
+    for (uint32_t i = 0; i < 256; ++i) {
+        src.colorMap[i] = static_cast<uint16_t>(i * 257);
+        src.colorMap[256 + i] = static_cast<uint16_t>((255 - i) * 257);
+        src.colorMap[512 + i] = static_cast<uint16_t>(((i * 7) & 255) * 257);
+    }
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    src.Write(in);
+    ASSERT_TRUE(build::BuildCog(in, out, {}).ok());
+    auto r = tiff::TiffReader::Open(out);
+    ASSERT_TRUE(r.ok());
+    const tiff::TiffReader& rd = **r;
+    const tiff::IfdInfo& m = rd.Ifd(rd.MainImage());
+    EXPECT_EQ(m.photometric, tiff::photometric::kPalette);
+    EXPECT_EQ(m.colorMap, src.colorMap);
+    EXPECT_NE(m.gdalMetadata.find("OVERVIEW_RESAMPLING\" domain=\"IMAGE_STRUCTURE\">NEAREST"), std::string::npos)
+        << m.gdalMetadata;
+    // Each overview pixel is the pixel of the level above at int(0.5 + d * size / overview size)
+    auto level = [&](uint32_t ifd) {
+        const tiff::IfdInfo& l = rd.Ifd(ifd);
+        std::vector<uint8_t> px(static_cast<size_t>(l.width) * l.height);
+        for (uint32_t b = 0; b < l.blockCount; ++b) {
+            auto blk = rd.ReadBlock(ifd, b);
+            EXPECT_TRUE(blk.ok());
+            const uint32_t x0 = l.BlockColumn(b) * l.blockWidth, y0 = l.BlockRow(b) * l.blockHeight;
+            for (uint32_t y = 0; y < l.blockHeight && y0 + y < l.height; ++y)
+                for (uint32_t x = 0; x < l.blockWidth && x0 + x < l.width; ++x)
+                    px[static_cast<size_t>(y0 + y) * l.width + x0 + x] = blk->data()[static_cast<size_t>(y) * blk->rowStride + x];
+        }
+        return std::pair{px, std::pair{l.width, l.height}};
+    };
+    auto [prev, ps] = level(m.index);
+    for (const uint32_t ovr : rd.Overviews()) {
+        auto [cur, cs] = level(ovr);
+        EXPECT_EQ(rd.Ifd(ovr).colorMap, src.colorMap);
+        for (uint32_t y = 0; y < cs.second; ++y)
+            for (uint32_t x = 0; x < cs.first; ++x) {
+                const auto sx = static_cast<uint32_t>(0.5 + x * (static_cast<double>(ps.first) / cs.first));
+                const auto sy = static_cast<uint32_t>(0.5 + y * (static_cast<double>(ps.second) / cs.second));
+                ASSERT_EQ(cur[static_cast<size_t>(y) * cs.first + x], prev[static_cast<size_t>(sy) * ps.first + sx])
+                    << x << "," << y;
+            }
+        prev = std::move(cur);
+        ps = cs;
+    }
+}
+
+// GDAL_METADATA of an output: OVERVIEW_RESAMPLING only with overviews; the colour
+// interpretations the photometric gives (YCbCr JPEG, palette) are not stored
+TEST(CogBuild, OutputMetadataFollowsGdal) {
+    const std::string src =
+        "<GDALMetadata>\n  <Item name=\"COLORINTERP\" sample=\"0\" role=\"colorinterp\">Undefined</Item>\n"
+        "  <Item name=\"AREA\">x</Item>\n  <Item name=\"STATISTICS_MEAN\" sample=\"0\">1</Item>\n</GDALMetadata>\n";
+    build::Plan p;
+    EXPECT_EQ(build::OutputMetadata("", p, true), "");
+    EXPECT_EQ(build::OutputMetadata(src, p, true),
+              "<GDALMetadata>\n  <Item name=\"COLORINTERP\" sample=\"0\" role=\"colorinterp\">Undefined</Item>\n"
+              "  <Item name=\"AREA\">x</Item>\n</GDALMetadata>\n");
+    p.photometric = tiff::photometric::kYCbCr;
+    p.overviews = {{256, 256}};
+    EXPECT_EQ(build::OutputMetadata(src, p, false),
+              "<GDALMetadata>\n  <Item name=\"AREA\">x</Item>\n  <Item name=\"STATISTICS_MEAN\" sample=\"0\">1</Item>\n"
+              "  <Item name=\"OVERVIEW_RESAMPLING\" domain=\"IMAGE_STRUCTURE\">CUBIC</Item>\n</GDALMetadata>\n");
+    build::SetPalette(p, {{1, 2, 3}});
+    EXPECT_EQ(p.colorMap.size(), 3u * 256u);
+    EXPECT_EQ(p.colorMap[0], 257u);
+    EXPECT_EQ(p.colorMap[256], 514u);
+    EXPECT_EQ(p.colorMap[512], 771u);
+    EXPECT_EQ(p.colorMap[1], 0u);
+    EXPECT_NE(build::OutputMetadata(src, p, true).find(">NEAREST<"), std::string::npos);
+}
+
+// The colour tables GDAL gives sources without a palette of their own: black and white for a
+// 1-bit image (white first when min-is-white), an inverted grey ramp for 8-bit min-is-white; and a
+// ColorMap of 8-bit values read as they are. A 1-bit image reads as bytes 0 / 1.
+TEST(CogBuild, SourcesGetGdalsColourTables) {
+    TempDir dir;
+    auto write = [&](const std::string& name, uint16_t bits, uint16_t photometric, uint16_t compression,
+                     const std::vector<uint16_t>& colorMap) {
+        const std::string path = dir.File(name);
+        TIFF* t = TIFFOpen(path.c_str(), "w");
+        EXPECT_NE(t, nullptr);
+        TIFFSetField(t, TIFFTAG_IMAGEWIDTH, 40);
+        TIFFSetField(t, TIFFTAG_IMAGELENGTH, 8);
+        TIFFSetField(t, TIFFTAG_SAMPLESPERPIXEL, 1);
+        TIFFSetField(t, TIFFTAG_BITSPERSAMPLE, bits);
+        TIFFSetField(t, TIFFTAG_PHOTOMETRIC, photometric);
+        TIFFSetField(t, TIFFTAG_COMPRESSION, compression);
+        TIFFSetField(t, TIFFTAG_ROWSPERSTRIP, 8);
+        if (!colorMap.empty())
+            TIFFSetField(t, TIFFTAG_COLORMAP, colorMap.data(), colorMap.data() + 256, colorMap.data() + 512);
+        std::vector<uint8_t> rows(bits == 1 ? 5 * 8 : 40 * 8);
+        for (size_t i = 0; i < rows.size(); ++i) rows[i] = bits == 1 ? 0xA5 : static_cast<uint8_t>(i);
+        TIFFWriteEncodedStrip(t, 0, rows.data(), static_cast<tmsize_t>(rows.size()));
+        TIFFClose(t);
+        auto src = build::SourceRaster::Open(path);
+        EXPECT_TRUE(src.ok()) << src.status().message();
+        return std::move(src).value();
+    };
+    using Table = std::vector<std::array<uint8_t, 3>>;
+    const Table bw{{0, 0, 0}, {255, 255, 255}}, wb{{255, 255, 255}, {0, 0, 0}};
+
+    auto g4 = write("g4.tif", 1, PHOTOMETRIC_MINISBLACK, COMPRESSION_CCITTFAX4, {});
+    EXPECT_EQ(g4->Type(), tiff::SampleType::kU8);
+    EXPECT_EQ(g4->ColorTable(), bw);
+    EXPECT_EQ(g4->ColorInterp(0), "Palette");
+    std::vector<uint8_t> px(g4->BlockBytes());
+    ASSERT_TRUE(g4->ReadBlock(0, 0, px.data()).ok());
+    EXPECT_EQ((std::vector<uint8_t>(px.begin(), px.begin() + 8)), (std::vector<uint8_t>{1, 0, 1, 0, 0, 1, 0, 1}));
+
+    EXPECT_EQ(write("white.tif", 1, PHOTOMETRIC_MINISWHITE, COMPRESSION_NONE, {})->ColorTable(), wb);
+    const auto ramp = write("white8.tif", 8, PHOTOMETRIC_MINISWHITE, COMPRESSION_NONE, {})->ColorTable();
+    ASSERT_TRUE(ramp);
+    ASSERT_EQ(ramp->size(), 256u);
+    EXPECT_EQ((*ramp)[0], (std::array<uint8_t, 3>{255, 255, 255}));
+    EXPECT_EQ((*ramp)[255], (std::array<uint8_t, 3>{0, 0, 0}));
+    EXPECT_FALSE(write("gray8.tif", 8, PHOTOMETRIC_MINISBLACK, COMPRESSION_NONE, {})->ColorTable());
+
+    std::vector<uint16_t> small(3 * 256, 0);  // 8-bit values: read as they are
+    small[1] = 200;
+    const auto t8 = write("pal8.tif", 8, PHOTOMETRIC_PALETTE, COMPRESSION_LZW, small)->ColorTable();
+    ASSERT_TRUE(t8);
+    EXPECT_EQ((*t8)[1], (std::array<uint8_t, 3>{200, 0, 0}));
+    std::vector<uint16_t> by256(3 * 256, 0);  // multiples of 256: divided by 256
+    by256[1] = 200 * 256;
+    EXPECT_EQ((*write("pal256.tif", 8, PHOTOMETRIC_PALETTE, COMPRESSION_LZW, by256)->ColorTable())[1],
+              (std::array<uint8_t, 3>{200, 0, 0}));
+    std::vector<uint16_t> by257(3 * 256, 0);  // the others: divided by 257
+    by257[1] = 65535;
+    by257[2] = 1000;
+    const auto t257 = write("pal257.tif", 8, PHOTOMETRIC_PALETTE, COMPRESSION_LZW, by257)->ColorTable();
+    EXPECT_EQ((*t257)[1], (std::array<uint8_t, 3>{255, 0, 0}));
+    EXPECT_EQ((*t257)[2], (std::array<uint8_t, 3>{3, 0, 0}));
 }
 
 TEST(CogBuild, MissingInputFails) {

@@ -52,8 +52,9 @@ struct ImageSpec {
     uint32_t blockSize = 512;        // square tiles
     uint16_t samples = 1;            // samples per pixel (all bands, alpha included)
     tiff::SampleType type = tiff::SampleType::kU8;
-    uint16_t photometric = 1;        // 1 min-is-black, 2 RGB, 6 YCbCr (JPEG)
+    uint16_t photometric = 1;        // 1 min-is-black, 2 RGB, 3 palette, 6 YCbCr (JPEG)
     std::vector<uint16_t> extraSamples;  // ExtraSamples values (empty: no tag)
+    std::vector<uint16_t> colorMap;      // ColorMap of a palette image (R, G, B; empty: no tag)
     encode::Codec codec = encode::Codec::kLzw;
     int predictor = 1;
     std::vector<uint8_t> jpegTables;  // JPEGTables tag of JPEG images
