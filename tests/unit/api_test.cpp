@@ -28,7 +28,7 @@
 
 TEST(Api, Version) {
     const std::string v = ddbtVersion();
-    EXPECT_EQ(v, "0.6.0");
+    EXPECT_EQ(v, "0.7.0");
 }
 
 TEST(Api, LastErrorIsEmptyWhenNothingFailed) {
@@ -96,7 +96,7 @@ TEST(Api, CpuInfoIsJsonWithTheDispatchTarget) {
     EXPECT_NE(s.find("\"dispatchTarget\":\""), std::string::npos) << s;
     EXPECT_NE(s.find("\"compiledTargets\":["), std::string::npos) << s;
     EXPECT_NE(s.find("\"supportedTargets\":["), std::string::npos) << s;
-    EXPECT_NE(s.find("\"version\":\"0.6.0\""), std::string::npos) << s;
+    EXPECT_NE(s.find("\"version\":\"0.7.0\""), std::string::npos) << s;
     EXPECT_EQ(ddbtCpuInfo(nullptr), DDBT_ERR_INVALIDARGS);
 }
 
