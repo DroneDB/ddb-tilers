@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "ddbt",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "ddb-tilers: fast, light COG and COPC builders and tilers",
   "homepage": "https://github.com/DroneDB/ddb-tilers",
   "license": "MPL-2.0",
