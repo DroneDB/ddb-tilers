@@ -73,10 +73,11 @@ struct Suggested {
     int pixels = 0, lines = 0;
 };
 
-// GDALSuggestedWarpOutput2 (alg/gdaltransformer.cpp) for a source to EPSG:3857 (or, with dstGt,
-// to the pixels of an output of that geotransform), without its sub-pixel right / bottom border
-// adjustments and the TransformBounds() union (geotransforms only): neither changed the grid of
-// any raster of the test corpus.
+// GDALSuggestedWarpOutput2 (alg/gdaltransformer.cpp) for a source to the target CRS of `t` (or,
+// with dstGt, to the pixels of an output of that geotransform), without its sub-pixel right /
+// bottom border adjustments and the TransformBounds() union (geotransforms only): neither changed
+// the grid of any raster of the test corpus (the adjustments need a border of the output whose
+// every point fails to go to the source and back, which a GCP transform never does).
 Expected<Suggested> SuggestWarpOutput(const crs::Transform& t, const SourceGeoreference& geo, int W, int H,
                                       bool invertCheck, double threshold,
                                       const std::array<double, 6>* dstGt = nullptr) {
@@ -323,6 +324,57 @@ Expected<std::array<double, 4>> SuggestedPixelExtent(const crs::Transform& t, co
     auto s = SuggestWarpOutput(t, georef, static_cast<int>(W), static_cast<int>(H), false, 0, &dstGt);
     if (!s.ok()) return s.status();
     return std::array<double, 4>{s->minX, s->minY, s->maxX, s->maxY};
+}
+
+Expected<TargetGrid> ComputeSourceCrsGrid(const crs::Crs& srcCrs, const SourceGeoreference& geo, uint32_t uW,
+                                          uint32_t uH) {
+    TargetGrid g;
+    const int W = static_cast<int>(uW), H = static_cast<int>(uH);
+    try {
+        g.transform = crs::TransformCache::Global().Get(srcCrs, srcCrs);
+    } catch (const std::exception& e) {
+        return Status(StatusCode::kInvalidArgument, std::string("Cannot use the source CRS: ") + e.what());
+    }
+    const crs::Transform& t = *g.transform;
+    // GDALSuggestedWarpOutput2, gdalwarp's check of the extent and its retry, then gdalwarp's
+    // grid: the suggested resolution, the size rounded from the extent.
+    auto s = SuggestWarpOutput(t, geo, W, H, false, 0);
+    if (!s.ok() || s->pixels <= 0 || s->lines <= 0 || !ExtentRoundTrips(t, geo, *s)) {
+        const bool geographic =
+            srcCrs.Type() == crs::CrsType::Geographic2D || srcCrs.Type() == crs::CrsType::Geographic3D;
+        s = SuggestWarpOutput(t, geo, W, H, true, geographic ? 0.1 : 10000);
+    }
+    if (!s.ok()) return s.status();
+    const double pixels = std::round((s->maxX - s->minX) / s->pixelSize);
+    const double lines = std::round((s->maxY - s->minY) / s->pixelSize);
+    if (!(pixels >= 1 && lines >= 1 && pixels <= INT32_MAX && lines <= INT32_MAX))
+        return Status(StatusCode::kInvalidArgument, "Attempt to create " + std::to_string(pixels) + "x" +
+                                                        std::to_string(lines) +
+                                                        " dataset is illegal, sizes must be larger than zero.");
+    g.width = static_cast<uint32_t>(pixels);
+    g.height = static_cast<uint32_t>(lines);
+    g.suggestedResolution = s->pixelSize;
+    g.geoTransform = {s->minX, s->pixelSize, 0.0, s->maxY, 0.0, -s->pixelSize};
+    return g;
+}
+
+Expected<TargetGrid> ComputeTargetGridThroughSourceCrs(const crs::Crs& srcCrs, const SourceGeoreference& geo,
+                                                       uint32_t W, uint32_t H, bool evenTileOrigin) {
+    auto mid = ComputeSourceCrsGrid(srcCrs, geo, W, H);
+    if (!mid.ok()) return mid.status();
+    auto midGeo = SourceGeoreference::FromGeoTransform(mid->geoTransform);
+    if (!midGeo.ok()) return midGeo.status();
+    auto g = ComputeTargetGrid(srcCrs, *midGeo, mid->width, mid->height, evenTileOrigin);
+    if (!g.ok()) return g.status();
+    // The warp itself goes from the source, as GDAL transforms it (no area of interest for GCPs).
+    if (!geo.GeoTransform()) {
+        try {
+            g->transform = crs::TransformCache::Global().Get(srcCrs, crs::Crs::FromEpsg(3857));
+        } catch (const std::exception& e) {
+            return Status(StatusCode::kInvalidArgument, std::string("Cannot transform to EPSG:3857: ") + e.what());
+        }
+    }
+    return g;
 }
 
 Expected<TargetGrid> ComputeTargetGrid(const crs::Crs& srcCrs, const SourceGeoreference& geo, uint32_t uW,

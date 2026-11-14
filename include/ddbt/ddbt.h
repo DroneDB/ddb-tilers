@@ -156,6 +156,11 @@ DDBT_API ddbtErr ddbtFree(void *ptr);
 typedef void (*ddbtProgressCallback)(double fraction, const char *phase, void *userData);
 
 /** Build a Cloud Optimized GeoTIFF.
+ * The input is a GeoTIFF, a JPEG 2000 file, or a photo (JPEG, PNG, GIF, WebP, TIFF or DNG without
+ * georeferencing) georeferenced by the "gcps" option: [[pixel, line, x, y], ...] in "gcpSrs"
+ * ("EPSG:4326" by default); "targetSrs": "source" then writes the photo in that CRS (gdalwarp's
+ * grid, nearest neighbour) instead of the EPSG:3857 COG, "outScale" resamples the photo first.
+ * The other options are listed in src/api/build_api.cpp.
  * @param inputPath source raster
  * @param outputPath destination file
  * @param optionsJson JSON object with options, or NULL / "" for the defaults

@@ -10,7 +10,8 @@ GDAL's drivers read it (JPEG, PNG, GIF, WEBP, GTiff), and for the geoprojection 
   alpha, 16-bit grey, grey and RGB with a tRNS colour (nodata), a palette with one transparent
   entry (nodata) and with several (no nodata), a 4-bit palette, a 1-bit image; GIF plain,
   interlaced and with a transparent index; WebP lossy, lossless, and both with alpha; TIFF photos
-  without georeferencing (JPEG YCbCr, DEFLATE); `geo_photo.jpg` (320 x 240), the photo of the
+  without georeferencing (JPEG YCbCr, DEFLATE); `geo_photo.jpg` and `geo_photo_trns.png` (192 x 144,
+  soft shapes, a road and a roof; the PNG's road colour is its tRNS colour), the photos of the
   geoprojection tests.
 - `dng_fc220_preview.dng`: the first directory of raw.pixls.us' "DJI - FC220 - 16bit (4:3).DNG"
   (DJI Mavic Pro, Creative Commons 0, public domain: https://raw.pixls.us/), cut by `gen.py --dng`:
@@ -38,3 +39,14 @@ with `gdal_expected` (`tests/fixtures/tools/gdal_expected.cpp`) built against th
 (vcpkg's GDAL 3.13.3, libjpeg-turbo, libpng, giflib, libwebp, libtiff). The same test runs on any
 folder with `DDBT_PHOTO_PARITY_DIR` and `DDBT_PHOTO_PARITY_TSV` (gdal_expected.py's output for that
 folder).
+
+## Geoprojection
+
+For `PhotoGeoproject*` (tests/unit/photo/photo_geoproject_test.cpp), `geoproject.py` writes
+`geoproject.tsv` with GDAL 3.13.3 of vcpkg (`tests/fixtures/tools/gdal_geoproject.cpp`: libddb's
+gdal_translate with the four GCPs of the footprint, then gdalwarp): for each case the grid, the
+GCPs, the CRC-32 of every band of GDAL's output written losslessly, and, in the GCPs' CRS, the
+chunks of GDAL's warper for libddb's JPEG GeoTIFF; and `gdal/geo_photo_2steps.tif`, libddb's COG
+of `geo_photo.jpg` (its JPEG GeoTIFF in EPSG:4326, then the COG of that file with libddb's
+arguments, `tests/unit/cogbuild/data/gdal_cog_warp.cpp`). The geoprojection of a palette photo
+fails in GDAL (libtiff writes no JPEG of a palette image), so the cases use RGB photos.

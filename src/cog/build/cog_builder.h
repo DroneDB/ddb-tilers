@@ -11,6 +11,11 @@
 //     without nodata (the alpha becomes a 1-bit mask), LZW + predictor otherwise; transparency as
 //     cog.cpp: a finite nodata is kept as the destination nodata, a NaN / infinite / huge nodata
 //     or a stand-alone mask becomes an alpha band, a source alpha is kept (a mask for JPEG).
+//   - A photo georeferenced by GCPs (BuildOptions::photo) is warped as libddb geoprojects it
+//     (gdalwarp -dstalpha from the photo with the GCPs): to the EPSG:3857 COG above in one warp
+//     (bilinear; JPEG for 8-bit RGB, with the pixels outside the photo, its alpha, mask or nodata
+//     in the mask; LZW with an alpha band otherwise), or into the GCPs' CRS on gdalwarp's grid
+//     with its default nearest neighbour resampling (the same compression and transparency).
 //   - Overviews: GDAL's cubic resampling, mask-aware, each level from the previous one.
 //   - The statistics sidecar "<output>.stats.json" (exact, version 2), from the pixels written.
 //
@@ -23,8 +28,12 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <vector>
 
+#include "cog/build/source.h"
 #include "cog/encode/block_encoder.h"
+#include "cog/warp/warp_producer.h"
+#include "core/crs/gcp_transform.h"
 #include "cog/writer/cog_writer.h"
 #include "core/util/status.h"
 
@@ -37,6 +46,23 @@ namespace ddbt::cog::build {
 /// statistics; own grid: overviews < 0.1 <= compressing). The phases overlap in the single pass,
 /// so the name follows the fraction, not the work done at that instant.
 using ProgressFn = std::function<void(double fraction, const char* phase)>;
+
+/// The georeferencing of a photo, as libddb geoprojects it (gdal_translate -a_srs <srs> -gcp ...
+/// [-outsize], then gdalwarp -dstalpha), for a source that has none of its own.
+struct PhotoGeoreference {
+    /// Ground control points: pixel and line in the photo (after outScale), x and y in `srs`.
+    std::vector<crs::Gcp> gcps;
+    /// The CRS of the GCPs (any text PROJ reads: "EPSG:4326", WKT, PROJJSON).
+    std::string srs = "EPSG:4326";
+    /// The output: the EPSG:3857 COG of the photo (false: DroneDB's COG rules, bilinear, one warp
+    /// of the photo), or the photo in the GCPs' CRS on gdalwarp's grid with gdalwarp's default
+    /// (nearest neighbour) resampling and warp memory (true: libddb's geoprojected GeoTIFF, here
+    /// with a COG layout).
+    bool sourceCrs = false;
+    /// gdal_translate -outsize: the photo resampled first to int(outScale * width) x
+    /// int(outScale * height) by GDAL's nearest neighbour; 1: as it is.
+    double outScale = 1.0;
+};
 
 struct BuildOptions {
     /// Codec of non-JPEG outputs: LZW (DroneDB's), DEFLATE or ZSTD (+ predictor).
@@ -56,6 +82,8 @@ struct BuildOptions {
     bool evenTileOrigin = false;
     /// Writer options (insert range, spill budget).
     writer::WriterOptions writer;
+    /// Georeferences a photo by ground control points and geoprojects it.
+    std::optional<PhotoGeoreference> photo;
     ProgressFn progress;
 };
 
@@ -73,8 +101,16 @@ struct BuildReport {
     uint64_t peakSourceCacheBytes = 0;
 };
 
-/// Builds `output` (a COG) from `input` (a GeoTIFF). The output appears atomically (temporary +
-/// rename); on failure nothing is left behind.
+/// The source a build reads: `input` as OpenRasterSource opens it, georeferenced as options.photo
+/// says.
+Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options);
+
+/// The warp a build makes of a source that is not an optimized COG.
+warp::WarpSettings WarpSettingsOf(const BuildOptions& options);
+
+/// Builds `output` (a COG) from `input` (a raster OpenRasterSource reads; a photo with
+/// options.photo). The output appears atomically (temporary + rename); on failure nothing is left
+/// behind.
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options,
                 BuildReport* report = nullptr);
 

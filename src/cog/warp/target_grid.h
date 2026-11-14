@@ -45,6 +45,19 @@ struct TargetGrid {
 Expected<TargetGrid> ComputeTargetGrid(const crs::Crs& srcCrs, const SourceGeoreference& georef, uint32_t W,
                                        uint32_t H, bool evenTileOrigin);
 
+/// gdalwarp's output grid for a source warped into its own CRS (no -t_srs: the CRS of its GCPs),
+/// without a COG tiling: GDALSuggestedWarpOutput2's extent and resolution, the size rounded from
+/// them (gdalwarp's GDALWarpCreateOutput).
+/// `transform` is the identity.
+Expected<TargetGrid> ComputeSourceCrsGrid(const crs::Crs& srcCrs, const SourceGeoreference& georef, uint32_t W,
+                                          uint32_t H);
+
+/// The EPSG:3857 grid of ComputeTargetGrid for the raster gdalwarp writes of the source in its
+/// own CRS (ComputeSourceCrsGrid): the grid of libddb's COG of a photo, which warps it into the
+/// CRS of its GCPs first. `transform` is the source's to EPSG:3857.
+Expected<TargetGrid> ComputeTargetGridThroughSourceCrs(const crs::Crs& srcCrs, const SourceGeoreference& georef,
+                                                       uint32_t W, uint32_t H, bool evenTileOrigin);
+
 /// GDALSuggestedWarpOutput2's extent (min x, min y, max x, max y) of the source in the pixels and
 /// lines of an output of geotransform dstGt: gdalwarp warps a source with RPC metadata only
 /// within it (AdjustOutputExtentForRPC). t: source CRS -> the output's CRS.

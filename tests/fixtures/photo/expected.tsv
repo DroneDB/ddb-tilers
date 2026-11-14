@@ -41,10 +41,17 @@ nodata	gdal_tbbn2c16.png	3	32639
 size	gdal_uint16_interlaced.png	20	20	1	UInt16
 band	gdal_uint16_interlaced.png	1	Gray	-	effa4880
 refused	gdal_uint16_lossless.jpg
-size	geo_photo.jpg	320	240	3	Byte
-band	geo_photo.jpg	1	Red	-	9c4a06ee
-band	geo_photo.jpg	2	Green	-	00be654f
-band	geo_photo.jpg	3	Blue	-	4f6d9647
+size	geo_photo.jpg	192	144	3	Byte
+band	geo_photo.jpg	1	Red	-	efcfa0c3
+band	geo_photo.jpg	2	Green	-	29ccffcc
+band	geo_photo.jpg	3	Blue	-	f9a1ae1e
+size	geo_photo_trns.png	192	144	3	Byte
+band	geo_photo_trns.png	1	Red	-	ed03eed1
+nodata	geo_photo_trns.png	1	90
+band	geo_photo_trns.png	2	Green	-	1c8b112d
+nodata	geo_photo_trns.png	2	90
+band	geo_photo_trns.png	3	Blue	-	1680bf35
+nodata	geo_photo_trns.png	3	90
 size	gif_interlaced.gif	65	41	1	Byte
 band	gif_interlaced.gif	1	Palette	-	47534a3f
 ct	gif_interlaced.gif	128	9da83c0f

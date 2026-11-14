@@ -127,10 +127,6 @@ struct Ifd {
     }
 };
 
-// GDAL's GeoKeys for EPSG:3857 (GTIFSetFromOGISDefnEx of EPSG:3857, GDAL 3.x), in its order.
-const std::vector<uint16_t> kGeoKeys3857 = {1, 1, 0, 7, 1024, 0, 1, 1, 1025, 0, 1, 1, 1026, 34737, 25, 0,
-                                            2049, 34737, 7, 25, 2054, 0, 1, 9102, 3072, 0, 1, 3857, 3076, 0, 1, 9001};
-const char kGeoAscii3857[] = "WGS 84 / Pseudo-Mercator|WGS 84|";
 
 struct BlockRec {
     uint64_t offset = 0;  // L0: relative to the start of the full-resolution data (data, not leader)
@@ -292,8 +288,11 @@ struct CogWriter::Impl {
                     d.entries.push_back(Doubles(tiff::tag::kModelTransformation,
                                                 {gt[1], gt[2], 0, gt[0], gt[4], gt[5], 0, gt[3], 0, 0, 0, 0, 0, 0, 0, 1}));
                 }
-                d.entries.push_back(Shorts(tiff::tag::kGeoKeyDirectory, kGeoKeys3857));
-                d.entries.push_back(Ascii(tiff::tag::kGeoAsciiParams, kGeoAscii3857));
+                d.entries.push_back(Shorts(tiff::tag::kGeoKeyDirectory, spec.geoKeys.directory));
+                if (!spec.geoKeys.doubles.empty())
+                    d.entries.push_back(Doubles(tiff::tag::kGeoDoubleParams, spec.geoKeys.doubles));
+                if (!spec.geoKeys.ascii.empty())
+                    d.entries.push_back(Ascii(tiff::tag::kGeoAsciiParams, spec.geoKeys.ascii));
             }
             if (level == 0)
                 for (const RawTag& t : spec.extraTags) d.entries.push_back(Entry{t.tag, t.type, t.count, t.data});
@@ -539,6 +538,38 @@ struct CogWriter::Impl {
 
 CogWriter::CogWriter(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 CogWriter::~CogWriter() = default;
+
+const GeoKeys& WebMercatorGeoKeys() {
+    static const GeoKeys keys{{1, 1, 0, 7, 1024, 0, 1, 1, 1025, 0, 1, 1, 1026, 34737, 25, 0, 2049, 34737, 7, 25, 2054, 0,
+                               1, 9102, 3072, 0, 1, 3857, 3076, 0, 1, 9001},
+                              {},
+                              "WGS 84 / Pseudo-Mercator|WGS 84|"};
+    return keys;
+}
+
+Expected<GeoKeys> GeoKeysOf(const crs::Crs& c) {
+    std::optional<int> code;
+    try {
+        code = c.Epsg();
+    } catch (const std::exception&) {
+        code.reset();
+    }
+    if (!code) return Status(StatusCode::kUnsupported, "Cannot write the GeoKeys of a CRS without an EPSG code");
+    if (*code == 3857) return WebMercatorGeoKeys();
+    if (*code == 4326) {
+        // GDAL's (GTIFSetFromOGISDefnEx of EPSG:4326, GDAL 3.x), in its order.
+        return GeoKeys{{1, 1, 0, 7, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, 4326, 2049, 34737, 7, 0, 2054, 0, 1,
+                        9102, 2057, 34736, 1, 1, 2059, 34736, 1, 0},
+                       {298.257223563, 6378137.0},
+                       "WGS 84|"};
+    }
+    // Another EPSG CRS: its code, which GeoTIFF readers resolve.
+    const auto c16 = static_cast<uint16_t>(*code);
+    if (*code <= 0 || *code > 65535) return Status(StatusCode::kUnsupported, "EPSG code out of the GeoKeys' range");
+    if (c.IsGeographic()) return GeoKeys{{1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, c16}, {}, ""};
+    if (c.IsProjected()) return GeoKeys{{1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, c16}, {}, ""};
+    return Status(StatusCode::kUnsupported, "Cannot write the GeoKeys of EPSG:" + std::to_string(*code));
+}
 
 Expected<std::unique_ptr<CogWriter>> CogWriter::Create(const std::string& path, ImageSpec spec,
                                                        const WriterOptions& options) {

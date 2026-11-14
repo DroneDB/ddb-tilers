@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -12,6 +13,7 @@
 #include <mutex>
 #include <stdexcept>
 
+#include "cog/build/derived_source.h"
 #include "cog/build/pipeline.h"
 #include "cog/build/source.h"
 #include "cog/build/stats.h"
@@ -783,9 +785,68 @@ public:
 
 }  // namespace
 
+namespace {
+
+// The photo as libddb's gdal_translate makes it: resampled to its -outsize, then georeferenced by
+// the GCPs in their CRS (-gcp, -a_srs).
+Expected<std::unique_ptr<RasterSource>> GeoreferencePhoto(std::unique_ptr<RasterSource> photo,
+                                                          const PhotoGeoreference& g) {
+    if (!(g.outScale > 0) || !std::isfinite(g.outScale))
+        return Status(StatusCode::kInvalidArgument, "Invalid outScale: it must be a positive number");
+    if (g.outScale != 1.0) {
+        // GDALTranslate: int(scale * size), as -outsize N% gives it.
+        const double w = g.outScale * photo->Width(), h = g.outScale * photo->Height();
+        if (w < 1 || h < 1 || w > INT32_MAX || h > INT32_MAX)
+            return Status(StatusCode::kInvalidArgument, "Invalid outScale: the photo would be " + std::to_string(w) +
+                                                            " x " + std::to_string(h) + " pixels");
+        auto scaled = ScaledNearest(std::move(photo), static_cast<uint32_t>(w), static_cast<uint32_t>(h));
+        if (!scaled.ok()) return scaled.status();
+        photo = std::move(*scaled);
+    }
+    crs::Crs gcpCrs;
+    try {
+        gcpCrs = crs::Crs::FromUserInput(g.srs);
+    } catch (const std::exception& e) {
+        return Status(StatusCode::kInvalidArgument, "Invalid gcpSrs " + g.srs + ": " + e.what());
+    }
+    return WithGcps(std::move(photo), g.gcps, std::move(gcpCrs), g.srs);
+}
+
+// gdalwarp's default warp memory (-wm), which libddb's geoprojection keeps.
+constexpr double kGdalwarpDefaultMemory = 64.0 * 1024 * 1024;
+
+}  // namespace
+
+Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options) {
+    auto src = OpenRasterSource(input, options.memoryBudget);
+    if (!src.ok() || !options.photo) return src;
+    return GeoreferencePhoto(std::move(*src), *options.photo);
+}
+
+warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
+    warp::WarpSettings ws;
+    ws.losslessCodec = options.losslessCodec == Codec::kJpeg ? Codec::kLzw : options.losslessCodec;
+    ws.level = options.level;
+    ws.jpegQuality = options.jpegQuality > 0 ? options.jpegQuality : ConfiguredJpegQuality();
+    ws.noJpeg = options.noJpeg;
+    ws.evenTileOrigin = options.evenTileOrigin;
+    if (options.photo) {
+        ws.dstAlpha = true;
+        if (options.photo->sourceCrs) {
+            ws.target = warp::Target::kSourceCrs;
+            ws.resampling = warp::Resampling::kNearest;
+            ws.warpMemory = kGdalwarpDefaultMemory;
+        } else {
+            // The grid of libddb's COG of the photo (its geoprojection, then the COG of that).
+            ws.target = warp::Target::kWebMercatorThroughSourceCrs;
+        }
+    }
+    return ws;
+}
+
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options, BuildReport* report) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto src = OpenRasterSource(input, options.memoryBudget);
+    auto src = OpenBuildSource(input, options);
     if (!src.ok()) return src.status();
     const RasterSource& source = **src;
     if (!source.Georef().crs) return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no coordinate reference system: " + input);
@@ -795,6 +856,7 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
 
     Plan plan;
     std::unique_ptr<TileProducer> producer;
+    writer::GeoKeys geoKeys = writer::WebMercatorGeoKeys();
     const bool ownGrid = source.IsOptimizedCog();
     if (ownGrid) {
         auto p = OwnGridPlan(source, options);
@@ -802,17 +864,18 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         plan = std::move(*p);
         producer = std::make_unique<OwnGridProducer>(source, plan);
     } else {
-        warp::WarpSettings ws;
-        ws.losslessCodec = options.losslessCodec == Codec::kJpeg ? Codec::kLzw : options.losslessCodec;
-        ws.level = options.level;
-        ws.jpegQuality = options.jpegQuality > 0 ? options.jpegQuality : ConfiguredJpegQuality();
-        ws.noJpeg = options.noJpeg;
-        ws.evenTileOrigin = options.evenTileOrigin;
+        const warp::WarpSettings ws = WarpSettingsOf(options);
+        if (ws.target == warp::Target::kSourceCrs) {
+            // The output is in the source's CRS.
+            auto keys = writer::GeoKeysOf(*source.Georef().crs);
+            if (!keys.ok()) return keys.status();
+            geoKeys = std::move(*keys);
+        }
         auto p = warp::WarpPlan(source, ws);
         if (!p.ok()) return p.status();
         plan = std::move(*p);
         plan.gdalMetadata = OutputMetadata(source.GdalMetadata(), plan, true);
-        auto prod = warp::MakeWarpProducer(source, plan, options.memoryBudget);
+        auto prod = warp::MakeWarpProducer(source, plan, ws, options.memoryBudget);
         if (!prod.ok()) return prod.status();
         producer = std::move(*prod);
     }
@@ -835,6 +898,7 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
     spec.gdalMetadata = plan.gdalMetadata;
     spec.extraTags = source.MetadataTags();
     spec.geoTransform = plan.geoTransform;
+    spec.geoKeys = std::move(geoKeys);
     spec.overviews = plan.overviews;
     auto w = writer::CogWriter::Create(output, spec, options.writer);
     if (!w.ok()) return w.status();

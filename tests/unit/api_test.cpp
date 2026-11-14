@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+#include "cog/tiff/geotiff.h"
+#include "cog/tiff/tiff_reader.h"
 #include "cog/tiler/block_cache.h"
 #include "cog/tiler/cog_tiler.h"
 #include "cog/tiler/json_lite.h"
@@ -484,6 +486,43 @@ TEST(HostApi, BuildCog2ReportsProgressToOne) {
     const std::string out2 = (dir / "out2.tif").string();
     ASSERT_EQ(ddbtBuildCog2(in.c_str(), out2.c_str(), nullptr, nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
     EXPECT_EQ(std::filesystem::file_size(out), std::filesystem::file_size(out2));
+    std::filesystem::remove_all(dir);
+}
+
+TEST(HostApi, BuildCogGeoprojectsAPhotoByItsGcps) {
+    const auto dir = ApiScratch("cog-photo");
+    const std::string in = std::string(DDBT_TEST_FIXTURES) + "/photo/geo_photo.jpg";
+    const std::string gcps =
+        R"("gcps": [[0, 0, 12.4960204442829, 41.9028236117254], [0, 144, 12.4962577650602, 41.9025521698054],)"
+        R"( [192, 144, 12.4967594868457, 41.9027677644874], [192, 0, 12.4965623038112, 41.9030564539819]])";
+    // Malformed options are refused before anything is read.
+    for (const char* bad : {R"({"gcps": []})", R"({"gcps": [[0, 0, 1]]})", R"({"gcps": [[0, 0, 1, "a"]]})",
+                            R"({"targetSrs": "source"})", R"({"outScale": 0.5})"}) {
+        EXPECT_EQ(ddbtBuildCog(in.c_str(), (dir / "bad.tif").string().c_str(), bad), DDBT_ERR_INVALIDARGS) << bad;
+    }
+    const std::string badTarget = "{" + gcps + R"(, "targetSrs": "EPSG:4326"})";
+    EXPECT_EQ(ddbtBuildCog(in.c_str(), (dir / "bad.tif").string().c_str(), badTarget.c_str()), DDBT_ERR_INVALIDARGS);
+    const std::string badScale = "{" + gcps + R"(, "outScale": -1})";
+    EXPECT_EQ(ddbtBuildCog(in.c_str(), (dir / "bad.tif").string().c_str(), badScale.c_str()), DDBT_ERR_INVALIDARGS);
+    // The EPSG:3857 COG, and the photo in the GCPs' CRS at half its size.
+    const std::string cog = (dir / "cog.tif").string(), wgs84 = (dir / "wgs84.tif").string();
+    ASSERT_EQ(ddbtBuildCog(in.c_str(), cog.c_str(), ("{" + gcps + "}").c_str()), DDBT_ERR_NONE) << ddbtLastError();
+    // libddb's GCPs at the corners of the photo at half its size (192 x 144 -> 96 x 72).
+    const std::string half =
+        R"("gcps": [[0, 0, 12.4960204442829, 41.9028236117254], [0, 72, 12.4962577650602, 41.9025521698054],)"
+        R"( [96, 72, 12.4967594868457, 41.9027677644874], [96, 0, 12.4965623038112, 41.9030564539819]])";
+    const std::string source = "{" + half + R"(, "gcpSrs": "EPSG:4326", "targetSrs": "source", "outScale": 0.5})";
+    ASSERT_EQ(ddbtBuildCog(in.c_str(), wgs84.c_str(), source.c_str()), DDBT_ERR_NONE) << ddbtLastError();
+    auto a = ddbt::cog::tiff::TiffReader::Open(cog), b = ddbt::cog::tiff::TiffReader::Open(wgs84);
+    ASSERT_TRUE(a.ok() && b.ok());
+    auto ga = ddbt::cog::tiff::ReadGeoreferencing(**a), gb = ddbt::cog::tiff::ReadGeoreferencing(**b);
+    ASSERT_TRUE(ga.ok() && gb.ok() && ga->crs && gb->crs);
+    EXPECT_TRUE(ga->crs->Equivalent(ddbt::crs::Crs::FromEpsg(3857)));
+    EXPECT_TRUE(gb->crs->Equivalent(ddbt::crs::Crs::FromEpsg(4326)));
+    // The footprint at half the resolution: gdalwarp's grid of 120 x 82 pixels (239 x 163 at full
+    // size, tests/fixtures/photo/geoproject.tsv).
+    EXPECT_EQ((*b)->Ifd((*b)->MainImage()).width, 120u);
+    EXPECT_EQ((*b)->Ifd((*b)->MainImage()).height, 82u);
     std::filesystem::remove_all(dir);
 }
 

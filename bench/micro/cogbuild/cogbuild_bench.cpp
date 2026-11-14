@@ -151,7 +151,7 @@ void BM_CogBuild_WarpTile(benchmark::State& state) {
             win.density[static_cast<size_t>(y) * W + static_cast<size_t>(x)] = std::min(1.0f, static_cast<float>(*a) * (1.0f / 255.0f));
         }
     warp::IndexValidity(win);
-    warp::BilinearParams p;
+    warp::KernelParams p;
     p.type = tiff::SampleType::kU8;
     p.sourceWidth = W;
     p.sourceHeight = H;

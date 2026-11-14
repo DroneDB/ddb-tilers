@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: MPL-2.0
 //
-// GDAL's bilinear warp kernel (alg/gdalwarpkernel.cpp, as gdalwarp -r bilinear runs it) for one
-// row of destination pixels whose source positions are known:
+// GDAL's bilinear and nearest neighbour warp kernels (alg/gdalwarpkernel.cpp, as gdalwarp -r
+// bilinear and gdalwarp's default resampling run them) for one row of destination pixels whose
+// source positions are known.
+//
+// Nearest neighbour (GWKNearestThread, GWKResampleNoMasksOrDstDensityOnlyThread): the source pixel
+// int(x + 1e-10), int(y + 1e-10) (the last one at the right and bottom edges); without masks its
+// samples; with masks it must be valid and of density 1e-9 or more, each band's value blended
+// into the destination by its density (GWKSetPixelValueRealT), then the destination alpha from
+// that density. Every pixel GDAL writes without masks has a destination density of 1 (an alpha of
+// its maximum).
+//
+// Bilinear:
 //
 //   - without any source mask: GWKBilinearResampleNoMasks4SampleT (the 2 x 2 formula inside the
 //     source, valid-tap renormalisation at its edges, rounding by + 0.5);
@@ -59,7 +69,9 @@ struct Window {
 void IndexValidity(Window& win);
 
 /// How the kernel resamples and writes one output (GDAL's warp options, resolved).
-struct BilinearParams {
+struct KernelParams {
+    /// Nearest neighbour (gdalwarp's default), else bilinear (-r bilinear).
+    bool nearest = false;
     tiff::SampleType type = tiff::SampleType::kU8;
     int sourceWidth = 0, sourceHeight = 0;
     /// Per output band: the byte offset of its source sample in a window pixel.
@@ -89,7 +101,7 @@ enum class KernelPath : uint8_t {
 /// Warps n destination pixels of a row. fx / fy: their source pixel positions (NaN: no source,
 /// not written); out: the first pixel (outPixelBytes apart, bands sample-size apart); mask: the
 /// first output mask byte (alphaOut == -1), else unused. The window covers every tap of the row.
-void WarpRow(const BilinearParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
+void WarpRow(const KernelParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
              uint8_t* mask, KernelPath path = KernelPath::kSimd);
 
 /// Calls f.template operator()<T>() with T the C++ type of the samples of `type`, for the types the

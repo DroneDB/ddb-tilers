@@ -76,7 +76,7 @@ double AlphaMax(tiff::SampleType type, std::optional<int> nbits) {
     return 255;
 }
 
-SourceSpec Analyse(const RasterSource& src) {
+SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
     SourceSpec s;
     s.bands = src.Bands();
     // gdalwarp takes the last band as the source alpha when it is an alpha band.
@@ -87,6 +87,13 @@ SourceSpec Analyse(const RasterSource& src) {
     for (int b = 0; b < s.bands; ++b)
         if (b != s.alpha) s.warped.push_back(b);
     s.nodata = src.NoData();
+    if (settings.dstAlpha) {
+        // gdalwarp -dstalpha: the source nodata of every band and of the pixel, the mask unless
+        // there is an alpha band, and an output alpha.
+        s.mask = src.HasMask() && s.alpha < 0 && !s.nodata;
+        s.dstAlpha = true;
+        return s;
+    }
     if (s.nodata) {
         const double v = *s.nodata;
         if (std::isfinite(v) && std::fabs(v) < 1e30) {
@@ -103,11 +110,21 @@ SourceSpec Analyse(const RasterSource& src) {
     return s;
 }
 
-bool JpegEligible(const RasterSource& src) {
+bool JpegEligible(const RasterSource& src, const WarpSettings& settings) {
     const int n = src.Bands();
-    if ((n != 3 && n != 4) || src.NoData()) return false;
+    // With -dstalpha a nodata becomes the output's alpha (the mask of a JPEG output).
+    if ((n != 3 && n != 4) || (src.NoData() && !settings.dstAlpha)) return false;
     if (src.Type() != tiff::SampleType::kU8) return false;
     return n == 3 || src.AlphaBand() == 3;
+}
+
+// The rows of a strip of the GeoTIFF gdalwarp writes without TILED=YES (libtiff's default strip
+// size, about 8 KiB, rounded up to 16 rows for JPEG as tif_jpeg.c rounds it), for its chunks.
+int GtiffStripRows(uint32_t width, uint32_t height, size_t pixelBytes) {
+    const uint64_t scanline = std::max<uint64_t>(1, uint64_t{width} * pixelBytes);
+    uint32_t rows = static_cast<uint32_t>(std::max<uint64_t>(1, 8192 / scanline));
+    if (rows < height) rows = (rows + 15) / 16 * 16;
+    return static_cast<int>(std::min(rows, height));
 }
 
 class BlockCache {
@@ -140,9 +157,14 @@ struct Rect {
 
 class WarpProducer final : public build::TileProducer {
 public:
-    WarpProducer(const RasterSource& src, const Plan& plan, SourceSpec spec, SourceGeoreference geo,
-                 std::shared_ptr<const crs::Transform> t)
-        : src_(src), plan_(plan), spec_(std::move(spec)), geo_(std::move(geo)), transform_(std::move(t)) {}
+    WarpProducer(const RasterSource& src, const Plan& plan, const WarpSettings& settings, SourceSpec spec,
+                 SourceGeoreference geo, std::shared_ptr<const crs::Transform> t)
+        : src_(src),
+          plan_(plan),
+          settings_(settings),
+          spec_(std::move(spec)),
+          geo_(std::move(geo)),
+          transform_(std::move(t)) {}
 
     Status Init() {
         W_ = static_cast<int>(src_.Width());
@@ -339,6 +361,14 @@ private:
         o.srcPixelBits = bits + (spec_.alpha >= 0 ? 32 : spec_.mask ? 1 : 0) + (spec_.nodata ? gdalBands : 0);
         o.dstPixelBits = bits + (spec_.dstNodata ? gdalBands : 0) + (spec_.dstAlpha ? 32 : 0);
         o.specialPointInOutput = PoleInOutput();
+        o.memoryLimit = settings_.warpMemory;
+        o.filterRadius = settings_.resampling == Resampling::kNearest ? 0 : 1;
+        if (settings_.target == Target::kSourceCrs) {
+            // gdalwarp's GeoTIFF: strips of the warped bands and the alpha band.
+            const size_t gdalPixel = src_.SampleSize() * (spec_.warped.size() + (spec_.dstAlpha ? 1 : 0));
+            o.dstBlockWidth = static_cast<int>(plan_.width);
+            o.dstBlockHeight = GtiffStripRows(plan_.width, plan_.height, gdalPixel);
+        }
         // A source with RPC metadata (GDAL's TIFF driver reads the 92 coefficients of the tag): even
         // when its GCPs georeference it, gdalwarp reads 5 more source pixels around each window
         // and warps only within the suggested extent of the source, 5 pixels around it.
@@ -632,7 +662,8 @@ private:
 
     // GDAL's warp options for this output, resolved once.
     void InitKernelParams() {
-        BilinearParams& p = params_;
+        KernelParams& p = params_;
+        p.nearest = settings_.resampling == Resampling::kNearest;
         const int nWarped = static_cast<int>(spec_.warped.size());
         const int nOut = plan_.MaskOut() ? 3 : nWarped;  // a JPEG output keeps the colour bands
         p.type = src_.Type();
@@ -658,6 +689,7 @@ private:
 
     const RasterSource& src_;
     const Plan& plan_;
+    const WarpSettings settings_;
     SourceSpec spec_;
     SourceGeoreference geo_;
     std::shared_ptr<const crs::Transform> transform_;
@@ -667,7 +699,7 @@ private:
     std::vector<WarpChunk> chunks_;
     std::array<double, 6> dstInverse_{};
     kernels::SourcePixelMapping mapping_;
-    BilinearParams params_;
+    KernelParams params_;
     double srcPixel_ = 1;
     int W_ = 0, H_ = 0, bw_ = 0, bh_ = 0, across_ = 0, down_ = 0;
     uint32_t tilesAcross_ = 0, tilesDown_ = 0;
@@ -682,7 +714,7 @@ struct SourceGrid {
     TargetGrid grid;
 };
 
-Expected<SourceGrid> GridOf(const RasterSource& src, bool evenTileOrigin) {
+Expected<SourceGrid> GridOf(const RasterSource& src, const WarpSettings& settings) {
     if (!src.Georef().crs)
         return Status(StatusCode::kInvalidArgument,
                       "Cannot build COG: input file has no coordinate reference system: " + src.Path());
@@ -690,7 +722,11 @@ Expected<SourceGrid> GridOf(const RasterSource& src, bool evenTileOrigin) {
     if (!geo.ok())
         return Status(StatusCode::kInvalidArgument,
                       "Cannot build COG: " + std::string(geo.status().message()) + ": " + src.Path());
-    auto grid = ComputeTargetGrid(*src.Georef().crs, *geo, src.Width(), src.Height(), evenTileOrigin);
+    const crs::Crs& crs = *src.Georef().crs;
+    auto grid = settings.target == Target::kSourceCrs ? ComputeSourceCrsGrid(crs, *geo, src.Width(), src.Height())
+                : settings.target == Target::kWebMercatorThroughSourceCrs
+                    ? ComputeTargetGridThroughSourceCrs(crs, *geo, src.Width(), src.Height(), settings.evenTileOrigin)
+                    : ComputeTargetGrid(crs, *geo, src.Width(), src.Height(), settings.evenTileOrigin);
     if (!grid.ok()) return grid.status();
     return SourceGrid{std::move(*geo), std::move(*grid)};
 }
@@ -698,10 +734,10 @@ Expected<SourceGrid> GridOf(const RasterSource& src, bool evenTileOrigin) {
 }  // namespace
 
 Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSettings& settings) {
-    auto sg = GridOf(src, settings.evenTileOrigin);
+    auto sg = GridOf(src, settings);
     if (!sg.ok()) return sg.status();
     const TargetGrid& grid = sg->grid;
-    const SourceSpec spec = Analyse(src);
+    const SourceSpec spec = Analyse(src, settings);
     Plan p;
     p.ownGrid = false;
     p.width = grid.width;
@@ -711,7 +747,7 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
     p.zoom = grid.zoom;
     p.overviews = pyramid::OverviewSizes(p.width, p.height, p.blockSize, true);
     p.type = src.Type();
-    const bool jpeg = !settings.noJpeg && JpegEligible(src);
+    const bool jpeg = !settings.noJpeg && JpegEligible(src, settings);
     std::vector<std::string> interps;
     for (int b : spec.warped) interps.push_back(src.ColorInterp(b));
     if (jpeg) {
@@ -751,10 +787,15 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
 
 namespace {
 
-Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::RasterSource& src, const build::Plan& plan) {
-    auto sg = GridOf(src, false);
+Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::RasterSource& src, const build::Plan& plan,
+                                                      const WarpSettings& settings) {
+    // The transform and the source's mapping (the grid itself is the plan's).
+    WarpSettings gridSettings = settings;
+    gridSettings.evenTileOrigin = false;
+    auto sg = GridOf(src, gridSettings);
     if (!sg.ok()) return sg.status();
-    auto p = std::make_unique<WarpProducer>(src, plan, Analyse(src), std::move(sg->geo), sg->grid.transform);
+    auto p = std::make_unique<WarpProducer>(src, plan, settings, Analyse(src, settings), std::move(sg->geo),
+                                            sg->grid.transform);
     DDBT_TRY(p->Init());
     return p;
 }
@@ -762,15 +803,16 @@ Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::RasterSource& 
 }  // namespace
 
 Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::RasterSource& src, const build::Plan& plan,
-                                                                uint64_t memoryBudget) {
+                                                                const WarpSettings& settings, uint64_t memoryBudget) {
     (void)memoryBudget;
-    auto p = MakeProducer(src, plan);
+    auto p = MakeProducer(src, plan, settings);
     if (!p.ok()) return p.status();
     return std::unique_ptr<build::TileProducer>(std::move(*p));
 }
 
-Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::RasterSource& src, const build::Plan& plan) {
-    auto p = MakeProducer(src, plan);
+Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::RasterSource& src, const build::Plan& plan,
+                                                const WarpSettings& settings) {
+    auto p = MakeProducer(src, plan, settings);
     if (!p.ok()) return p.status();
     return (*p)->Chunks();
 }

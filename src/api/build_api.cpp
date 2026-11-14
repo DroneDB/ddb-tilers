@@ -6,7 +6,13 @@
 // "level": n (DEFLATE / ZSTD level), "jpegQuality": 1..100 (warped JPEG outputs; default
 // DDB_COG_JPEG_QUALITY or 75), "noJpeg": bool, "memoryMb": n (pipeline budget, 2048),
 // "statistics": bool (write "<output>.stats.json", true), "evenTileOrigin": bool (false),
-// "insertRange": bool (true), "report": "<path>" (a JSON report of the build is written there)}.
+// "insertRange": bool (true), "report": "<path>" (a JSON report of the build is written there),
+// and, to geoproject a photo (a raster without georeferencing of its own) as libddb does:
+// "gcps": [[pixel, line, x, y], ...] (ground control points: pixel and line in the photo after
+// outScale, x and y in gcpSrs), "gcpSrs": "<CRS>" ("EPSG:4326"), "targetSrs": "EPSG:3857" (the
+// default: the photo's COG) | "source" (the photo in the GCPs' CRS on gdalwarp's grid, nearest
+// neighbour), "outScale": factor (the photo resampled first by nearest neighbour, 1)}.
+#include <algorithm>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
@@ -29,6 +35,37 @@ using ddbt::cog::build::BuildReport;
 
 using ddbt::api::Fail;
 using ddbt::api::IsEmpty;
+
+// The photo georeferencing of the options, created on first use.
+ddbt::cog::build::PhotoGeoreference& photo(BuildOptions& o) {
+    if (!o.photo) o.photo.emplace();
+    return *o.photo;
+}
+
+// One of the options of a photo's georeferencing; returns an error message, "" when fine.
+std::string ParsePhotoOption(const std::string& key, const json::Value& val, ddbt::cog::build::PhotoGeoreference& g) {
+    if (key == "gcps") {
+        if (val.kind != json::Value::Kind::kArray || val.arr.empty())
+            return "Invalid optionsJson: gcps must be an array of [pixel, line, x, y]";
+        for (const json::Value& p : val.arr) {
+            const bool ok = p.kind == json::Value::Kind::kArray && (p.arr.size() == 4 || p.arr.size() == 5) &&
+                            std::all_of(p.arr.begin(), p.arr.end(), [](const json::Value& v) { return v.IsNumber(); });
+            if (!ok) return "Invalid optionsJson: each GCP must be [pixel, line, x, y] or [pixel, line, x, y, z]";
+            g.gcps.push_back({p.arr[0].num, p.arr[1].num, p.arr[2].num, p.arr[3].num, p.arr.size() == 5 ? p.arr[4].num : 0.0});
+        }
+    } else if (key == "gcpSrs") {
+        if (val.kind != json::Value::Kind::kString || val.str.empty()) return "Invalid optionsJson: gcpSrs must be a CRS";
+        g.srs = val.str;
+    } else if (key == "targetSrs") {
+        if (val.kind != json::Value::Kind::kString || (val.str != "source" && val.str != "EPSG:3857"))
+            return "Invalid optionsJson: targetSrs must be \"source\" or \"EPSG:3857\"";
+        g.sourceCrs = val.str == "source";
+    } else {
+        if (!val.IsNumber() || !(val.num > 0)) return "Invalid optionsJson: outScale must be a positive number";
+        g.outScale = val.num;
+    }
+    return "";
+}
 
 // Parses the options; returns an error message, "" when fine.
 std::string ParseOptions(const char* text, BuildOptions& o, std::string& reportPath) {
@@ -59,10 +96,13 @@ std::string ParseOptions(const char* text, BuildOptions& o, std::string& reportP
         } else if (key == "report") {
             if (val.kind != json::Value::Kind::kString) return "Invalid optionsJson: report must be a string";
             reportPath = val.str;
+        } else if (key == "gcps" || key == "gcpSrs" || key == "targetSrs" || key == "outScale") {
+            if (const std::string err = ParsePhotoOption(key, val, photo(o)); !err.empty()) return err;
         } else {
             return "Invalid optionsJson: unknown option " + key;
         }
     }
+    if (o.photo && o.photo->gcps.empty()) return "Invalid optionsJson: gcpSrs, targetSrs and outScale need gcps";
     return "";
 }
 

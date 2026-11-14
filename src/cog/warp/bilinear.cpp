@@ -58,7 +58,7 @@ T AvoidNodata(T v) {
 template <typename T>
 class RowKernel {
 public:
-    RowKernel(const BilinearParams& p, const Window& win)
+    RowKernel(const KernelParams& p, const Window& win)
         : p_(p),
           win_(win),
           W_(p.sourceWidth),
@@ -118,6 +118,8 @@ public:
                 }
                 std::memcpy(out + static_cast<size_t>(bi) * ss, &value, ss);
             }
+            // A written pixel has a destination density of 1.
+            Finish(1.0, out, mask);
             return;
         }
         // General case: the centre pixel first.
@@ -205,11 +207,55 @@ public:
         Finish(centreDensity, out, mask);
     }
 
+    // GDAL's nearest neighbour kernel, one pixel.
+    void Nearest(double fx, double fy, uint8_t* out, uint8_t* mask) const {
+        constexpr size_t ss = sizeof(T);
+        if (std::isnan(fx)) return;
+        int cx = static_cast<int>(fx + 1.0e-10), cy = static_cast<int>(fy + 1.0e-10);
+        if (cx == W_) --cx;
+        if (cy == H_) --cy;
+        const uint8_t* px = win_.Pixel(cx, cy);
+        if (p_.noMasks) {
+            // GWKResampleNoMasksOrDstDensityOnlyThread: the samples, a destination density of 1.
+            for (int bi = 0; bi < nOut_; ++bi)
+                std::memcpy(out + static_cast<size_t>(bi) * ss, px + p_.bandOffsets[static_cast<size_t>(bi)], ss);
+            Finish(1.0, out, mask);
+            return;
+        }
+        // GWKNearestThread.
+        const size_t wi = win_.Index(cx, cy);
+        if (hasValid_ && !win_.valid[wi]) return;
+        double density = 1.0;
+        if (hasDensity_) {
+            density = static_cast<double>(win_.density[wi]);
+            if (density < kSrcDensityThreshold) return;
+        }
+        for (int bi = 0; bi < nOut_; ++bi) {
+            const uint8_t* sample = px + p_.bandOffsets[static_cast<size_t>(bi)];
+            // GWKGetPixelT: the band's own nodata, then the density.
+            if (perBand_ && IsNodata<T>(sample, nodata_)) continue;
+            if (density == 0.0) continue;
+            T v;
+            std::memcpy(&v, sample, ss);
+            // GWKSetPixelValueRealT.
+            if (density < 0.9999) {
+                if (density < 0.0001) continue;
+                T cur;
+                std::memcpy(&cur, out + static_cast<size_t>(bi) * ss, ss);
+                const double influence = (1.0 - density) * p_.dstDensityInit;
+                v = ClampRound<T>((static_cast<double>(v) * density + static_cast<double>(cur) * influence) /
+                                  (density + influence));
+            }
+            if (p_.avoidSingle && static_cast<double>(v) == dstNd_) v = AvoidNodata<T>(v);
+            std::memcpy(out + static_cast<size_t>(bi) * ss, &v, ss);
+        }
+        Finish(density, out, mask);
+    }
+
     // What follows the bands of a pixel the SIMD kernel wrote. Its four taps were fully valid,
     // so its centre pixel (one of them) has density 1, and every band was set: each band's
     // ClampRoundAndAvoidNoData, then the rest of Pixel().
     void FinishWritten(uint8_t* out, uint8_t* mask) const {
-        if (p_.noMasks) return;
         constexpr size_t ss = sizeof(T);
         if (p_.avoidSingle) {
             for (int bi = 0; bi < nOut_; ++bi) {
@@ -265,7 +311,7 @@ private:
         }
     }
 
-    const BilinearParams& p_;
+    const KernelParams& p_;
     const Window& win_;
     const int W_, H_, nOut_;
     const bool hasValid_, hasDensity_, perBand_;
@@ -274,7 +320,7 @@ private:
 
 // The SIMD kernel reads the window through int32 byte offsets and whole 32-bit or 64-bit words,
 // and, with masks, through the window's flags.
-bool SimdApplies(const BilinearParams& p, const Window& win) {
+bool SimdApplies(const KernelParams& p, const Window& win) {
     if (p.perBandNodata) return false;
     const size_t bytes = win.Pixels() * win.pb;
     if (bytes > static_cast<size_t>(std::numeric_limits<int32_t>::max()) - 64) return false;
@@ -283,11 +329,15 @@ bool SimdApplies(const BilinearParams& p, const Window& win) {
 }
 
 template <typename T>
-void WarpRowT(const BilinearParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
+void WarpRowT(const KernelParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
               uint8_t* mask, KernelPath path) {
     const RowKernel<T> k(p, win);
     const size_t opb = p.outPixelBytes;
     const bool alphaMask = p.alphaOut == -1;
+    if (p.nearest) {
+        for (size_t i = 0; i < n; ++i) k.Nearest(fx[i], fy[i], out + i * opb, alphaMask ? mask + i : nullptr);
+        return;
+    }
     if (path == KernelPath::kScalar || !SimdApplies(p, win)) {
         for (size_t i = 0; i < n; ++i) k.Pixel(fx[i], fy[i], out + i * opb, alphaMask ? mask + i : nullptr);
         return;
@@ -319,7 +369,7 @@ void WarpRowT(const BilinearParams& p, const Window& win, const double* fx, cons
         job.fy = fy + c0;
         job.n = m;
         job.out = out + c0 * opb;
-        job.mask = alphaMask && !p.noMasks ? mask + c0 : nullptr;
+        job.mask = alphaMask ? mask + c0 : nullptr;
         kernels::BilinearRow(job);
         if (finishWritten) {
             for (size_t i = 0; i < m; ++i) {
@@ -345,7 +395,7 @@ void WarpRowT(const BilinearParams& p, const Window& win, const double* fx, cons
 
 }  // namespace
 
-void WarpRow(const BilinearParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
+void WarpRow(const KernelParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
              uint8_t* mask, KernelPath path) {
     VisitSampleType(p.type, [&]<typename T>() { WarpRowT<T>(p, win, fx, fy, n, out, mask, path); });
 }

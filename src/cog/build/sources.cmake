@@ -10,6 +10,7 @@ list(APPEND DDBT_SOURCES
   cog/build/png_source.cpp
   cog/build/gif_source.cpp
   cog/build/webp_source.cpp
+  cog/build/derived_source.cpp
   cog/build/stats.cpp
   cog/build/cog_builder.cpp)
 # The statistics arithmetic is cog/tiler/stats_kernel.cpp (compiled without contraction or LTO).

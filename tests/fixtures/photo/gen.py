@@ -32,6 +32,22 @@ def content(w, h, seed=7):
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
+def smooth(w, h, seed=11):
+    """An RGB image of soft shapes and a little noise, as aerial photos mostly are."""
+    rng = np.random.default_rng(seed)
+    y, x = np.mgrid[0:h, 0:w].astype(np.float64)
+    img = np.zeros((h, w, 3))
+    for c in range(3):
+        for _ in range(6):
+            fx, fy, ph = rng.uniform(0.01, 0.08), rng.uniform(0.01, 0.08), rng.uniform(0, 6.28)
+            img[:, :, c] += 22 * np.sin(fx * x + fy * y + ph)
+    img += 120 + rng.normal(0, 2, img.shape)
+    # A few sharp-edged features (roads, roofs).
+    img[h // 3:h // 3 + 6, :, :] = (90, 90, 90)
+    img[h // 2:h // 2 + h // 5, w // 4:w // 4 + w // 6, :] = (180, 60, 50)
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
 def out(name):
     return os.path.join(HERE, name)
 
@@ -164,8 +180,11 @@ def main():
     gifs(rgb)
     webps(rgb)
     tiffs(rgb)
-    # The photo of the geoprojection tests: larger, 4:2:0 JPEG.
-    Image.fromarray(content(320, 240, seed=11)).save(out("geo_photo.jpg"), quality=85)
+    # The photos of the geoprojection tests: a 4:2:0 JPEG, and an RGB PNG whose road colour is
+    # transparent (the nodata of every band).
+    photo = smooth(192, 144)
+    Image.fromarray(photo).save(out("geo_photo.jpg"), quality=85)
+    Image.fromarray(photo).save(out("geo_photo_trns.png"), transparency=(90, 90, 90))
     if args.dng:
         dng(args.dng)
 

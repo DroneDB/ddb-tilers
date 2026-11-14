@@ -100,7 +100,7 @@ const MaskConfig kConfigs[] = {
 
 // One configuration: the source, its window, the output layout.
 struct RowSetup {
-    BilinearParams params;
+    KernelParams params;
     Window win;
     std::optional<double> nodata;
 };
@@ -114,7 +114,7 @@ RowSetup MakeSetup(SampleType type, const MaskConfig& mc, int srcBands, int outB
         TypeRange(type, lo, hi);
         s.nodata = mc.perBand && IsFloat(type) ? -HUGE_VAL : std::floor((lo + hi) / 3);
     }
-    BilinearParams& p = s.params;
+    KernelParams& p = s.params;
     p.type = type;
     p.sourceWidth = W;
     p.sourceHeight = H;

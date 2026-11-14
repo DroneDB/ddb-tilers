@@ -35,6 +35,7 @@
 
 #include "cog/encode/block_encoder.h"
 #include "cog/tiff/tiff_reader.h"
+#include "core/crs/crs.h"
 #include "core/util/status.h"
 
 namespace ddbt::cog::writer {
@@ -46,6 +47,21 @@ struct RawTag {
     uint64_t count = 0;
     std::vector<uint8_t> data;  // little-endian values
 };
+
+/// The GeoKeys of a GeoTIFF: GeoKeyDirectoryTag, GeoDoubleParamsTag (empty: no tag),
+/// GeoAsciiParamsTag.
+struct GeoKeys {
+    std::vector<uint16_t> directory;
+    std::vector<double> doubles;
+    std::string ascii;
+};
+
+/// GDAL's GeoKeys for EPSG:3857 (GTIFSetFromOGISDefnEx, GDAL 3.x), in its order.
+const GeoKeys& WebMercatorGeoKeys();
+
+/// The GeoKeys of a CRS: GDAL's for EPSG:3857 and EPSG:4326, the EPSG code of another geographic
+/// or projected CRS (GeographicTypeGeoKey, ProjectedCSTypeGeoKey); Unsupported without a code.
+Expected<GeoKeys> GeoKeysOf(const crs::Crs& crs);
 
 struct ImageSpec {
     uint32_t width = 0, height = 0;  // full resolution
@@ -63,8 +79,9 @@ struct ImageSpec {
     std::string noDataText;            // GDAL_NODATA (empty: none)
     std::string gdalMetadata;          // GDAL_METADATA XML (empty: none)
     std::vector<RawTag> extraTags;     // ImageDescription, Software, resolution... (full resolution)
-    std::array<double, 6> geoTransform{};  // GDAL order; EPSG:3857 (GDAL's GeoKeys)
+    std::array<double, 6> geoTransform{};  // GDAL order
     bool georeferenced = true;
+    GeoKeys geoKeys = WebMercatorGeoKeys();  // the CRS of the geotransform
     std::vector<std::pair<uint32_t, uint32_t>> overviews;  // largest first
 };
 
