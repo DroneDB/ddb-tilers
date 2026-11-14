@@ -31,6 +31,8 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <string>
+#include <vector>
 
 #include "core/exec/thread_pool.h"
 

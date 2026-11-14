@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <string>
 
 namespace ddbt::cog::jp2 {
 
