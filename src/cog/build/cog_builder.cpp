@@ -789,7 +789,8 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
     if (!src.ok()) return src.status();
     const SourceRaster& source = **src;
     if (!source.Georef().crs) return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no coordinate reference system: " + input);
-    if (!source.Georef().geoTransform)
+    // A raster without a geotransform is warped through its ground control points.
+    if (!source.Georef().geoTransform && source.Georef().gcps.empty())
         return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no geotransform: " + input);
 
     Plan plan;

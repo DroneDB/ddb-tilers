@@ -6,6 +6,8 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -19,25 +21,31 @@ bool Ok(double x, double y) { return std::isfinite(x) && std::isfinite(y) && x !
 
 // Source pixel -> EPSG:3857 (GDAL's GenImgProj transformer, forward), optionally with OGR's
 // CHECK_WITH_INVERT_PROJ: the point is transformed back and rejected when it moves by more than
-// the threshold (0.1 for geographic sources, 10000 otherwise).
+// the threshold (0.1 for geographic sources, 10000 otherwise); or, with dstInverse (GDAL's inverse
+// of an output geotransform, without the check), -> output pixels.
 struct Forward {
     const crs::Transform& t;
-    const std::array<double, 6>& gt;
+    const SourceGeoreference& geo;
     bool invertCheck = false;
     double threshold = 10000;
+    const std::array<double, 6>* dstInverse = nullptr;
 
     void operator()(std::vector<double>& xs, std::vector<double>& ys, std::vector<char>& ok) const {
         const size_t n = xs.size();
-        std::vector<double> gx(n), gy(n);
-        for (size_t i = 0; i < n; ++i) {
-            gx[i] = gt[0] + xs[i] * gt[1] + ys[i] * gt[2];
-            gy[i] = gt[3] + xs[i] * gt[4] + ys[i] * gt[5];
-        }
-        xs = gx;
-        ys = gy;
+        geo.PixelToCrs(xs.data(), ys.data(), n);
+        const std::vector<double> gx = xs, gy = ys;
         t.TransformPoints(xs.data(), ys.data(), nullptr, n);
         ok.assign(n, 1);
         for (size_t i = 0; i < n; ++i) ok[i] = Ok(xs[i], ys[i]);
+        if (dstInverse) {
+            const auto& a = *dstInverse;
+            for (size_t i = 0; i < n; ++i) {
+                if (!ok[i]) continue;
+                const double x = a[0] + xs[i] * a[1] + ys[i] * a[2], y = a[3] + xs[i] * a[4] + ys[i] * a[5];
+                xs[i] = x;
+                ys[i] = y;
+            }
+        }
         if (!invertCheck) return;
         std::vector<double> bx = xs, by = ys;
         t.TransformPoints(bx.data(), by.data(), nullptr, n, crs::Direction::Inverse);
@@ -65,13 +73,16 @@ struct Suggested {
     int pixels = 0, lines = 0;
 };
 
-// GDALSuggestedWarpOutput2 (alg/gdaltransformer.cpp) for a north-up source to EPSG:3857, without
-// its sub-pixel right / bottom border adjustments and the TransformBounds() union: neither changed
-// the grid of any raster of the test corpus.
-Expected<Suggested> SuggestWarpOutput(const crs::Transform& t, const std::array<double, 6>& gt,
-                                      const std::array<double, 6>& invGt, int W, int H, bool invertCheck,
-                                      double threshold) {
-    const Forward fwd{t, gt, invertCheck, threshold};
+// GDALSuggestedWarpOutput2 (alg/gdaltransformer.cpp) for a source to EPSG:3857 (or, with dstGt,
+// to the pixels of an output of that geotransform), without its sub-pixel right / bottom border
+// adjustments and the TransformBounds() union (geotransforms only): neither changed the grid of
+// any raster of the test corpus.
+Expected<Suggested> SuggestWarpOutput(const crs::Transform& t, const SourceGeoreference& geo, int W, int H,
+                                      bool invertCheck, double threshold,
+                                      const std::array<double, 6>* dstGt = nullptr) {
+    std::array<double, 6> dstInverse{};
+    if (dstGt) dstInverse = GdalInvGeoTransform(*dstGt);
+    const Forward fwd{t, geo, invertCheck, threshold, dstGt ? &dstInverse : nullptr};
     int nSteps = static_cast<int>(static_cast<double>(std::min(W, H)) / 50 + 0.5);
     nSteps = std::clamp(nSteps, 20, 100);
     const double step = 1.0 / nSteps;
@@ -101,6 +112,14 @@ Expected<Suggested> SuggestWarpOutput(const crs::Transform& t, const std::array<
     if (failed == 0) {
         // The reverse check: back to source pixels, within W / nSteps and H / nSteps.
         std::vector<double> rx = xs, ry = ys;
+        if (dstGt) {
+            const auto& a = *dstGt;
+            for (size_t i = 0; i < rx.size(); ++i) {
+                const double x = a[0] + rx[i] * a[1] + ry[i] * a[2], y = a[3] + rx[i] * a[4] + ry[i] * a[5];
+                rx[i] = x;
+                ry[i] = y;
+            }
+        }
         t.TransformPoints(rx.data(), ry.data(), nullptr, rx.size(), crs::Direction::Inverse);
         for (size_t i = 0; i < rx.size() && failed == 0; ++i) {
             if (!Ok(rx[i], ry[i])) {
@@ -116,8 +135,11 @@ Expected<Suggested> SuggestWarpOutput(const crs::Transform& t, const std::array<
                     break;
                 }
             }
-            const double px = invGt[0] + rx[i] * invGt[1] + ry[i] * invGt[2];
-            const double py = invGt[3] + rx[i] * invGt[4] + ry[i] * invGt[5];
+            double px = rx[i], py = ry[i];
+            if (!geo.CrsToPixel(px, py) || !Ok(px, py)) {
+                ++failed;
+                break;
+            }
             if (std::fabs(px - inX[i]) > W / static_cast<double>(nSteps) ||
                 std::fabs(py - inY[i]) > H / static_cast<double>(nSteps))
                 ++failed;
@@ -225,8 +247,7 @@ Expected<Suggested> SuggestWarpOutput(const crs::Transform& t, const std::array<
 
 // gdalwarp's check of a suggested extent (GDALWarpCreateOutput): a 21 x 21 grid of target points
 // goes to source pixels and back within one target pixel.
-bool ExtentRoundTrips(const crs::Transform& t, const std::array<double, 6>& gt, const std::array<double, 6>& invGt,
-                      const Suggested& s) {
+bool ExtentRoundTrips(const crs::Transform& t, const SourceGeoreference& geo, const Suggested& s) {
     constexpr int kSteps = 20;
     for (int i = 0; i <= kSteps; ++i) {
         for (int j = 0; j <= kSteps; ++j) {
@@ -234,26 +255,13 @@ bool ExtentRoundTrips(const crs::Transform& t, const std::array<double, 6>& gt, 
             const double ex = (1 - ri) * s.minX + ri * s.maxX, ey = (1 - rj) * s.minY + rj * s.maxY;
             double x = ex, y = ey;
             if (!t.TransformPoint(x, y, nullptr, crs::Direction::Inverse) || !Ok(x, y)) return false;
-            const double px = invGt[0] + x * invGt[1] + y * invGt[2], py = invGt[3] + x * invGt[4] + y * invGt[5];
-            double gx = gt[0] + px * gt[1] + py * gt[2], gy = gt[3] + px * gt[4] + py * gt[5];
+            if (!geo.CrsToPixel(x, y) || !geo.PixelToCrs(x, y)) return false;
+            double gx = x, gy = y;
             if (!t.TransformPoint(gx, gy) || !Ok(gx, gy)) return false;
             if (std::fabs(gx - ex) > (s.maxX - s.minX) / s.pixels || std::fabs(gy - ey) > (s.maxY - s.minY) / s.lines)
                 return false;
         }
     }
-    return true;
-}
-
-bool InvertGt(const std::array<double, 6>& gt, std::array<double, 6>& inv) {
-    const double det = gt[1] * gt[5] - gt[2] * gt[4];
-    if (std::abs(det) < 1e-15) return false;
-    const double invDet = 1.0 / det;
-    inv[1] = gt[5] * invDet;
-    inv[4] = -gt[4] * invDet;
-    inv[2] = -gt[2] * invDet;
-    inv[5] = gt[1] * invDet;
-    inv[0] = (gt[2] * gt[3] - gt[0] * gt[5]) * invDet;
-    inv[3] = (-gt[1] * gt[3] + gt[0] * gt[4]) * invDet;
     return true;
 }
 
@@ -310,33 +318,53 @@ double ResolutionForExtent(const crs::Transform& t, const std::array<double, 6>&
 
 }  // namespace
 
-Expected<TargetGrid> ComputeTargetGrid(const crs::Crs& srcCrs, const std::array<double, 6>& gt, uint32_t uW,
+Expected<std::array<double, 4>> SuggestedPixelExtent(const crs::Transform& t, const SourceGeoreference& georef,
+                                                     uint32_t W, uint32_t H, const std::array<double, 6>& dstGt) {
+    auto s = SuggestWarpOutput(t, georef, static_cast<int>(W), static_cast<int>(H), false, 0, &dstGt);
+    if (!s.ok()) return s.status();
+    return std::array<double, 4>{s->minX, s->minY, s->maxX, s->maxY};
+}
+
+Expected<TargetGrid> ComputeTargetGrid(const crs::Crs& srcCrs, const SourceGeoreference& geo, uint32_t uW,
                                        uint32_t uH, bool evenTileOrigin) {
     TargetGrid g;
     const int W = static_cast<int>(uW), H = static_cast<int>(uH);
-    const double ex[4] = {gt[0], gt[0] + W * gt[1] + H * gt[2], gt[3], gt[3] + W * gt[4] + H * gt[5]};
+    const std::optional<std::array<double, 6>>& sgt = geo.GeoTransform();
     try {
         static const crs::Crs webMercator = crs::Crs::FromEpsg(3857);
-        g.transform = crs::TransformCache::Global().GetForExtent(srcCrs, webMercator, std::min(ex[0], ex[1]),
-                                                                std::min(ex[2], ex[3]), std::max(ex[0], ex[1]),
-                                                                std::max(ex[2], ex[3]));
+        if (sgt) {
+            // GDAL's area of interest: the source extent (geotransforms only).
+            const auto& gt = *sgt;
+            const double ex[4] = {gt[0], gt[0] + W * gt[1] + H * gt[2], gt[3], gt[3] + W * gt[4] + H * gt[5]};
+            g.transform = crs::TransformCache::Global().GetForExtent(srcCrs, webMercator, std::min(ex[0], ex[1]),
+                                                                    std::min(ex[2], ex[3]), std::max(ex[0], ex[1]),
+                                                                    std::max(ex[2], ex[3]));
+        } else {
+            g.transform = crs::TransformCache::Global().Get(srcCrs, webMercator);
+        }
     } catch (const std::exception& e) {
         return Status(StatusCode::kInvalidArgument, std::string("Cannot transform to EPSG:3857: ") + e.what());
     }
-    std::array<double, 6> invGt{};
-    if (!InvertGt(gt, invGt)) return Status(StatusCode::kInvalidArgument, "Cannot invert the source geotransform");
     const crs::Transform& t = *g.transform;
     const bool geographic = srcCrs.Type() == crs::CrsType::Geographic2D || srcCrs.Type() == crs::CrsType::Geographic3D;
 
     // gdalwarp's output (GDALWarpCreateOutput), then the COG driver's grid from it.
     double minX, minY, maxX, maxY, res;
     constexpr double kMaxLat = 85.0511287798066;
-    const double minLon = gt[0], maxLon = gt[0] + gt[1] * W;
-    const double maxLat = gt[3], minLat = gt[3] + gt[5] * H;
-    if (geographic && gt[2] == 0 && gt[4] == 0 && gt[5] < 0 && minLon >= -180 - 1e-3 && maxLon <= 180 + 1e-3 &&
-        ((maxLat > kMaxLat && minLat < kMaxLat) || (maxLat > -kMaxLat && minLat < -kMaxLat))) {
-        // Geographic source beyond Mercator's latitudes: the output bounds clamped to them, the
-        // resolution from the local scale over that extent.
+    const auto clampedToMercator = [&] {
+        if (!sgt || !geographic) return false;
+        const auto& gt = *sgt;
+        const double minLon = gt[0], maxLon = gt[0] + gt[1] * W;
+        const double maxLat = gt[3], minLat = gt[3] + gt[5] * H;
+        return gt[2] == 0 && gt[4] == 0 && gt[5] < 0 && minLon >= -180 - 1e-3 && maxLon <= 180 + 1e-3 &&
+               ((maxLat > kMaxLat && minLat < kMaxLat) || (maxLat > -kMaxLat && minLat < -kMaxLat));
+    };
+    if (clampedToMercator()) {
+        // Geographic source (with a geotransform) beyond Mercator's latitudes: the output bounds
+        // clamped to them, the resolution from the local scale over that extent.
+        const auto& gt = *sgt;
+        const double minLon = gt[0], maxLon = gt[0] + gt[1] * W;
+        const double maxLat = gt[3], minLat = gt[3] + gt[5] * H;
         double xLL = std::max(minLon, -180.0), yLL = std::max(minLat, -kMaxLat);
         double xUR = std::min(maxLon, 180.0), yUR = std::min(maxLat, kMaxLat);
         if (!t.TransformPoint(xLL, yLL) || !t.TransformPoint(xUR, yUR))
@@ -345,12 +373,18 @@ Expected<TargetGrid> ComputeTargetGrid(const crs::Crs& srcCrs, const std::array<
         res = ResolutionForExtent(t, gt, minX, minY, maxX, maxY);
         if (!(res > 0)) return Status(StatusCode::kInvalidArgument, "Cannot compute the output resolution");
     } else {
-        auto s = SuggestWarpOutput(t, gt, invGt, W, H, false, 0);
-        if (!s.ok() || !ExtentRoundTrips(t, gt, invGt, *s)) {
+        auto s = SuggestWarpOutput(t, geo, W, H, false, 0);
+        if (!s.ok() || !ExtentRoundTrips(t, geo, *s)) {
             // gdalwarp retries with CHECK_WITH_INVERT_PROJ=TRUE.
-            s = SuggestWarpOutput(t, gt, invGt, W, H, true, geographic ? 0.1 : 10000);
+            s = SuggestWarpOutput(t, geo, W, H, true, geographic ? 0.1 : 10000);
         }
         if (!s.ok()) return s.status();
+        // gdalwarp creates its output at the suggested size first (a source whose corners map
+        // to both sides of the antimeridian may get no line at all).
+        if (s->pixels <= 0 || s->lines <= 0)
+            return Status(StatusCode::kInvalidArgument, "Attempt to create " + std::to_string(s->pixels) + "x" +
+                                                            std::to_string(s->lines) +
+                                                            " dataset is illegal, sizes must be larger than zero.");
         minX = s->minX, minY = s->minY, maxX = s->maxX, maxY = s->maxY, res = s->pixelSize;
     }
     g.suggestedResolution = res;

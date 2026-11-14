@@ -15,6 +15,7 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | laz-perf 3.4.0, modified | `third_party/lazperf` | Apache-2.0 | `LICENSE` and `NOTICE` in the folder; every change is listed in `FORK.md` and marked with a `ddbt fork` comment |
 | fpnge (commit 097ebccf) | `third_party/fpnge` | Apache-2.0 | Unmodified (compiled twice for SSE 4.1 and AVX2 by the wrappers in `variants/`); `LICENSE` in the folder |
 | GDAL 3.13.3, ported code | `src/core/crs/gcp_transform.cpp` | MIT | The GCP transforms of `alg/gdal_crs.cpp` (with the GRASS CRS.C routines, Copyright (c) 1992 Michigan State University), `alg/gdal_homography.cpp`, `alg/gdallinearsystem.cpp` and `alg/gdaltransformer.cpp`, ported to C++20; the copyright notices and the MIT permission notice are at the top of the file |
+| GDAL 3.13.3, ported code | `src/cog/warp/row_approx.cpp`, `src/cog/warp/warp_chunks.cpp`, `src/cog/warp/source_georef.cpp` | MIT | The approximate transformer of `alg/gdaltransformer.cpp` (GDALApproxTransform) and its GDALInvGeoTransform, and the warp chunk list and source windows of `alg/gdalwarpoperation.cpp` (GDALWarpOperation), ported to C++20; the copyright notices and the MIT permission notice are at the top of each file |
 | vcpkg port of libjpeg-turbo, modified | `ports/libjpeg-turbo` | MIT | Build script only, not linked; see `ports/NOTICE.libjpeg-turbo` |
 
 ## Libraries linked through vcpkg (static)
@@ -46,4 +47,5 @@ Development only (not part of the library): GoogleTest (BSD-3-Clause) and Google
 (Apache-2.0).
 
 The test samples in `tests/fixtures/gdal/` come from GDAL's test suite (MIT/X style licence,
-`tests/fixtures/gdal/GDAL-LICENSE.TXT`); they are not part of the library.
+`tests/fixtures/gdal/GDAL-LICENSE.TXT`); they are not part of the library. The COGs
+`tests/fixtures/gcp/gdal/gdal_*.tif` are GDAL's warps of three of them (same licence).

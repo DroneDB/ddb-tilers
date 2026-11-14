@@ -8,9 +8,11 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "cog/build/pipeline.h"
 #include "cog/build/source.h"
+#include "cog/warp/warp_chunks.h"
 #include "core/util/status.h"
 
 namespace ddbt::cog::warp {
@@ -29,5 +31,9 @@ Expected<build::Plan> WarpPlan(const build::SourceRaster& source, const WarpSett
 /// The producer of the plan's full-resolution strips.
 Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::SourceRaster& source, const build::Plan& plan,
                                                                 uint64_t memoryBudget);
+
+/// The chunks of GDAL's warper the producer follows for a source georeferenced by GCPs (none for a
+/// source with a geotransform): for tests.
+Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::SourceRaster& source, const build::Plan& plan);
 
 }  // namespace ddbt::cog::warp

@@ -7,6 +7,11 @@
 //     0.125 source pixel bound, as gdalwarp's approximate transformer, -et 0.125) -> source pixel
 //     through the inverse geotransform; a centre outside the source (1e-10 slack), or within one
 //     pixel outside and still outside after an exact transform, is not written;
+//   - a source georeferenced by GCPs (no geotransform) follows GDAL's warper itself, whose
+//     approximation of the whole transform moves its pixels by up to 0.125 source pixel: GDAL's
+//     chunks of the output (WarpChunk), its approximate transformer over each row of a chunk
+//     (RowApproximator) on the exact transform (output pixel -> EPSG:3857 -> GCP CRS -> inverse
+//     GCP transform, SourceGeoreference), the source window of the chunk;
 //   - GDAL's bilinear kernel (bilinear.h) on the source window of the tile;
 //   - UNIFIED_SRC_NODATA=YES with a finite nodata (cog.cpp): a pixel is nodata when every band is;
 //     without it (a NaN / infinite / huge nodata becoming an alpha band) both the unified mask
@@ -21,15 +26,19 @@
 
 #include <algorithm>
 #include <atomic>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 #include <vector>
 
 #include "cog/pyramid/overview.h"
 #include "cog/warp/bilinear.h"
+#include "cog/warp/row_approx.h"
+#include "cog/warp/warp_chunks.h"
 #include "cog/warp/target_grid.h"
 #include "cog/warp/warp_kernels.h"
 #include "core/crs/grid_approx.h"
@@ -44,18 +53,7 @@ using build::Transparency;
 
 namespace {
 
-bool InvertGeoTransform(const std::array<double, 6>& gt, std::array<double, 6>& inv) {
-    const double det = gt[1] * gt[5] - gt[2] * gt[4];
-    if (std::abs(det) < 1e-15) return false;
-    const double invDet = 1.0 / det;
-    inv[1] = gt[5] * invDet;
-    inv[4] = -gt[4] * invDet;
-    inv[2] = -gt[2] * invDet;
-    inv[5] = gt[1] * invDet;
-    inv[0] = (gt[2] * gt[3] - gt[0] * gt[5]) * invDet;
-    inv[3] = (-gt[1] * gt[3] + gt[0] * gt[4]) * invDet;
-    return true;
-}
+constexpr uint16_t kRpcCoefficientTag = 50844;  // RPCCoefficientTag: GDAL's RPC metadata
 
 // The source as the warper reads it.
 struct SourceSpec {
@@ -131,16 +129,19 @@ struct Rect {
 
 class WarpProducer final : public build::TileProducer {
 public:
-    WarpProducer(const SourceRaster& src, const Plan& plan, SourceSpec spec, std::shared_ptr<const crs::Transform> t)
-        : src_(src), plan_(plan), spec_(std::move(spec)), transform_(std::move(t)) {}
+    WarpProducer(const SourceRaster& src, const Plan& plan, SourceSpec spec, SourceGeoreference geo,
+                 std::shared_ptr<const crs::Transform> t)
+        : src_(src), plan_(plan), spec_(std::move(spec)), geo_(std::move(geo)), transform_(std::move(t)) {}
 
     Status Init() {
-        if (!InvertGeoTransform(*src_.Georef().geoTransform, srcInv_))
-            return Status(StatusCode::kInvalidArgument, "Cannot invert the geotransform of " + src_.Path());
-        const auto& sgt = *src_.Georef().geoTransform;
-        srcPixel_ = std::min(std::hypot(sgt[1], sgt[4]), std::hypot(sgt[2], sgt[5]));
         W_ = static_cast<int>(src_.Width());
         H_ = static_cast<int>(src_.Height());
+        if (const auto& sgt = geo_.GeoTransform()) {
+            const auto& g = *sgt;
+            srcPixel_ = std::min(std::hypot(g[1], g[4]), std::hypot(g[2], g[5]));
+        } else {
+            InitGdalChunks();
+        }
         bw_ = static_cast<int>(src_.BlockWidth());
         bh_ = static_cast<int>(src_.BlockHeight());
         across_ = static_cast<int>(src_.BlocksAcross());
@@ -149,7 +150,7 @@ public:
         tilesAcross_ = (plan_.width + B - 1) / B;
         tilesDown_ = (plan_.height + B - 1) / B;
         windows_.resize(static_cast<size_t>(tilesAcross_) * tilesDown_);
-        mapping_.inverse = srcInv_;
+        mapping_.inverse = geo_.PixelAffine();
         mapping_.width = W_;
         mapping_.height = H_;
         InitKernelParams();
@@ -168,6 +169,8 @@ public:
         return Status::Ok();
     }
 
+    const std::vector<WarpChunk>& Chunks() const noexcept { return chunks_; }
+
     uint64_t BlocksDecoded() const override { return cache_.decoded.load(); }
     uint64_t PeakCacheBytes() const override { return cache_.peak.load(); }
 
@@ -179,42 +182,24 @@ public:
         InitTile(strip, x0, tw, th);
         const Rect planned = windows_[static_cast<size_t>(strip.row) * tilesAcross_ + col];
         // Source pixel of every destination pixel centre, row by row (a row stays in the cache
-        // through the approximate transform, the inverse geotransform and its tap bounds): a
-        // point the approximation put just outside the source is transformed again exactly.
-        thread_local std::vector<double> tlsX, tlsY, tlsColumns;
-        thread_local std::vector<uint32_t> tlsOutside;
+        // through the transform, the source pixel step and its tap bounds): a point the
+        // approximation put just outside the source is transformed again exactly.
+        thread_local std::vector<double> tlsX, tlsY;
         thread_local std::vector<kernels::TapOrigins> tlsTaps;
         const size_t n = static_cast<size_t>(tw) * th;
         tlsX.resize(n);
         tlsY.resize(n);
-        tlsColumns.resize(tw);
-        tlsOutside.resize(tw);
         tlsTaps.resize(th);
         double* const sx = tlsX.data();
         double* const sy = tlsY.data();
-        const auto& gt = plan_.geoTransform;
-        for (uint32_t x = 0; x < tw; ++x) tlsColumns[x] = gt[0] + (x0 + x + 0.5) * gt[1];
-        crs::GridApproxOptions approxOptions;
-        approxOptions.gridSize = 9;
-        approxOptions.maxError = 0.125 * srcPixel_;
-        approxOptions.direction = crs::Direction::Inverse;
-        const double padX = std::abs(gt[1]), padY = std::abs(gt[5]);
-        const double bx0 = gt[0] + x0 * gt[1] - padX, bx1 = gt[0] + (x0 + tw) * gt[1] + padX;
-        const double by1 = gt[3] + strip.y0 * gt[5] + padY, by0 = gt[3] + (strip.y0 + th) * gt[5] - padY;
-        const crs::GridApprox approx = crs::GridApprox::Build(transform_, bx0, by0, bx1, by1, approxOptions);
+        if (rows_) {
+            GcpSourcePixels(x0, tw, strip.y0, th, sx, sy);
+        } else {
+            GeoTransformSourcePixels(x0, tw, strip.y0, th, sx, sy);
+        }
         for (uint32_t y = 0; y < th; ++y) {
-            double* const rx = sx + static_cast<size_t>(y) * tw;
-            double* const ry = sy + static_cast<size_t>(y) * tw;
-            std::copy(tlsColumns.begin(), tlsColumns.end(), rx);
-            std::fill(ry, ry + tw, gt[3] + (strip.y0 + y + 0.5) * gt[5]);
-            approx.TransformPoints(rx, ry, tw);
-            const size_t outside = kernels::ToSourcePixels(mapping_, rx, ry, tw, tlsOutside.data());
-            for (size_t k = 0; k < outside; ++k) {
-                const uint32_t x = tlsOutside[k];
-                if (!InsideOrRetry(rx[x], ry[x], x0 + x, strip.y0 + y))
-                    rx[x] = ry[x] = std::numeric_limits<double>::quiet_NaN();
-            }
-            tlsTaps[y] = kernels::TapOriginBounds(rx, ry, tw);
+            const size_t row = static_cast<size_t>(y) * tw;
+            tlsTaps[y] = kernels::TapOriginBounds(sx + row, sy + row, tw);
         }
         // Rows of the tile in chunks whose source window stays near 16 MiB (wide pixels, or an
         // output coarser than the source).
@@ -262,17 +247,183 @@ public:
     }
 
 private:
-    // GWKCheckAndComputeSrcOffsets: inside the source (with GDAL's 1e-10 slack); a point within
-    // one pixel outside is transformed again exactly (the approximation may have moved it out).
-    bool InsideOrRetry(double& fx, double& fy, uint32_t dx, uint32_t dy) const {
-        auto inside = [&](double x, double y) { return x >= 0 && y >= 0 && x + 1e-10 <= W_ && y + 1e-10 <= H_; };
+    // Source pixels of the destination pixels (x0 .. x0 + tw - 1, y0 .. y0 + th - 1) of a source
+    // with a geotransform: a GridApprox of the reprojection over the tile with a 0.125 source
+    // pixel bound, then the inverse geotransform; NaN where there is no source pixel.
+    void GeoTransformSourcePixels(uint32_t x0, uint32_t tw, uint32_t y0, uint32_t th, double* sx, double* sy) const {
+        thread_local std::vector<double> tlsColumns;
+        thread_local std::vector<uint32_t> tlsOutside;
+        tlsColumns.resize(tw);
+        tlsOutside.resize(tw);
+        const auto& gt = plan_.geoTransform;
+        for (uint32_t x = 0; x < tw; ++x) tlsColumns[x] = gt[0] + (x0 + x + 0.5) * gt[1];
+        crs::GridApproxOptions approxOptions;
+        approxOptions.gridSize = 9;
+        approxOptions.maxError = 0.125 * srcPixel_;
+        approxOptions.direction = crs::Direction::Inverse;
+        const double padX = std::abs(gt[1]), padY = std::abs(gt[5]);
+        const double bx0 = gt[0] + x0 * gt[1] - padX, bx1 = gt[0] + (x0 + tw) * gt[1] + padX;
+        const double by1 = gt[3] + y0 * gt[5] + padY, by0 = gt[3] + (y0 + th) * gt[5] - padY;
+        const crs::GridApprox approx = crs::GridApprox::Build(transform_, bx0, by0, bx1, by1, approxOptions);
+        const Rect raster{0, 0, W_, H_};
+        for (uint32_t y = 0; y < th; ++y) {
+            double* const rx = sx + static_cast<size_t>(y) * tw;
+            double* const ry = sy + static_cast<size_t>(y) * tw;
+            std::copy(tlsColumns.begin(), tlsColumns.end(), rx);
+            std::fill(ry, ry + tw, gt[3] + (y0 + y + 0.5) * gt[5]);
+            approx.TransformPoints(rx, ry, tw);
+            const size_t outside = kernels::ToSourcePixels(mapping_, rx, ry, tw, tlsOutside.data());
+            for (size_t k = 0; k < outside; ++k) {
+                const uint32_t x = tlsOutside[k];
+                if (!InsideOrRetry(rx[x], ry[x], x0 + x, y0 + y, raster))
+                    rx[x] = ry[x] = std::numeric_limits<double>::quiet_NaN();
+            }
+        }
+    }
+
+    // Source pixels of a source georeferenced by GCPs, as GDAL's warper computes them: in each of
+    // its chunks (WarpChunk), each row through its approximate transformer (RowApproximator, 0.125
+    // source pixels), a position outside the chunk's source window not written (after an exact
+    // try when it is within a pixel of it), nor a pixel of no chunk; NaN where there is none.
+    void GcpSourcePixels(uint32_t x0, uint32_t tw, uint32_t y0, uint32_t th, double* sx, double* sy) const {
+        thread_local std::vector<char> tlsOk;
+        thread_local std::vector<const WarpChunk*> tlsChunks;
+        tlsOk.resize(tw);
+        std::fill(sx, sx + static_cast<size_t>(tw) * th, std::numeric_limits<double>::quiet_NaN());
+        std::fill(sy, sy + static_cast<size_t>(tw) * th, std::numeric_limits<double>::quiet_NaN());
+        const int tx0 = static_cast<int>(x0), tx1 = static_cast<int>(x0 + tw);
+        const int ty0 = static_cast<int>(y0), ty1 = static_cast<int>(y0 + th);
+        tlsChunks.clear();
+        for (const WarpChunk& c : chunks_)
+            if (c.dx < tx1 && c.dx + c.dw > tx0 && c.dy < ty1 && c.dy + c.dh > ty0) tlsChunks.push_back(&c);
+        for (const WarpChunk* c : tlsChunks) {
+            const int cx0 = std::max(tx0, c->dx), cx1 = std::min(tx1, c->dx + c->dw);
+            const int cy0 = std::max(ty0, c->dy), cy1 = std::min(ty1, c->dy + c->dh);
+            const Rect window{c->sx, c->sy, c->sx + c->sw, c->sy + c->sh};
+            for (int y = cy0; y < cy1; ++y) {
+                const size_t row = static_cast<size_t>(y - ty0) * tw;
+                double* const rx = sx + row + static_cast<size_t>(cx0 - tx0);
+                double* const ry = sy + row + static_cast<size_t>(cx0 - tx0);
+                rows_->Points(static_cast<size_t>(c->dx), static_cast<size_t>(c->dw), y + 0.5, static_cast<size_t>(cx0),
+                              static_cast<size_t>(cx1), rx, ry, tlsOk.data());
+                for (int x = 0; x < cx1 - cx0; ++x) {
+                    if (!tlsOk[static_cast<size_t>(x)] || std::isnan(rx[x]) || std::isnan(ry[x]) ||
+                        !InsideOrRetry(rx[x], ry[x], static_cast<uint32_t>(cx0 + x), static_cast<uint32_t>(y), window))
+                        rx[x] = ry[x] = std::numeric_limits<double>::quiet_NaN();
+                }
+            }
+        }
+    }
+
+    // GDAL's chunks of the whole output for a GCP source, and its approximate transformer.
+    void InitGdalChunks() {
+        rows_.emplace([this](double* xs, double* ys, size_t n, char* ok) { ExactSourcePixels(xs, ys, n, ok); },
+                      0.125);
+        dstInverse_ = GdalInvGeoTransform(plan_.geoTransform);
+        // GetWorkingMemoryForWindow's costs: the working type (the band type) of each warped band,
+        // then the masks GDAL keeps for them.
+        const int gdalBands = static_cast<int>(spec_.warped.size()) / (src_.Complex() ? 2 : 1);
+        const int bits = static_cast<int>(src_.SampleSize() * 8 * spec_.warped.size());
+        WarpChunkOptions o;
+        o.srcPixelBits = bits + (spec_.alpha >= 0 ? 32 : spec_.mask ? 1 : 0) + (spec_.nodata ? gdalBands : 0);
+        o.dstPixelBits = bits + (spec_.dstNodata ? gdalBands : 0) + (spec_.dstAlpha ? 32 : 0);
+        o.specialPointInOutput = PoleInOutput();
+        // A source with RPC metadata (GDAL's TIFF driver reads the 92 coefficients of the tag): even
+        // when its GCPs georeference it, gdalwarp reads 5 more source pixels around each window
+        // and warps only within the suggested extent of the source, 5 pixels around it.
+        int wx = 0, wy = 0, ww = static_cast<int>(plan_.width), wh = static_cast<int>(plan_.height);
+        const tiff::TagEntry* rpc = src_.Main().FindTag(kRpcCoefficientTag);
+        if (rpc != nullptr && rpc->count == 92) {
+            o.sourceExtra = 5;
+            if (!RestrictToRpcExtent(wx, wy, ww, wh)) return;
+        }
+        chunks_ = CollectWarpChunks(wx, wy, ww, wh, W_, H_,
+                                    [this](bool dstToSrc, double* xs, double* ys, size_t n, char* ok) {
+                                        if (dstToSrc) ExactSourcePixels(xs, ys, n, ok);
+                                        else ExactDestinationPixels(xs, ys, n, ok);
+                                    },
+                                    o);
+    }
+
+    // GDALWarpOperation's special points, the poles (longitude 0, latitude +/-89.9999) in output
+    // pixels as GDALTransformLonLatToDestGenImgProjTransformer computes them: for a source CRS
+    // that is geographic in degrees it applies the inverse output geotransform to the longitude
+    // and latitude themselves (no reprojection); for a projected one the poles land outside any
+    // EPSG:3857 output. Without a reprojection (the source is in EPSG:3857) there is none.
+    bool PoleInOutput() const {
+        if (transform_->GetKind() == crs::Transform::Kind::Identity) return false;
+        const crs::Crs& c = transform_->Source();
+        if (!c.IsHorizontallyGeographic() || !(std::fabs(c.HorizontalUnitFactor() - 0.0174532925199433) < 1e-9))
+            return false;
+        for (const double lat : {-89.9999, 89.9999}) {
+            const double x = dstInverse_[0] + 0 * dstInverse_[1] + lat * dstInverse_[2];
+            const double y = dstInverse_[3] + 0 * dstInverse_[4] + lat * dstInverse_[5];
+            if (0 <= x && plan_.width >= x && 0 <= y && plan_.height >= y) return true;  // GDAL's test
+        }
+        return false;
+    }
+
+    // AdjustOutputExtentForRPC: the output window within 5 pixels of the source's suggested
+    // extent in output pixels; false when they do not meet (nothing is warped).
+    bool RestrictToRpcExtent(int& x, int& y, int& w, int& h) const {
+        const auto e = SuggestedPixelExtent(*transform_, geo_, src_.Width(), src_.Height(), plan_.geoTransform);
+        if (!e.ok()) return true;
+        const double threshold = static_cast<double>(INT_MAX) / 2;
+        for (const double v : *e)
+            if (!(std::fabs(v) < threshold)) return true;
+        constexpr int kPadding = 5;
+        x = std::max(x, static_cast<int>(std::floor((*e)[0])) - kPadding);
+        y = std::max(y, static_cast<int>(std::floor((*e)[1])) - kPadding);
+        w = std::min(w - x, static_cast<int>(std::ceil((*e)[2])) + kPadding - x);
+        h = std::min(h - y, static_cast<int>(std::ceil((*e)[3])) + kPadding - y);
+        return w > 0 && h > 0;
+    }
+
+    // GDAL's exact transform from destination pixels to source pixels (GDALGenImgProjTransform):
+    // the output geotransform, the reprojection to the source CRS, the source pixel step.
+    void ExactSourcePixels(double* xs, double* ys, size_t n, char* ok) const {
+        const auto& gt = plan_.geoTransform;
+        for (size_t i = 0; i < n; ++i) {
+            const double X = gt[0] + xs[i] * gt[1] + ys[i] * gt[2];
+            const double Y = gt[3] + xs[i] * gt[4] + ys[i] * gt[5];
+            xs[i] = X;
+            ys[i] = Y;
+        }
+        transform_->TransformPoints(xs, ys, nullptr, n, crs::Direction::Inverse);
+        geo_.CrsToPixel(xs, ys, n);
+        for (size_t i = 0; i < n; ++i) ok[i] = xs[i] != HUGE_VAL && ys[i] != HUGE_VAL;
+    }
+
+    // And back: source pixel step, reprojection, GDAL's inverse of the output geotransform.
+    void ExactDestinationPixels(double* xs, double* ys, size_t n, char* ok) const {
+        geo_.PixelToCrs(xs, ys, n);
+        transform_->TransformPoints(xs, ys, nullptr, n, crs::Direction::Forward);
+        const auto& inv = dstInverse_;
+        for (size_t i = 0; i < n; ++i) {
+            ok[i] = xs[i] != HUGE_VAL && ys[i] != HUGE_VAL;
+            if (!ok[i]) continue;
+            const double x = inv[0] + xs[i] * inv[1] + ys[i] * inv[2];
+            const double y = inv[3] + xs[i] * inv[4] + ys[i] * inv[5];
+            xs[i] = x;
+            ys[i] = y;
+        }
+    }
+
+    // GWKCheckAndComputeSrcOffsets: inside the source window (with GDAL's 1e-10 slack); a point
+    // within one pixel outside is transformed again exactly (the approximation may have moved it
+    // out).
+    bool InsideOrRetry(double& fx, double& fy, uint32_t dx, uint32_t dy, const Rect& w) const {
+        auto inside = [&](double x, double y) {
+            return x >= w.x0 && y >= w.y0 && x + 1e-10 <= w.x1 && y + 1e-10 <= w.y1;
+        };
         if (inside(fx, fy)) return true;
-        if (fx > -1 && fy > -1 && fx < W_ + 1 && fy < H_ + 1) {
-            const auto& gt = plan_.geoTransform;
-            double X = gt[0] + (dx + 0.5) * gt[1], Y = gt[3] + (dy + 0.5) * gt[5];
-            if (!transform_->TransformPoint(X, Y, nullptr, crs::Direction::Inverse)) return false;
-            fx = srcInv_[0] + X * srcInv_[1] + Y * srcInv_[2];
-            fy = srcInv_[3] + X * srcInv_[4] + Y * srcInv_[5];
+        if (fx > w.x0 - 1 && fy > w.y0 - 1 && fx < w.x1 + 1 && fy < w.y1 + 1) {
+            double X = dx + 0.5, Y = dy + 0.5;
+            char ok = 0;
+            ExactSourcePixels(&X, &Y, 1, &ok);
+            if (!ok) return false;
+            fx = X;
+            fy = Y;
             return inside(fx, fy);
         }
         return false;
@@ -297,12 +448,12 @@ private:
             }
         }
         transform_->TransformPoints(xs.data(), ys.data(), nullptr, xs.size(), crs::Direction::Inverse);
+        geo_.CrsToPixel(xs.data(), ys.data(), xs.size());
         double mnx = 1e300, mny = 1e300, mxx = -1e300, mxy = -1e300;
         bool any = false;
         for (size_t i = 0; i < xs.size(); ++i) {
-            if (!std::isfinite(xs[i]) || xs[i] == HUGE_VAL || !std::isfinite(ys[i])) continue;
-            const double fx = srcInv_[0] + xs[i] * srcInv_[1] + ys[i] * srcInv_[2];
-            const double fy = srcInv_[3] + xs[i] * srcInv_[4] + ys[i] * srcInv_[5];
+            const double fx = xs[i], fy = ys[i];
+            if (!std::isfinite(fx) || !std::isfinite(fy)) continue;
             mnx = std::min(mnx, fx);
             mxx = std::max(mxx, fx);
             mny = std::min(mny, fy);
@@ -496,8 +647,13 @@ private:
     const SourceRaster& src_;
     const Plan& plan_;
     SourceSpec spec_;
+    SourceGeoreference geo_;
     std::shared_ptr<const crs::Transform> transform_;
-    std::array<double, 6> srcInv_{};
+    // Sources without a geotransform: GDAL's approximate transformer, its chunks, and the
+    // inverse of the output geotransform as GDAL computes it.
+    std::optional<RowApproximator> rows_;
+    std::vector<WarpChunk> chunks_;
+    std::array<double, 6> dstInverse_{};
     kernels::SourcePixelMapping mapping_;
     BilinearParams params_;
     double srcPixel_ = 1;
@@ -508,23 +664,39 @@ private:
     std::atomic<uint64_t> unplannedReads_{0};
 };
 
-}  // namespace
+// The source's pixel <-> CRS mapping and its EPSG:3857 grid.
+struct SourceGrid {
+    SourceGeoreference geo;
+    TargetGrid grid;
+};
 
-Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSettings& settings) {
+Expected<SourceGrid> GridOf(const SourceRaster& src, bool evenTileOrigin) {
     if (!src.Georef().crs)
         return Status(StatusCode::kInvalidArgument,
                       "Cannot build COG: input file has no coordinate reference system: " + src.Path());
-    auto grid = ComputeTargetGrid(*src.Georef().crs, *src.Georef().geoTransform, src.Width(), src.Height(),
-                                  settings.evenTileOrigin);
+    auto geo = SourceGeoreference::Of(src.Georef());
+    if (!geo.ok())
+        return Status(StatusCode::kInvalidArgument,
+                      "Cannot build COG: " + std::string(geo.status().message()) + ": " + src.Path());
+    auto grid = ComputeTargetGrid(*src.Georef().crs, *geo, src.Width(), src.Height(), evenTileOrigin);
     if (!grid.ok()) return grid.status();
+    return SourceGrid{std::move(*geo), std::move(*grid)};
+}
+
+}  // namespace
+
+Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSettings& settings) {
+    auto sg = GridOf(src, settings.evenTileOrigin);
+    if (!sg.ok()) return sg.status();
+    const TargetGrid& grid = sg->grid;
     const SourceSpec spec = Analyse(src);
     Plan p;
     p.ownGrid = false;
-    p.width = grid->width;
-    p.height = grid->height;
+    p.width = grid.width;
+    p.height = grid.height;
     p.blockSize = 512;
-    p.geoTransform = grid->geoTransform;
-    p.zoom = grid->zoom;
+    p.geoTransform = grid.geoTransform;
+    p.zoom = grid.zoom;
     p.overviews = pyramid::OverviewSizes(p.width, p.height, p.blockSize, true);
     p.type = src.Type();
     const bool jpeg = !settings.noJpeg && JpegEligible(src);
@@ -565,14 +737,30 @@ Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSetting
     return p;
 }
 
+namespace {
+
+Expected<std::unique_ptr<WarpProducer>> MakeProducer(const build::SourceRaster& src, const build::Plan& plan) {
+    auto sg = GridOf(src, false);
+    if (!sg.ok()) return sg.status();
+    auto p = std::make_unique<WarpProducer>(src, plan, Analyse(src), std::move(sg->geo), sg->grid.transform);
+    DDBT_TRY(p->Init());
+    return p;
+}
+
+}  // namespace
+
 Expected<std::unique_ptr<build::TileProducer>> MakeWarpProducer(const build::SourceRaster& src, const build::Plan& plan,
                                                                 uint64_t memoryBudget) {
     (void)memoryBudget;
-    auto grid = ComputeTargetGrid(*src.Georef().crs, *src.Georef().geoTransform, src.Width(), src.Height(), false);
-    if (!grid.ok()) return grid.status();
-    auto p = std::make_unique<WarpProducer>(src, plan, Analyse(src), grid->transform);
-    DDBT_TRY(p->Init());
-    return std::unique_ptr<build::TileProducer>(std::move(p));
+    auto p = MakeProducer(src, plan);
+    if (!p.ok()) return p.status();
+    return std::unique_ptr<build::TileProducer>(std::move(*p));
+}
+
+Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::SourceRaster& src, const build::Plan& plan) {
+    auto p = MakeProducer(src, plan);
+    if (!p.ok()) return p.status();
+    return (*p)->Chunks();
 }
 
 }  // namespace ddbt::cog::warp

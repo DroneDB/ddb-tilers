@@ -49,7 +49,9 @@ TEST_P(TargetGridCorpus, EqualsLibddbsCogGrid) {
     ASSERT_TRUE(src.ok()) << src.status().message();
     const build::SourceRaster& s = **src;
     ASSERT_TRUE(s.Georef().crs.has_value());
-    auto g = ComputeTargetGrid(*s.Georef().crs, *s.Georef().geoTransform, s.Width(), s.Height(), false);
+    auto geo = SourceGeoreference::FromGeoTransform(*s.Georef().geoTransform);
+    ASSERT_TRUE(geo.ok());
+    auto g = ComputeTargetGrid(*s.Georef().crs, *geo, s.Width(), s.Height(), false);
     ASSERT_TRUE(g.ok()) << g.status().message();
     EXPECT_EQ(g->width, c.width) << c.id;
     EXPECT_EQ(g->height, c.height) << c.id;
@@ -59,7 +61,7 @@ TEST_P(TargetGridCorpus, EqualsLibddbsCogGrid) {
     EXPECT_NEAR(g->geoTransform[1], c.pixel, 1e-9 * c.pixel) << c.id;
     EXPECT_NEAR(-g->geoTransform[5], c.pixel, 1e-6 * c.pixel) << c.id;
     // The even-tile-origin option moves the origin to an even tile, never shrinking the grid.
-    auto e = ComputeTargetGrid(*s.Georef().crs, *s.Georef().geoTransform, s.Width(), s.Height(), true);
+    auto e = ComputeTargetGrid(*s.Georef().crs, *geo, s.Width(), s.Height(), true);
     ASSERT_TRUE(e.ok());
     EXPECT_LE(e->geoTransform[0], g->geoTransform[0]);
     EXPECT_GE(e->geoTransform[3], g->geoTransform[3]);

@@ -105,7 +105,8 @@ std::optional<std::vector<std::array<uint8_t, 3>>> SourceRaster::ColorTable() co
 }
 
 bool SourceRaster::IsOptimizedCog() const {
-    if (!georef_.crs) return false;
+    // GDAL reports no CRS for a raster georeferenced by GCPs (only a GCP CRS): it is warped.
+    if (!georef_.crs || !georef_.geoTransform) return false;
     try {
         static const crs::Crs webMercator = crs::Crs::FromEpsg(3857);
         if (!georef_.crs->Equivalent(webMercator)) return false;
