@@ -95,6 +95,8 @@ inline constexpr uint16_t kMask = 4;
 inline constexpr uint16_t kSeparated = 5;
 inline constexpr uint16_t kYCbCr = 6;
 inline constexpr uint16_t kCieLab = 8;
+inline constexpr uint16_t kLogL = 32844;
+inline constexpr uint16_t kLogLuv = 32845;
 }  // namespace photometric
 
 /// ExtraSamples values.

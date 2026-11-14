@@ -37,7 +37,9 @@ inline Expected<std::vector<std::vector<uint8_t>>> ReadWindow(const TiffReader& 
                                                              uint32_t y0, uint32_t w, uint32_t h, uint8_t bitOne) {
     const IfdInfo& info = r.Ifd(ifd);
     const bool bit = info.sampleType == SampleType::kBit1;
-    const size_t ss = bit ? 1 : SampleTypeSize(info.sampleType);
+    // A complex band is its two components (GDAL's CInt16 ... CFloat64 values)
+    const size_t comps = info.Components();
+    const size_t ss = bit ? 1 : SampleTypeSize(info.sampleType) * comps;
     std::vector<std::vector<uint8_t>> out(bands.size(), std::vector<uint8_t>(size_t{w} * h * ss));
     const uint32_t bx0 = x0 / info.blockWidth, bx1 = (x0 + w - 1) / info.blockWidth;
     const uint32_t by0 = y0 / info.blockHeight, by1 = (y0 + h - 1) / info.blockHeight;
@@ -55,7 +57,7 @@ inline Expected<std::vector<std::vector<uint8_t>>> ReadWindow(const TiffReader& 
                     it = planes.emplace(plane, std::move(*blk)).first;
                 }
                 const DecodedBlock& b = it->second;
-                const uint32_t spp = b.samples;
+                const uint32_t spp = b.samples / static_cast<uint32_t>(comps);
                 const uint32_t sample = info.IsPixelInterleaved() ? bands[bi] : 0;
                 const uint8_t* src = b.data();
                 size_t srcStride = b.rowStride;

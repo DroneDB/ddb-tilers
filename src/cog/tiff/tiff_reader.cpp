@@ -204,16 +204,18 @@ uint64_t PackedRowBytes(uint64_t samples, uint64_t bits) noexcept {
 }  // namespace
 
 bool IfdInfo::IsPacked() const noexcept {
-    return sampleType != SampleType::kBit1 && SampleTypeSize(sampleType) * 8 != bitsPerSample;
+    return sampleType != SampleType::kBit1 && !IsFloat24() && SampleTypeSize(sampleType) * 8 * Components() != bitsPerSample;
 }
 
 uint64_t IfdInfo::BlockRowBytes() const noexcept {
-    const uint64_t bits = IsPacked() ? SampleTypeSize(sampleType) * 8 : bitsPerSample;
+    // decoded values: the type's bits (packed samples unpacked, FP24 as Float32, each component
+    // of a complex sample)
+    const uint64_t bits = sampleType == SampleType::kBit1 ? 1 : SampleTypeSize(sampleType) * 8;
     return PackedRowBytes(uint64_t{blockWidth} * SamplesPerBlockPixel(), bits);
 }
 
 uint64_t IfdInfo::StoredRowBytes() const noexcept {
-    return PackedRowBytes(uint64_t{blockWidth} * SamplesPerBlockPixel(), bitsPerSample);
+    return PackedRowBytes(uint64_t{blockWidth} * (SamplesPerBlockPixel() / Components()), bitsPerSample);
 }
 
 uint64_t IfdInfo::DecodedBlockBytes(uint32_t block) const noexcept {
@@ -553,7 +555,7 @@ Status TiffReader::FinishIfd(IfdInfo& info) {
     if (v == 0 || v > 65535) return Corrupt("SamplesPerPixel out of range");
     info.samplesPerPixel = static_cast<uint16_t>(v);
     DDBT_TRY(getPerSample(tag::kBitsPerSample, 1, &v));
-    if (v == 0 || v > 64) return Corrupt("BitsPerSample out of range");
+    if (v == 0 || v > 128) return Corrupt("BitsPerSample out of range");  // 128: CFloat64
     info.bitsPerSample = static_cast<uint16_t>(v);
     DDBT_TRY(getPerSample(tag::kSampleFormat, 1, &v));
     info.sampleFormat = static_cast<uint16_t>(std::min<uint64_t>(v, 65535));
@@ -572,7 +574,19 @@ Status TiffReader::FinishIfd(IfdInfo& info) {
     info.predictor = static_cast<uint16_t>(std::min<uint64_t>(v, 65535));
     DDBT_TRY(getUInt(tag::kFillOrder, 1, &v));
     info.fillOrder = static_cast<uint16_t>(std::min<uint64_t>(v, 65535));
-    info.sampleType = ToSampleType(info.sampleFormat, info.bitsPerSample);
+    // Complex samples (SampleFormat 5 / 6) are two components, real then imaginary, each of the
+    // integer / float type of half the bits (GDAL's CInt16, CInt32, CFloat16, CFloat32, CFloat64)
+    info.complex = info.sampleFormat == 5 || info.sampleFormat == 6;
+    if (info.complex) {
+        const uint16_t half = static_cast<uint16_t>(info.bitsPerSample / 2);
+        const bool whole = info.bitsPerSample % 2 == 0 && (info.sampleFormat == 6 ? half >= 16 : half == 16 || half == 32);
+        info.sampleType = whole ? ToSampleType(info.sampleFormat == 5 ? 2 : 3, half) : SampleType::kUnknown;
+    } else if (info.sampleFormat == 3 && info.bitsPerSample == 24) {
+        // GDAL reads 24-bit floats (FP24) as Float32
+        info.sampleType = SampleType::kF32;
+    } else {
+        info.sampleType = ToSampleType(info.sampleFormat, info.bitsPerSample);
+    }
 
     if (const TagEntry* e = info.FindTag(tag::kExtraSamples)) {
         auto x = ReadTagUInts(*e, 65536);
@@ -660,6 +674,33 @@ Status TiffReader::FinishIfd(IfdInfo& info) {
     info.blocksAcross = static_cast<uint32_t>((uint64_t{info.width} + info.blockWidth - 1) / info.blockWidth);
     info.blocksDown = static_cast<uint32_t>((uint64_t{info.height} + info.blockHeight - 1) / info.blockHeight);
     info.planes = info.planarConfig == 2 ? info.samplesPerPixel : 1u;
+
+    // GDAL's RGBA interface (GTiffRGBABand): 8-bit CIELab, LogL, LogLuv, CMYK and YCbCr without
+    // JPEG compression (subsampled or not; old JPEG included) read as libtiff's TIFFReadRGBA*
+    // converts them, 8-bit RGB (YCbCr) or RGBA (the others; the alpha band last), one block per
+    // tile or strip whatever the planar configuration
+    const uint16_t ph = info.photometric;
+    const bool bitmap = info.bitsPerSample == 1 && info.samplesPerPixel == 1;
+    if (info.kind != SubfileKind::kMask && info.kind != SubfileKind::kOverviewMask && !bitmap &&
+        info.bitsPerSample <= 8 &&
+        (ph == photometric::kCieLab || ph == photometric::kLogL || ph == photometric::kLogLuv ||
+         ph == photometric::kSeparated || (ph == photometric::kYCbCr && info.compression != 7))) {
+        info.viaRgba = true;
+        info.fileSamplesPerPixel = info.samplesPerPixel;
+        info.samplesPerPixel = ph == photometric::kYCbCr ? 3 : 4;
+        info.bitsPerSample = 8;
+        info.sampleFormat = 1;
+        info.sampleType = SampleType::kU8;
+        info.complex = false;
+        info.planarConfig = 1;
+        info.predictor = 1;
+        info.fillOrder = 1;
+        info.photometric = photometric::kRgb;
+        info.extraSamples.clear();
+        if (info.samplesPerPixel == 4) info.extraSamples.push_back(extrasample::kUnassociatedAlpha);
+        info.colorMap.clear();
+        info.planes = 1;
+    }
     uint64_t blocks = 0;
     if (!CheckedMul<uint64_t>(uint64_t{info.blocksAcross} * info.blocksDown, info.planes, &blocks) ||
         blocks > options_.maxBlocksPerIfd || blocks > UINT32_MAX) {

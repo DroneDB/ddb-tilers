@@ -31,7 +31,15 @@ public:
     /// the decodes of one file take turns on its libtiff handle.
     Status Decode(uint64_t ifdOffset, uint32_t index, std::span<const uint8_t> raw, std::span<uint8_t> out) const;
 
+    /// Decodes block (x, y) (pixel origin of the tile or strip, blockWidth x blockHeight, `rows`
+    /// of which are in the image) of the directory at `ifdOffset` with libtiff's RGBA interface
+    /// (TIFFReadRGBATile / TIFFReadRGBAStrip), as GDAL's GTiffRGBABand does: `bands` 8-bit
+    /// samples per pixel (3: R, G, B; 4: and alpha), top row first, into rows of `outStride`.
+    Status DecodeRgba(uint64_t ifdOffset, bool tiled, uint32_t x, uint32_t y, uint32_t blockWidth, uint32_t blockHeight,
+                      uint32_t rows, uint32_t bands, uint8_t* out, size_t outStride) const;
+
 private:
+    Status SelectDirectory(uint64_t ifdOffset) const;
     struct Handle;
     std::unique_ptr<Handle> handle_;
 };

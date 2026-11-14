@@ -17,13 +17,13 @@ namespace ddbt::cog::codecs {
 void UndoHorizontalPredictor(uint8_t* data, size_t rows, size_t rowStride, size_t width, size_t spp,
                              size_t bytesPerSample);
 
-/// Predictor 3 (floating point, 2 / 4 / 8 bytes): per row, a byte-wise accumulation with stride
+/// Predictor 3 (floating point, 2 / 4 / 8 bytes, and any other width): per row, a byte-wise accumulation with stride
 /// spp, then the byte planes (most significant first) are interleaved back into samples. The
 /// result is in host byte order whatever the file's byte order (as libtiff's fpAcc).
 void UndoFloatingPointPredictor(uint8_t* data, size_t rows, size_t rowStride, size_t width, size_t spp,
                                 size_t bytesPerSample);
 
-/// Reverses the bytes of `count` samples of 2, 4 or 8 bytes (1: no-op).
+/// Reverses the bytes of `count` samples of 2, 3, 4 or 8 bytes (1: no-op).
 void ByteSwapSamples(uint8_t* data, size_t count, size_t bytesPerSample);
 
 /// Scalar implementations (the specification, for tests and benchmarks).

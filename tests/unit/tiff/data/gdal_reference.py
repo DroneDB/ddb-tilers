@@ -45,6 +45,7 @@ gdal.SetConfigOption("GDAL_PAM_ENABLED", "NO")
 WORK = "/mnt/data/ddb-tilers-work"
 MANIFEST = WORK + "/corpus/manifest.json"
 TEST_DATA = "/mnt/data/repos/test_data"
+RARE_DIRS = [WORK + "/fixtures/gdal-autotest", WORK + "/fixtures/realworld"]
 SAMPLE_LIMIT = 400
 SAMPLE_COUNT = 200
 JPEG_DUMPS_PER_DIR = 4
@@ -160,6 +161,10 @@ SYNTHETIC = [
     ("nbits12_u16_lzw_be", 260, 190, 2, "UInt16", ["NBITS=12", "COMPRESS=LZW", "ENDIANNESS=BIG"], {"nbits": 12}),
     ("nbits12_u16_lzma_band", 260, 190, 3, "UInt16", ["NBITS=12", "COMPRESS=LZMA", "INTERLEAVE=BAND", "TILED=YES"], {"nbits": 12}),
     ("nbits20_u32_deflate", 130, 70, 1, "UInt32", ["NBITS=20", "COMPRESS=DEFLATE"], {"nbits": 20}),
+    # read through libtiff's RGBA interface, as GDAL reads them
+    ("cmyk_lzw", 201, 103, 4, "Byte", ["PHOTOMETRIC=CMYK", "COMPRESS=LZW"], {}),
+    ("cmyk_tiled_band", 201, 103, 4, "Byte", ["PHOTOMETRIC=CMYK", "TILED=YES", "BLOCKXSIZE=64", "BLOCKYSIZE=64", "INTERLEAVE=BAND"], {}),
+    ("cielab_none", 201, 103, 3, "Byte", ["PHOTOMETRIC=CIELAB"], {}),
     ("palette_lzw", 301, 203, 1, "Byte", ["COMPRESS=LZW", "TILED=YES"], {"palette": True}),
     ("sparse_u8_nodata", 300, 200, 1, "Byte", ["COMPRESS=DEFLATE", "TILED=YES", "BLOCKXSIZE=64", "BLOCKYSIZE=64", "SPARSE_OK=TRUE"], {"nodata": 7, "sparse": True}),
     ("sparse_f32_nodata", 300, 200, 1, "Float32", ["COMPRESS=LZW", "TILED=YES", "BLOCKXSIZE=64", "BLOCKYSIZE=64", "SPARSE_OK=TRUE"], {"nodata": -32767.0, "sparse": True}),
@@ -443,6 +448,22 @@ def main():
             seen.add(p)
     for p in build_synthetic(os.path.join(out, "synthetic")):
         items.append(("syn_" + os.path.splitext(os.path.basename(p))[0], p, "synthetic"))
+    # Rare TIFFs (GDAL's autotest samples, real-world files; fixtures/README-rare.md): those GDAL opens
+    for d in RARE_DIRS:
+        if not os.path.isdir(d):
+            continue
+        for name in sorted(os.listdir(d)):
+            p = os.path.join(d, name)
+            if not name.lower().endswith((".tif", ".tiff")):
+                continue
+            try:
+                ds = gdal.OpenEx(p, gdal.OF_RASTER | gdal.OF_READONLY)
+                readable = ds is not None
+                ds = None
+            except RuntimeError:
+                readable = False
+            if readable:
+                items.append(("rare_" + os.path.splitext(name)[0], p, "rare"))
     for p in build_bench(os.path.join(out, "bench")):
         items.append(("bench_" + os.path.splitext(os.path.basename(p))[0], p, "bench"))
     for p in build_georef(os.path.join(out, "synthetic")):
@@ -462,7 +483,14 @@ def main():
         ds = gdal.OpenEx(path, gdal.OF_RASTER | gdal.OF_READONLY)
         comp = ds.GetMetadata("IMAGE_STRUCTURE").get("COMPRESSION", "NONE")
         ds = None
-        n = reference(rid, path, out, comp)
+        try:
+            n = reference(rid, path, out, comp)
+        except RuntimeError as e:
+            # GDAL cannot decode it (a codec this GDAL lacks): no reference for it
+            print(f"{rid}: no reference: {str(e).splitlines()[0]}", flush=True)
+            index_lines.pop()
+            georef_lines.pop()
+            continue
         print(f"{rid}: {n} windows ({comp})", flush=True)
     with open(os.path.join(out, "index.tsv"), "w") as f:
         f.writelines(index_lines)

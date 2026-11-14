@@ -179,7 +179,12 @@ void UndoFloatingPointPredictor(uint8_t* data, size_t rows, size_t rowStride, si
             case 2: HWY_DYNAMIC_DISPATCH(Unshuffle2)(planes.data(), wc, row); break;
             case 4: HWY_DYNAMIC_DISPATCH(Unshuffle4)(planes.data(), wc, row); break;
             case 8: HWY_DYNAMIC_DISPATCH(Unshuffle8)(planes.data(), wc, row); break;
-            default: break;
+            default:
+                // other widths (24-bit floats, 128-bit complex): the byte planes, most significant first
+                for (size_t c = 0; c < wc; ++c)
+                    for (size_t b = 0; b < bytesPerSample; ++b)
+                        row[bytesPerSample * c + b] = planes[(bytesPerSample - b - 1) * wc + c];
+                break;
         }
     }
 }
@@ -189,7 +194,7 @@ void ByteSwapSamples(uint8_t* data, size_t count, size_t bytesPerSample) {
         case 2: HWY_DYNAMIC_DISPATCH(Swap16)(data, count); break;
         case 4: HWY_DYNAMIC_DISPATCH(Swap32)(data, count); break;
         case 8: HWY_DYNAMIC_DISPATCH(Swap64)(data, count); break;
-        default: break;
+        default: reference::ByteSwapSamples(data, count, bytesPerSample); break;  // 3 bytes (FP24)
     }
 }
 

@@ -83,11 +83,8 @@ LibtiffCodec::~LibtiffCodec() {
     if (handle_ && handle_->tif != nullptr) TIFFClose(handle_->tif);
 }
 
-Status LibtiffCodec::Decode(uint64_t ifdOffset, uint32_t index, std::span<const uint8_t> raw,
-                            std::span<uint8_t> out) const {
+Status LibtiffCodec::SelectDirectory(uint64_t ifdOffset) const {
     Handle& h = *handle_;
-    std::lock_guard lock(h.mutex);
-    tlsError.clear();
     if (h.tif == nullptr) {
         TIFFOpenOptions* options = TIFFOpenOptionsAlloc();
         TIFFOpenOptionsSetErrorHandlerExtR(options, ErrorHandler, nullptr);
@@ -106,10 +103,45 @@ Status LibtiffCodec::Decode(uint64_t ifdOffset, uint32_t index, std::span<const 
         }
         h.directory = ifdOffset;
     }
+    return Status::Ok();
+}
+
+Status LibtiffCodec::Decode(uint64_t ifdOffset, uint32_t index, std::span<const uint8_t> raw,
+                            std::span<uint8_t> out) const {
+    Handle& h = *handle_;
+    std::lock_guard lock(h.mutex);
+    tlsError.clear();
+    DDBT_TRY(SelectDirectory(ifdOffset));
     h.input.assign(raw.begin(), raw.end());
     if (!TIFFReadFromUserBuffer(h.tif, index, h.input.data(), static_cast<tmsize_t>(h.input.size()), out.data(),
                                 static_cast<tmsize_t>(out.size())))
         return Corrupt("libtiff cannot decode block " + std::to_string(index) + ": " + tlsError);
+    return Status::Ok();
+}
+
+Status LibtiffCodec::DecodeRgba(uint64_t ifdOffset, bool tiled, uint32_t x, uint32_t y, uint32_t blockWidth,
+                                uint32_t blockHeight, uint32_t rows, uint32_t bands, uint8_t* out, size_t outStride) const {
+    Handle& h = *handle_;
+    std::lock_guard lock(h.mutex);
+    tlsError.clear();
+    DDBT_TRY(SelectDirectory(ifdOffset));
+    thread_local std::vector<uint32_t> raster;
+    raster.assign(static_cast<size_t>(blockWidth) * blockHeight, 0);
+    const int ok = tiled ? TIFFReadRGBATile(h.tif, x, y, raster.data()) : TIFFReadRGBAStrip(h.tif, y, raster.data());
+    if (!ok) return Corrupt("libtiff cannot decode the RGBA block at (" + std::to_string(x) + ", " + std::to_string(y) + "): " + tlsError);
+    // The raster's origin is its lower left: a tile is flipped over its height, a strip over its rows
+    const uint32_t flip = tiled ? blockHeight : rows;
+    for (uint32_t r = 0; r < rows; ++r) {
+        const uint32_t* src = raster.data() + static_cast<size_t>(flip - r - 1) * blockWidth;
+        uint8_t* dst = out + static_cast<size_t>(r) * outStride;
+        for (uint32_t c = 0; c < blockWidth; ++c) {
+            const uint32_t p = src[c];
+            dst[c * bands + 0] = static_cast<uint8_t>(TIFFGetR(p));
+            dst[c * bands + 1] = static_cast<uint8_t>(TIFFGetG(p));
+            dst[c * bands + 2] = static_cast<uint8_t>(TIFFGetB(p));
+            if (bands == 4) dst[c * bands + 3] = static_cast<uint8_t>(TIFFGetA(p));
+        }
+    }
     return Status::Ok();
 }
 

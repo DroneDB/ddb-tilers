@@ -191,10 +191,10 @@ Status TiffReader::CheckDecodable(uint32_t ifd) const {
         if (i.predictor != 1) return Unsupported("predictor on 1-bit data");
     }
     if (i.predictor != 1 && i.predictor != 2 && i.predictor != 3) return Unsupported("predictor " + std::to_string(i.predictor));
-    if (i.predictor == 3 && i.sampleFormat != 3) return Unsupported("floating-point predictor on non-float data");
-    if (i.predictor == 3 && i.bitsPerSample != 16 && i.bitsPerSample != 32 && i.bitsPerSample != 64) {
-        return Unsupported("floating-point predictor on " + std::to_string(i.bitsPerSample) + "-bit data");
-    }
+    if (i.predictor == 3 && i.sampleFormat != 3 && i.sampleFormat != 6)
+        return Unsupported("floating-point predictor on non-float data");
+    if (i.complex && (c == Compression::kJpeg || c == Compression::kWebp || c == Compression::kLerc))
+        return Unsupported("complex samples with " + std::string(codecs::CompressionName(i.compression)));
     if (c == Compression::kJpeg) {
         // 12-bit JPEG goes to libtiff (built with libjpeg-turbo's 12-bit API)
         if (i.bitsPerSample != 8 && i.bitsPerSample != 12)
@@ -299,10 +299,18 @@ Status TiffReader::DecodeBlock(uint32_t ifd, uint32_t index, std::span<const uin
     const uint32_t rows = i.BlockRows(index);
     const uint32_t spp = i.SamplesPerBlockPixel();
     const auto c = static_cast<Compression>(i.compression);
+    if (i.viaRgba) {
+        // libtiff reads the block itself (all its planes) through its RGBA interface
+        const Status st = Libtiff().DecodeRgba(i.offset, i.tiled, i.BlockColumn(index) * i.blockWidth,
+                                               i.BlockRow(index) * i.blockHeight, i.blockWidth, i.blockHeight, rows,
+                                               i.samplesPerPixel, out.data(), static_cast<size_t>(i.BlockRowBytes()));
+        if (!st.ok()) return st.WithContext("block " + std::to_string(index) + " of IFD " + std::to_string(ifd));
+        return Status::Ok();
+    }
 
-    // Packed samples are decoded as stored, then unpacked into `out`
+    // Packed samples and 24-bit floats are decoded as stored, then expanded into `out`
     std::span<uint8_t> stored = out;
-    if (i.IsPacked()) {
+    if (i.IsPacked() || i.IsFloat24()) {
         std::vector<uint8_t>& packed = tlsPacked;
         packed.resize(static_cast<size_t>(i.StoredRowBytes() * rows));
         stored = std::span<uint8_t>(packed);
@@ -371,22 +379,73 @@ Status TiffReader::DecodeBlock(uint32_t ifd, uint32_t index, std::span<const uin
                       i.bitsPerSample, bps, out.data(), static_cast<size_t>(i.BlockRowBytes()));
         return Status::Ok();
     }
+    if (i.IsFloat24()) {
+        // libtiff's order: the predictor or the byte swap on the 3-byte words, then GDAL's
+        // CPLTripleToFloat of each
+        const size_t storedStride = static_cast<size_t>(i.StoredRowBytes());
+        if (!nativeOrder) {
+            if (i.predictor == 3)
+                codecs::UndoFloatingPointPredictor(stored.data(), rows, storedStride, i.blockWidth, spp, 3);
+            else if (bigEndian_)
+                codecs::ByteSwapSamples(stored.data(), stored.size() / 3, 3);
+        }
+        ExpandFloat24(stored.data(), storedStride, uint64_t{i.blockWidth} * spp, rows, out.data(),
+                      static_cast<size_t>(i.BlockRowBytes()));
+        return Status::Ok();
+    }
     if (nativeOrder || bps == 0) return Status::Ok();
 
+    // libtiff's sample words: a complex sample is one word of its two components (predictors work
+    // on the words), while its byte swap is per component
+    const size_t wordBytes = bps * i.Components();
+    const size_t words = spp / i.Components();
     const size_t rowStride = static_cast<size_t>(i.BlockRowBytes());
     if (i.predictor == 3) {
         // fpAcc produces host-order samples: no byte swap.
-        codecs::UndoFloatingPointPredictor(out.data(), rows, rowStride, i.blockWidth, spp, bps);
+        codecs::UndoFloatingPointPredictor(out.data(), rows, rowStride, i.blockWidth, words, wordBytes);
         return Status::Ok();
     }
     if (bigEndian_ && bps > 1) codecs::ByteSwapSamples(out.data(), out.size() / bps, bps);
-    if (i.predictor == 2) codecs::UndoHorizontalPredictor(out.data(), rows, rowStride, i.blockWidth, spp, bps);
+    if (i.predictor == 2) codecs::UndoHorizontalPredictor(out.data(), rows, rowStride, i.blockWidth, words, wordBytes);
     return Status::Ok();
 }
 
 const LibtiffCodec& TiffReader::Libtiff() const {
     std::call_once(libtiffOnce_, [this] { libtiff_ = std::make_unique<LibtiffCodec>(source_); });
     return *libtiff_;
+}
+
+void ExpandFloat24(const uint8_t* in, size_t inRowStride, uint64_t samples, uint32_t rows, uint8_t* out,
+                   size_t outRowStride) {
+    for (uint32_t r = 0; r < rows; ++r) {
+        const uint8_t* src = in + static_cast<size_t>(r) * inRowStride;
+        auto* dst = reinterpret_cast<uint32_t*>(out + static_cast<size_t>(r) * outRowStride);
+        for (uint64_t s = 0; s < samples; ++s) {
+            const uint32_t t = static_cast<uint32_t>(src[3 * s]) | (static_cast<uint32_t>(src[3 * s + 1]) << 8) |
+                               (static_cast<uint32_t>(src[3 * s + 2]) << 16);
+            // CPLTripleToFloat: sign, 7-bit exponent (bias 63), 16-bit mantissa
+            const uint32_t sign = (t >> 23) & 1u;
+            int exponent = static_cast<int>((t >> 16) & 0x7f);
+            uint32_t mantissa = t & 0xffffu;
+            uint32_t bits;
+            if (exponent == 0 && mantissa == 0) {
+                bits = sign << 31;
+            } else if (exponent == 127) {
+                bits = (sign << 31) | 0x7f800000u | (mantissa << 7);
+            } else {
+                if (exponent == 0) {
+                    while (!(mantissa & 0x00010000u)) {
+                        mantissa <<= 1;
+                        exponent -= 1;
+                    }
+                    exponent += 1;
+                    mantissa &= ~0x00010000u;
+                }
+                bits = (sign << 31) | (static_cast<uint32_t>(exponent + (127 - 63)) << 23) | (mantissa << 7);
+            }
+            dst[s] = bits;
+        }
+    }
 }
 
 void UnpackSamples(const uint8_t* in, size_t inRowStride, uint64_t samples, uint32_t rows, uint32_t bits,

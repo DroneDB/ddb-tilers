@@ -9,7 +9,9 @@
 
 #include <tiffio.h>
 
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -233,6 +235,132 @@ TEST(LibtiffCodecs, TwelveBitJpeg) {
     if (!writes) GTEST_SKIP() << "libtiff has no 12-bit JPEG";
     ExpectRoundTrip("jpeg12", {.width = 64, .height = 48, .bits = 12, .compression = COMPRESSION_JPEG, .rowsPerStrip = 16}, 24);
     ExpectRoundTrip("jpeg12-tiled", {.width = 64, .height = 48, .bits = 12, .compression = COMPRESSION_JPEG, .tile = 32}, 24);
+}
+
+// Raw samples written as they are (no conversion by the writer), for the decoders' layouts
+std::filesystem::path WriteRaw(const std::string& name, uint32_t width, uint32_t height, uint16_t spp, uint16_t bits,
+                               uint16_t format, uint16_t photometric, uint16_t compression, uint16_t predictor,
+                               bool bigEndian, const std::vector<uint8_t>& rows) {
+    const auto path = Scratch(name);
+    TIFF* t = TIFFOpen(path.string().c_str(), bigEndian ? "wb" : "wl");
+    EXPECT_NE(t, nullptr);
+    TIFFSetField(t, TIFFTAG_IMAGEWIDTH, width);
+    TIFFSetField(t, TIFFTAG_IMAGELENGTH, height);
+    TIFFSetField(t, TIFFTAG_SAMPLESPERPIXEL, spp);
+    TIFFSetField(t, TIFFTAG_BITSPERSAMPLE, bits);
+    TIFFSetField(t, TIFFTAG_SAMPLEFORMAT, format);
+    TIFFSetField(t, TIFFTAG_PHOTOMETRIC, photometric);
+    TIFFSetField(t, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+    TIFFSetField(t, TIFFTAG_COMPRESSION, compression);
+    if (photometric == PHOTOMETRIC_SEPARATED) TIFFSetField(t, TIFFTAG_INKSET, INKSET_CMYK);
+    if (predictor != PREDICTOR_NONE) TIFFSetField(t, TIFFTAG_PREDICTOR, predictor);
+    TIFFSetField(t, TIFFTAG_ROWSPERSTRIP, height);
+    std::vector<uint8_t> copy = rows;  // libtiff swaps and differences in place
+    EXPECT_GE(TIFFWriteEncodedStrip(t, 0, copy.data(), static_cast<tmsize_t>(copy.size())), 0);
+    TIFFClose(t);
+    return path;
+}
+
+std::vector<uint8_t> ReadMainBlock(const std::filesystem::path& path, IfdInfo* info = nullptr) {
+    auto reader = TiffReader::Open(path.string());
+    EXPECT_TRUE(reader.ok()) << reader.status().message();
+    if (!reader.ok()) return {};
+    const IfdInfo& i = (*reader)->Ifd((*reader)->MainImage());
+    if (info) *info = i;
+    auto b = (*reader)->ReadBlock(i.index, 0);
+    EXPECT_TRUE(b.ok()) << b.status().message();
+    if (!b.ok()) return {};
+    return std::vector<uint8_t>(b->data(), b->data() + static_cast<size_t>(b->rowStride) * b->height);
+}
+
+// Complex samples read as their two components (real, imaginary) in host order: CInt16 with the
+// horizontal predictor (on the 32-bit words, as libtiff), CInt32 and CFloat64 big-endian, CFloat32
+TEST(LibtiffCodecs, ComplexSamplesAreTheirTwoComponents) {
+    constexpr uint32_t W = 9, H = 3;
+    std::vector<int16_t> ci16(W * H * 2);
+    for (size_t k = 0; k < ci16.size(); ++k) ci16[k] = static_cast<int16_t>(k * 37 - 300);
+    std::vector<uint8_t> bytes(reinterpret_cast<uint8_t*>(ci16.data()), reinterpret_cast<uint8_t*>(ci16.data()) + ci16.size() * 2);
+    for (const bool be : {false, true}) {
+        IfdInfo info;
+        const auto got = ReadMainBlock(WriteRaw("cint16-" + std::to_string(be), W, H, 1, 32, SAMPLEFORMAT_COMPLEXINT,
+                                                PHOTOMETRIC_MINISBLACK, COMPRESSION_LZW, PREDICTOR_NONE, be, bytes),
+                                       &info);
+        EXPECT_TRUE(info.complex);
+        EXPECT_EQ(info.sampleType, SampleType::kI16);
+        EXPECT_EQ(info.SamplesPerBlockPixel(), 2u);
+        EXPECT_EQ(got, bytes) << "big-endian " << be;
+    }
+    EXPECT_EQ(ReadMainBlock(WriteRaw("cint16-pred", W, H, 1, 32, SAMPLEFORMAT_COMPLEXINT, PHOTOMETRIC_MINISBLACK,
+                                     COMPRESSION_ADOBE_DEFLATE, PREDICTOR_HORIZONTAL, false, bytes)),
+              bytes);
+    std::vector<int32_t> ci32(W * H * 2);
+    for (size_t k = 0; k < ci32.size(); ++k) ci32[k] = static_cast<int32_t>(k * 100003) - 7;
+    std::vector<uint8_t> b32(reinterpret_cast<uint8_t*>(ci32.data()), reinterpret_cast<uint8_t*>(ci32.data()) + ci32.size() * 4);
+    EXPECT_EQ(ReadMainBlock(WriteRaw("cint32-be", W, H, 1, 64, SAMPLEFORMAT_COMPLEXINT, PHOTOMETRIC_MINISBLACK,
+                                     COMPRESSION_NONE, PREDICTOR_NONE, true, b32)),
+              b32);
+    // CFloat32 and CFloat64 (libtiff writes no floating-point predictor for complex samples)
+    std::vector<float> cf32(W * H * 2);
+    for (size_t k = 0; k < cf32.size(); ++k) cf32[k] = static_cast<float>(std::sin(static_cast<double>(k)) * 1e3);
+    std::vector<uint8_t> b32f(reinterpret_cast<uint8_t*>(cf32.data()), reinterpret_cast<uint8_t*>(cf32.data()) + cf32.size() * 4);
+    IfdInfo info;
+    EXPECT_EQ(ReadMainBlock(WriteRaw("cfloat32", W, H, 1, 64, SAMPLEFORMAT_COMPLEXIEEEFP, PHOTOMETRIC_MINISBLACK,
+                                     COMPRESSION_ADOBE_DEFLATE, PREDICTOR_NONE, false, b32f),
+                            &info),
+              b32f);
+    EXPECT_EQ(info.sampleType, SampleType::kF32);
+    std::vector<double> cf64(W * H * 2);
+    for (size_t k = 0; k < cf64.size(); ++k) cf64[k] = std::cos(static_cast<double>(k)) * 1e6;
+    std::vector<uint8_t> b64(reinterpret_cast<uint8_t*>(cf64.data()), reinterpret_cast<uint8_t*>(cf64.data()) + cf64.size() * 8);
+    EXPECT_EQ(ReadMainBlock(WriteRaw("cfloat64-be", W, H, 1, 128, SAMPLEFORMAT_COMPLEXIEEEFP, PHOTOMETRIC_MINISBLACK,
+                                     COMPRESSION_LZW, PREDICTOR_NONE, true, b64),
+                            &info),
+              b64);
+    EXPECT_EQ(info.sampleType, SampleType::kF64);
+}
+
+// 24-bit floats (sign, 7-bit exponent of bias 63, 16-bit mantissa) read as Float32
+TEST(LibtiffCodecs, Float24ReadsAsFloat32) {
+    const std::vector<uint32_t> triples = {0x000000, 0x800000, 0x3F0000, 0xBF8000, 0x408000, 0x7F0000, 0x000001};
+    const std::vector<float> expect = {0.0f, -0.0f, 1.0f, -1.5f, 3.0f, std::numeric_limits<float>::infinity(),
+                                       std::ldexp(1.0f, -62 - 16)};
+    std::vector<uint8_t> raw;
+    for (const uint32_t t : triples)
+        for (int b = 0; b < 3; ++b) raw.push_back(static_cast<uint8_t>(t >> (8 * b)));  // libtiff swaps for big-endian
+    for (const bool be : {false, true}) {
+        const auto got = ReadMainBlock(WriteRaw("fp24-" + std::to_string(be), static_cast<uint32_t>(triples.size()), 1, 1,
+                                                24, SAMPLEFORMAT_IEEEFP, PHOTOMETRIC_MINISBLACK, COMPRESSION_NONE,
+                                                PREDICTOR_NONE, false, raw));
+        ASSERT_EQ(got.size(), expect.size() * 4);
+        for (size_t k = 0; k < expect.size(); ++k) {
+            float f;
+            std::memcpy(&f, got.data() + 4 * k, 4);
+            EXPECT_EQ(std::signbit(f), std::signbit(expect[k])) << k;
+            EXPECT_EQ(f, expect[k]) << k;
+        }
+    }
+}
+
+// CMYK reads as GDAL reads it, through libtiff's RGBA interface: R = (255 - K) * (255 - C) / 255, ...,
+// and an opaque alpha band
+TEST(LibtiffCodecs, CmykReadsAsRgba) {
+    constexpr uint32_t W = 5, H = 2;
+    std::vector<uint8_t> cmyk(W * H * 4);
+    for (size_t k = 0; k < cmyk.size(); ++k) cmyk[k] = static_cast<uint8_t>(k * 29);
+    IfdInfo info;
+    const auto got = ReadMainBlock(WriteRaw("cmyk", W, H, 4, 8, SAMPLEFORMAT_UINT, PHOTOMETRIC_SEPARATED,
+                                            COMPRESSION_LZW, PREDICTOR_NONE, false, cmyk),
+                                   &info);
+    EXPECT_TRUE(info.viaRgba);
+    EXPECT_EQ(info.samplesPerPixel, 4u);
+    EXPECT_EQ(info.photometric, photometric::kRgb);
+    ASSERT_EQ(got.size(), cmyk.size());
+    for (size_t p = 0; p < W * H; ++p) {
+        const unsigned k = 255u - cmyk[4 * p + 3];
+        for (int c = 0; c < 3; ++c)
+            EXPECT_EQ(got[4 * p + static_cast<size_t>(c)], (k * (255u - cmyk[4 * p + static_cast<size_t>(c)])) / 255u) << p;
+        EXPECT_EQ(got[4 * p + 3], 255u);
+    }
 }
 
 TEST(LibtiffCodecs, TheCodecsAreConfigured) {

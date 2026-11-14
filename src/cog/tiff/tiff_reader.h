@@ -118,7 +118,13 @@ struct IfdInfo {
     uint16_t samplesPerPixel = 1;
     uint16_t bitsPerSample = 1;
     uint16_t sampleFormat = 1;  // 1 uint, 2 int, 3 IEEE float, 4 void, 5/6 complex
-    SampleType sampleType = SampleType::kUnknown;
+    SampleType sampleType = SampleType::kUnknown;  // of each component of a complex sample
+    bool complex = false;  // SampleFormat 5 / 6: every sample is two components of sampleType
+    // Read through libtiff's RGBA interface, as GDAL reads it (CMYK, CIELab, LogL / LogLuv, YCbCr
+    // without JPEG, old JPEG): the fields above then describe the decoded 8-bit RGB / RGBA
+    // pixels, and fileSamplesPerPixel the stored samples
+    bool viaRgba = false;
+    uint16_t fileSamplesPerPixel = 0;
     uint16_t planarConfig = 1;  // 1 PIXEL (contig), 2 BAND (separate)
     uint16_t photometric = photometric::kMinIsBlack;
     bool hasPhotometric = false;
@@ -145,8 +151,13 @@ struct IfdInfo {
     // Block layout helpers -------------------------------------------------------------------
 
     bool IsPixelInterleaved() const noexcept { return planarConfig != 2; }
-    /// Samples per pixel inside one block (spp for PIXEL, 1 for BAND).
-    uint32_t SamplesPerBlockPixel() const noexcept { return IsPixelInterleaved() ? samplesPerPixel : 1u; }
+    /// Components of a sample: 2 for complex samples (real, imaginary), else 1.
+    uint32_t Components() const noexcept { return complex ? 2u : 1u; }
+    /// 24-bit floats (FP24), which decode to Float32.
+    bool IsFloat24() const noexcept { return sampleFormat == 3 && bitsPerSample == 24; }
+    /// Values per pixel inside one block (spp for PIXEL, 1 for BAND; twice that for complex
+    /// samples, real and imaginary interleaved).
+    uint32_t SamplesPerBlockPixel() const noexcept { return (IsPixelInterleaved() ? samplesPerPixel : 1u) * Components(); }
     /// Block index of (column, row, plane) as TIFF orders them (plane-major).
     uint32_t BlockIndex(uint32_t col, uint32_t row, uint32_t plane = 0) const noexcept {
         return (plane * blocksDown + row) * blocksAcross + col;
@@ -346,6 +357,10 @@ private:
 /// The value GDAL fills a sparse block with, converted to the sample type (rounded and clamped
 /// for integers), written into `out` (count samples). Sets 0 when `value` is not set.
 void FillSamples(std::span<uint8_t> out, SampleType type, std::optional<double> value);
+
+/// Converts rows of 24-bit floats (FP24, host order) to Float32 as GDAL does (CPLTripleToFloat).
+void ExpandFloat24(const uint8_t* in, size_t inRowStride, uint64_t samples, uint32_t rows, uint8_t* out,
+                   size_t outRowStride);
 
 /// Unpacks rows of `samples` samples of `bits` bits (2 to 31, MSB first, each row padded to a
 /// byte) into unsigned samples of `outBytes` bytes (1, 2 or 4), host order.
