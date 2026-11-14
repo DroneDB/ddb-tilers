@@ -68,7 +68,11 @@ struct Decompressor {
     ErrorMgr err{};
     bool created = false;
 
-    Decompressor() = default;
+    Decompressor() {
+        cinfo.err = jpeg_std_error(&err.pub);
+        err.pub.error_exit = OnPhotoJpegError;
+        err.pub.emit_message = OnPhotoJpegMessage;
+    }
     Decompressor(const Decompressor&) = delete;
     Decompressor& operator=(const Decompressor&) = delete;
     ~Decompressor() {
@@ -80,16 +84,13 @@ struct Decompressor {
 // refusal of StartDecompress beyond it (JPEGMEM unset).
 constexpr uint64_t kMaxLibjpegMemory = uint64_t{500} * 1024 * 1024;
 
-// The memory libjpeg needs for the coefficients of a multi-scan image (StartDecompress).
-uint64_t MultiScanMemory(const jpeg_decompress_struct& c, bool& invalid) {
+// The memory libjpeg needs for the coefficients of a multi-scan image (StartDecompress); 0 for
+// invalid sampling factors.
+uint64_t MultiScanMemory(const jpeg_decompress_struct& c) {
     uint64_t need = 1024 * 1024;
-    invalid = false;
     for (int ci = 0; ci < c.num_components; ++ci) {
         const jpeg_component_info& comp = c.comp_info[ci];
-        if (comp.h_samp_factor <= 0 || comp.v_samp_factor <= 0) {
-            invalid = true;
-            return 0;
-        }
+        if (comp.h_samp_factor <= 0 || comp.v_samp_factor <= 0) return 0;
         const uint64_t w = (static_cast<uint64_t>(comp.width_in_blocks) + static_cast<uint64_t>(comp.h_samp_factor) - 1) /
                            static_cast<uint64_t>(comp.h_samp_factor);
         const uint64_t h = (static_cast<uint64_t>(comp.height_in_blocks) + static_cast<uint64_t>(comp.v_samp_factor) - 1) /
@@ -97,6 +98,97 @@ uint64_t MultiScanMemory(const jpeg_decompress_struct& c, bool& invalid) {
         need += w * h * sizeof(JBLOCK);
     }
     return need;
+}
+
+// The functions that call setjmp hold only trivially destructible locals: libjpeg's longjmp
+// skips no destructor (and MSVC has nothing to warn about).
+enum class Outcome : uint8_t { kOk, kLibjpegError, kPrematureEnd, kBadSampling, kTooMuchMemory, kBadOutput, kSinkError };
+
+struct HeaderFacts {
+    uint32_t width = 0, height = 0;
+    int precision = 0;
+    int colorSpace = 0;
+};
+
+Outcome ReadHeader(Decompressor& d, const uint8_t* data, size_t size, HeaderFacts& out) {
+    j_decompress_ptr c = &d.cinfo;
+    if (setjmp(d.err.jump)) return Outcome::kLibjpegError;
+    jpeg_create_decompress(c);
+    d.created = true;
+    jpeg_mem_src(c, data, static_cast<unsigned long>(size));
+    jpeg_read_header(c, TRUE);
+    out.width = c->image_width;
+    out.height = c->image_height;
+    out.precision = c->data_precision;
+    out.colorSpace = c->jpeg_color_space;
+    return Outcome::kOk;
+}
+
+// What the decoding loop needs (all plain pointers and values).
+struct DecodeJob {
+    const uint8_t* data = nullptr;
+    size_t size = 0;
+    int outColorSpace = 0;
+    int outComponents = 0;
+    bool twelveBit = false;
+    bool cmykToRgb = false;
+    uint32_t width = 0, height = 0;
+    uint8_t* scan = nullptr;  // a decoded scanline
+    uint8_t* row = nullptr;   // a converted row (CMYK to RGB)
+    RowSink* sink = nullptr;
+    Status* sinkStatus = nullptr;
+};
+
+// The row to the sink, its failure into *sinkStatus.
+bool EmitRow(RowSink& sink, uint32_t y, const uint8_t* row, Status* status) {
+    *status = sink.Row(y, row);
+    return status->ok();
+}
+
+Outcome RunDecode(Decompressor& d, const DecodeJob& j) {
+    j_decompress_ptr c = &d.cinfo;
+    if (setjmp(d.err.jump)) return Outcome::kLibjpegError;
+    jpeg_create_decompress(c);
+    d.created = true;
+    c->mem->max_memory_to_use = std::max<long>(c->mem->max_memory_to_use, static_cast<long>(kMaxLibjpegMemory));
+    jpeg_mem_src(c, j.data, static_cast<unsigned long>(j.size));
+    jpeg_read_header(c, TRUE);
+    c->out_color_space = static_cast<J_COLOR_SPACE>(j.outColorSpace);
+    if (jpeg_has_multiple_scans(c)) {
+        const uint64_t need = MultiScanMemory(*c);
+        if (need == 0) return Outcome::kBadSampling;
+        if (need > static_cast<uint64_t>(c->mem->max_memory_to_use)) return Outcome::kTooMuchMemory;
+    }
+    jpeg_start_decompress(c);
+    if (c->output_components != j.outComponents || c->output_width != j.width) return Outcome::kBadOutput;
+    for (uint32_t y = 0; y < j.height; ++y) {
+        if (j.twelveBit) {
+            J12SAMPROW r = reinterpret_cast<J12SAMPROW>(j.scan);
+            jpeg12_read_scanlines(c, &r, 1);
+        } else {
+            JSAMPROW r = j.scan;
+            jpeg_read_scanlines(c, &r, 1);
+        }
+        if (d.err.prematureEnd) return Outcome::kPrematureEnd;
+        const uint8_t* out = j.scan;
+        if (j.cmykToRgb) {
+            // JPGRasterBand::IReadBlock: R = C * K / 255, G = M * K / 255, B = Y * K / 255.
+            for (uint32_t x = 0; x < j.width; ++x) {
+                const uint8_t* p = j.scan + static_cast<size_t>(x) * 4;
+                const int k = p[3];
+                j.row[static_cast<size_t>(x) * 3] = static_cast<uint8_t>((p[0] * k) / 255);
+                j.row[static_cast<size_t>(x) * 3 + 1] = static_cast<uint8_t>((p[1] * k) / 255);
+                j.row[static_cast<size_t>(x) * 3 + 2] = static_cast<uint8_t>((p[2] * k) / 255);
+            }
+            out = j.row;
+        }
+        if (!EmitRow(*j.sink, y, out, j.sinkStatus)) {
+            jpeg_abort_decompress(c);
+            return Outcome::kSinkError;
+        }
+    }
+    jpeg_abort_decompress(c);
+    return Outcome::kOk;
 }
 
 }  // namespace
@@ -118,30 +210,26 @@ Expected<std::unique_ptr<JpegSource>> JpegSource::Open(const std::string& path, 
     s->bytes_ = std::move(*bytes);
     s->imageBytes_ = s->bytes_.size();
 
-    Decompressor d;
-    j_decompress_ptr c = &d.cinfo;
-    c->err = jpeg_std_error(&d.err.pub);
-    d.err.pub.error_exit = OnPhotoJpegError;
-    d.err.pub.emit_message = OnPhotoJpegMessage;
-    if (setjmp(d.err.jump)) return Status(StatusCode::kCorrupt, std::string("JPEG: ") + d.err.message + ": " + path);
-    jpeg_create_decompress(c);
-    d.created = true;
-    jpeg_mem_src(c, s->bytes_.data(), static_cast<unsigned long>(s->bytes_.size()));
-    jpeg_read_header(c, TRUE);
-    if (c->data_precision != 8 && c->data_precision != 12)
+    HeaderFacts h;
+    {
+        Decompressor d;
+        if (ReadHeader(d, s->bytes_.data(), s->bytes_.size(), h) != Outcome::kOk)
+            return Status(StatusCode::kCorrupt, std::string("JPEG: ") + d.err.message + ": " + path);
+    }
+    if (h.precision != 8 && h.precision != 12)
         return Status(StatusCode::kUnsupported,
                       "JPEG files with a precision other than 8 or 12 bits are not supported: " + path);
-    s->precision_ = c->data_precision;
-    s->jpegColorSpace_ = c->jpeg_color_space;
-    s->outColorSpace_ = c->jpeg_color_space;
+    s->precision_ = h.precision;
+    s->jpegColorSpace_ = h.colorSpace;
+    s->outColorSpace_ = h.colorSpace;
 
     ImageInfo info;
-    info.width = c->image_width;
-    info.height = c->image_height;
+    info.width = h.width;
+    info.height = h.height;
     info.type = s->precision_ == 12 ? tiff::SampleType::kU16 : tiff::SampleType::kU8;
     if (s->precision_ == 12) info.nbits = 12;
     const bool eightBit = s->precision_ == 8;
-    switch (c->jpeg_color_space) {
+    switch (h.colorSpace) {
         case JCS_GRAYSCALE:
             info.bands = 1;
             info.interps = {"Gray"};
@@ -179,7 +267,7 @@ Expected<std::unique_ptr<JpegSource>> JpegSource::Open(const std::string& path, 
             break;
         default:
             return Status(StatusCode::kUnsupported,
-                          "Unrecognized JPEG colour space " + std::to_string(c->jpeg_color_space) + ": " + path);
+                          "Unrecognized JPEG colour space " + std::to_string(h.colorSpace) + ": " + path);
     }
 
     s->outComponents_ = s->outColorSpace_ == JCS_GRAYSCALE                             ? 1
@@ -204,62 +292,37 @@ Expected<std::unique_ptr<JpegSource>> JpegSource::Open(const std::string& path, 
 
 Status JpegSource::Decode(RowSink& sink) const {
     const ImageInfo& info = Info();
-    Decompressor d;
-    j_decompress_ptr c = &d.cinfo;
-    c->err = jpeg_std_error(&d.err.pub);
-    d.err.pub.error_exit = OnPhotoJpegError;
-    d.err.pub.emit_message = OnPhotoJpegMessage;
-    // What the setjmp below returns to must not own anything: the buffers are declared before.
     std::vector<uint8_t> scan(static_cast<size_t>(info.width) * static_cast<size_t>(outComponents_) *
                               (precision_ == 12 ? 2 : 1));
     std::vector<uint8_t> row(RowBytes());
-    Status rowStatus;
-    if (setjmp(d.err.jump)) return Status(StatusCode::kCorrupt, std::string("JPEG: ") + d.err.message + ": " + Path());
-    jpeg_create_decompress(c);
-    d.created = true;
-    c->mem->max_memory_to_use = std::max<long>(c->mem->max_memory_to_use, static_cast<long>(kMaxLibjpegMemory));
-    jpeg_mem_src(c, bytes_.data(), static_cast<unsigned long>(imageBytes_));
-    jpeg_read_header(c, TRUE);
-    c->out_color_space = static_cast<J_COLOR_SPACE>(outColorSpace_);
-    if (jpeg_has_multiple_scans(c)) {
-        bool invalid = false;
-        const uint64_t need = MultiScanMemory(*c, invalid);
-        if (invalid) return Status(StatusCode::kCorrupt, "JPEG: invalid sampling factor(s): " + Path());
-        if (need > static_cast<uint64_t>(c->mem->max_memory_to_use))
-            return Status(StatusCode::kUnsupported, "Reading this JPEG would require libjpeg to allocate at least " +
-                                                        std::to_string(need) + " bytes: " + Path());
+    Status sinkStatus;
+    DecodeJob j;
+    j.data = bytes_.data();
+    j.size = imageBytes_;
+    j.outColorSpace = outColorSpace_;
+    j.outComponents = outComponents_;
+    j.twelveBit = precision_ == 12;
+    j.cmykToRgb = cmykToRgb_;
+    j.width = info.width;
+    j.height = info.height;
+    j.scan = scan.data();
+    j.row = row.data();
+    j.sink = &sink;
+    j.sinkStatus = &sinkStatus;
+    Decompressor d;
+    switch (RunDecode(d, j)) {
+        case Outcome::kOk: break;
+        case Outcome::kLibjpegError:
+            return Status(StatusCode::kCorrupt, std::string("JPEG: ") + d.err.message + ": " + Path());
+        case Outcome::kPrematureEnd:
+            return Status(StatusCode::kCorrupt, "JPEG: Premature end of JPEG file: " + Path());
+        case Outcome::kBadSampling: return Status(StatusCode::kCorrupt, "JPEG: invalid sampling factor(s): " + Path());
+        case Outcome::kTooMuchMemory:
+            return Status(StatusCode::kUnsupported,
+                          "Reading this JPEG would require libjpeg to allocate more than 500 MB: " + Path());
+        case Outcome::kBadOutput: return Status(StatusCode::kInternal, "JPEG: unexpected output of libjpeg: " + Path());
+        case Outcome::kSinkError: return sinkStatus;
     }
-    jpeg_start_decompress(c);
-    if (c->output_components != outComponents_ || c->output_width != info.width)
-        return Status(StatusCode::kInternal, "JPEG: unexpected output of libjpeg: " + Path());
-    for (uint32_t y = 0; y < info.height; ++y) {
-        if (precision_ == 12) {
-            J12SAMPROW r = reinterpret_cast<J12SAMPROW>(scan.data());
-            jpeg12_read_scanlines(c, &r, 1);
-        } else {
-            JSAMPROW r = scan.data();
-            jpeg_read_scanlines(c, &r, 1);
-        }
-        if (d.err.prematureEnd) return Status(StatusCode::kCorrupt, "JPEG: Premature end of JPEG file: " + Path());
-        const uint8_t* out = scan.data();
-        if (cmykToRgb_) {
-            // JPGRasterBand::IReadBlock: R = C * K / 255, G = M * K / 255, B = Y * K / 255.
-            for (uint32_t x = 0; x < info.width; ++x) {
-                const uint8_t* p = scan.data() + static_cast<size_t>(x) * 4;
-                const int k = p[3];
-                row[static_cast<size_t>(x) * 3] = static_cast<uint8_t>((p[0] * k) / 255);
-                row[static_cast<size_t>(x) * 3 + 1] = static_cast<uint8_t>((p[1] * k) / 255);
-                row[static_cast<size_t>(x) * 3 + 2] = static_cast<uint8_t>((p[2] * k) / 255);
-            }
-            out = row.data();
-        }
-        rowStatus = sink.Row(y, out);
-        if (!rowStatus.ok()) {
-            jpeg_abort_decompress(c);
-            return rowStatus;
-        }
-    }
-    jpeg_abort_decompress(c);
     if (info.mask) return DecodeMask(sink);
     return Status::Ok();
 }
