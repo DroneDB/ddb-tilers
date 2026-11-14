@@ -28,8 +28,8 @@ bool NullOrBlank(const char* s) noexcept {
 ddbtErr CodeOf(cog::tiler::TileErrorCode code) noexcept {
     using cog::tiler::TileErrorCode;
     switch (code) {
-        case TileErrorCode::kInvalidArgs:
-        case TileErrorCode::kRefused: return DDBT_ERR_INVALIDARGS;
+        case TileErrorCode::kInvalidArgs: return DDBT_ERR_INVALIDARGS;
+        case TileErrorCode::kRefused: return DDBT_ERR_REFUSED;
         case TileErrorCode::kNotFound: return DDBT_ERR_NOTFOUND;
         case TileErrorCode::kNotImplemented: return DDBT_ERR_NOT_IMPLEMENTED;
         case TileErrorCode::kException: break;

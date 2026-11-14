@@ -43,6 +43,9 @@ typedef enum ddbtErr
     DDBT_ERR_CANCELED = 4,         /* canceled by the caller */
     DDBT_ERR_NOTFOUND = 6,         /* the input does not exist */
     DDBT_ERR_INVALIDARGS = 7,      /* an argument is invalid: fix the call, do not retry */
+    DDBT_ERR_REFUSED = 8,          /* a valid argument the input cannot honour (a formula that does not
+                                      exist or that the raster cannot compute): the same call never
+                                      succeeds (libddb's RefusedArgumentException) */
     DDBT_ERR_NOT_IMPLEMENTED = 100 /* the feature is not implemented (yet) */
 } ddbtErr;
 
@@ -102,8 +105,8 @@ typedef struct ddbtRasterOptions
  * paints a raster of one data band, or one band chosen by bands / preset, over the rescale or
  * the band's exact minimum to maximum. A formula is painted with its colormap (rdylgn by
  * default) over the rescale, its own range, else the 2nd to 98th percentile of the tile.
- * Codes: DDBT_ERR_INVALIDARGS for bad arguments and for a formula that does not exist or that
- * the raster cannot compute ("Unknown formula: X", "Requires bands: RN"), DDBT_ERR_NOTFOUND,
+ * Codes: DDBT_ERR_INVALIDARGS for bad arguments, DDBT_ERR_REFUSED for a formula that does not
+ * exist or that the raster cannot compute ("Unknown formula: X", "Requires bands: RN"), DDBT_ERR_NOTFOUND,
  * DDBT_ERR_NOT_IMPLEMENTED (as ddbtMemoryTileFmt), DDBT_ERR_EXCEPTION otherwise.
  * @param preset, bands, formula, bandFilter, colormap, rescale as DDBMemoryTileEx2 (each may be NULL)
  * @param options NULL, or the NoData override (and the unit of a thermal rescale)

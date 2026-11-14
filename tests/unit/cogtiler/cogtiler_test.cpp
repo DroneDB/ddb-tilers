@@ -926,7 +926,7 @@ TEST(CogTilerApi, ArgumentsAndErrors) {
     o.structSize = sizeof(o);
     EXPECT_EQ(ddbtMemoryTileEx2(SamplingTif().c_str(), kZ, x, y, 256, true, false, nullptr, nullptr, nullptr, "NOPE",
                                 nullptr, nullptr, nullptr, &o, &buf, &size),
-              DDBT_ERR_INVALIDARGS);
+              DDBT_ERR_REFUSED);
     EXPECT_STREQ(ddbtLastError(), "Unknown formula: NOPE");
     EXPECT_EQ(ddbtMemoryTileEx2(SamplingTif().c_str(), kZ, x, y, 256, true, false, nullptr, nullptr, nullptr, nullptr,
                                 nullptr, "nope", nullptr, &o, &buf, &size),
