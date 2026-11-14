@@ -205,25 +205,56 @@ Expected<crs::Crs> ReadPrjFile(std::string_view prjPath) {
 // ---------------------------------------------------------------------------------------------
 // Georeferencing
 
-Expected<Georeferencing> ReadGeoreferencing(const TiffReader& reader, std::string_view path) {
+namespace {
+
+// The GeoKeys of the main image, and whether it is PixelIsPoint.
+Georeferencing KeysOf(const TiffReader& reader) {
     Georeferencing g;
-    const uint32_t main = reader.MainImage();
-    const IfdInfo& info = reader.Ifd(main);
-    auto keys = ReadGeoKeys(reader, main);
+    auto keys = ReadGeoKeys(reader, reader.MainImage());
     if (keys.ok()) g.keys = std::move(*keys);
     else g.crsError = keys.status().ToString();
-
     if (auto rt = g.keys.Short(geokey::kGTRasterType); rt && *rt == 2) g.pixelIsPoint = true;
+    return g;
+}
 
-    auto doubles = [&](uint16_t t) -> std::vector<double> {
-        const TagEntry* e = info.FindTag(t);
-        if (e == nullptr) return {};
-        auto v = reader.ReadTagDoubles(*e, 1 << 22);
-        return v.ok() ? std::move(*v) : std::vector<double>{};
-    };
-    const std::vector<double> scale = doubles(tag::kModelPixelScale);
-    const std::vector<double> ties = doubles(tag::kModelTiepoint);
-    const std::vector<double> matrix = doubles(tag::kModelTransformation);
+// A DOUBLE tag of the main image (empty when absent or unreadable).
+std::vector<double> DoublesTag(const TiffReader& reader, uint16_t tag) {
+    const TagEntry* e = reader.Ifd(reader.MainImage()).FindTag(tag);
+    if (e == nullptr) return {};
+    auto v = reader.ReadTagDoubles(*e, 1 << 22);
+    return v.ok() ? std::move(*v) : std::vector<double>{};
+}
+
+// GDAL's shift of a PixelIsPoint geotransform to the corner of the first pixel.
+void ShiftPixelIsPoint(std::array<double, 6>& gt) {
+    gt[0] -= gt[1] * 0.5 + gt[2] * 0.5;
+    gt[3] -= gt[4] * 0.5 + gt[5] * 0.5;
+}
+
+// The CRS the GeoKeys describe (GTIFGetDefn + GTIFGetOGISDefnAsOSR).
+void ResolveCrs(Georeferencing& g) {
+    if (g.keys.empty()) return;
+    auto def = GeoKeysToCrsDefinition(g.keys);
+    if (!def.ok()) {
+        g.crsError = def.status().ToString();
+    } else if (!def->empty()) {
+        g.crsDefinition = *def;
+        try {
+            if (def->rfind("EPSG:", 0) == 0) g.crs = crs::Crs::FromUserInput(*def);
+            else g.crs = crs::Crs::FromWkt(*def);
+        } catch (const std::exception& e) {
+            g.crsError = e.what();
+        }
+    }
+}
+
+}  // namespace
+
+Expected<Georeferencing> ReadGeoreferencing(const TiffReader& reader, std::string_view path) {
+    Georeferencing g = KeysOf(reader);
+    const std::vector<double> scale = DoublesTag(reader, tag::kModelPixelScale);
+    const std::vector<double> ties = DoublesTag(reader, tag::kModelTiepoint);
+    const std::vector<double> matrix = DoublesTag(reader, tag::kModelTransformation);
 
     std::array<double, 6> gt{0, 1, 0, 0, 0, 1};
     if (scale.size() >= 2 && scale[0] != 0.0 && scale[1] != 0.0) {
@@ -235,32 +266,21 @@ Expected<Georeferencing> ReadGeoreferencing(const TiffReader& reader, std::strin
         if (ties.size() >= 6) {
             gt[0] = ties[3] - ties[0] * gt[1];
             gt[3] = ties[4] - ties[1] * gt[5];
-            if (g.pixelIsPoint) {
-                gt[0] -= gt[1] * 0.5 + gt[2] * 0.5;
-                gt[3] -= gt[4] * 0.5 + gt[5] * 0.5;
-            }
+            if (g.pixelIsPoint) ShiftPixelIsPoint(gt);
             g.geoTransform = gt;
             g.source = GeoTransformSource::kInternal;
         }
     } else if (matrix.size() == 16) {
         gt = {matrix[3], matrix[0], matrix[1], matrix[7], matrix[4], matrix[5]};
-        if (g.pixelIsPoint) {
-            gt[0] -= gt[1] * 0.5 + gt[2] * 0.5;
-            gt[3] -= gt[4] * 0.5 + gt[5] * 0.5;
-        }
+        if (g.pixelIsPoint) ShiftPixelIsPoint(gt);
         g.geoTransform = gt;
         g.source = GeoTransformSource::kInternal;
     }
     if (!g.geoTransform && !path.empty()) {
-        const std::string wf = FindWorldFile(path);
-        if (!wf.empty()) {
-            if (auto text = ReadSmallFile(wf, 1 << 16)) {
-                if (auto w = ParseWorldFile(*text)) {
-                    g.geoTransform = *w;
-                    g.source = GeoTransformSource::kWorldFile;
-                    g.worldFile = wf;
-                }
-            }
+        if (auto w = ReadWorldFile(path)) {
+            g.geoTransform = w->first;
+            g.source = GeoTransformSource::kWorldFile;
+            g.worldFile = w->second;
         }
     }
     if (!g.geoTransform && ties.size() >= 6) {
@@ -273,22 +293,48 @@ Expected<Georeferencing> ReadGeoreferencing(const TiffReader& reader, std::strin
             g.gcps.push_back(p);
         }
     }
-
-    if (!g.keys.empty()) {
-        auto def = GeoKeysToCrsDefinition(g.keys);
-        if (!def.ok()) {
-            g.crsError = def.status().ToString();
-        } else if (!def->empty()) {
-            g.crsDefinition = *def;
-            try {
-                if (def->rfind("EPSG:", 0) == 0) g.crs = crs::Crs::FromUserInput(*def);
-                else g.crs = crs::Crs::FromWkt(*def);
-            } catch (const std::exception& e) {
-                g.crsError = e.what();
-            }
-        }
-    }
+    ResolveCrs(g);
     return g;
+}
+
+Georeferencing ReadEmbeddedGeoreferencing(const TiffReader& reader) {
+    Georeferencing g = KeysOf(reader);
+    const std::vector<double> scale = DoublesTag(reader, tag::kModelPixelScale);
+    const std::vector<double> ties = DoublesTag(reader, tag::kModelTiepoint);
+    const std::vector<double> matrix = DoublesTag(reader, tag::kModelTransformation);
+    constexpr std::array<double, 6> kDefault{0, 1, 0, 0, 0, 1};
+    std::array<double, 6> gt = kDefault;
+    if (scale.size() >= 2) {
+        gt[1] = scale[0];
+        gt[5] = -std::abs(scale[1]);
+        if (ties.size() >= 6) {
+            gt[0] = ties[3] - ties[0] * gt[1];
+            gt[3] = ties[4] - ties[1] * gt[5];
+            if (g.pixelIsPoint) ShiftPixelIsPoint(gt);
+        }
+    } else if (ties.size() >= 6) {
+        for (size_t i = 0; i + 6 <= ties.size(); i += 6)
+            g.gcps.push_back(GroundControlPoint{ties[i], ties[i + 1], ties[i + 3], ties[i + 4], ties[i + 5]});
+    } else if (matrix.size() == 16) {
+        gt = {matrix[3], matrix[0], matrix[1], matrix[7], matrix[4], matrix[5]};
+    }
+    // A geotransform is reported when it is not the default one.
+    if (gt != kDefault) {
+        g.geoTransform = gt;
+        g.source = GeoTransformSource::kInternal;
+    }
+    ResolveCrs(g);
+    return g;
+}
+
+std::optional<std::pair<std::array<double, 6>, std::string>> ReadWorldFile(std::string_view rasterPath) {
+    const std::string wf = FindWorldFile(rasterPath);
+    if (wf.empty()) return std::nullopt;
+    auto text = ReadSmallFile(wf, 1 << 16);
+    if (!text) return std::nullopt;
+    auto w = ParseWorldFile(*text);
+    if (!w) return std::nullopt;
+    return std::make_pair(*w, wf);
 }
 
 }  // namespace ddbt::cog::tiff

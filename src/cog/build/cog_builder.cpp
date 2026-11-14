@@ -785,7 +785,7 @@ public:
 
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options, BuildReport* report) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto src = OpenRasterSource(input);
+    auto src = OpenRasterSource(input, options.memoryBudget);
     if (!src.ok()) return src.status();
     const RasterSource& source = **src;
     if (!source.Georef().crs) return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no coordinate reference system: " + input);

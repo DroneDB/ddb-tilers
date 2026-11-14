@@ -13,6 +13,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "cog/tiff/tiff_reader.h"
@@ -128,6 +129,17 @@ struct Georeferencing {
 /// .wld next to `path` when given), GCPs, GeoKeys and the CRS. Errors only for I/O failures;
 /// missing or unusable georeferencing leaves the fields empty.
 Expected<Georeferencing> ReadGeoreferencing(const TiffReader& reader, std::string_view path = {});
+
+/// The georeferencing GDAL reads from a GeoTIFF embedded in another file (the degenerate GeoTIFF
+/// of a GeoJP2 box: GTIFWktFromMemBufEx), which differs from the GTiff driver's: a pixel scale
+/// alone gives a geotransform (origin 0), tie points without a scale are GCPs (PixelIsPoint does
+/// not move them), a ModelTransformation is not shifted for PixelIsPoint, and a geotransform is
+/// reported only when it is not (0, 1, 0, 0, 0, 1). No world file.
+Georeferencing ReadEmbeddedGeoreferencing(const TiffReader& reader);
+
+/// The world file GDAL reads for `rasterPath` (FindWorldFile, ParseWorldFile): the geotransform
+/// and the sidecar's path, or nothing.
+std::optional<std::pair<std::array<double, 6>, std::string>> ReadWorldFile(std::string_view rasterPath);
 
 /// The CRS definition the keys describe ("" when there are no keys or no model). Errors for
 /// keys we cannot interpret (the message says which).

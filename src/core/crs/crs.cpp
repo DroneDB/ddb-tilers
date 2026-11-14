@@ -2,6 +2,7 @@
 
 #include "core/crs/crs.h"
 
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -19,6 +20,7 @@ struct Crs::Data {
     std::optional<int> epsg;
     double unitFactor = 1.0;
     bool horizontalGeographic = false;
+    bool northingFirst = false;
     std::optional<LonLatBox> area;
 };
 
@@ -54,6 +56,39 @@ PjPtr HorizontalOf(PJ_CONTEXT* ctx, const PJ* crs) {
         }
     }
     return cur;
+}
+
+// GDAL's EPSGTreatsAsLatLong (a geographic CRS whose first axis points north) or
+// EPSGTreatsAsNorthingEasting (a projected CRS whose axes are north then east, or northing then
+// easting both pointing north or south, as in polar projections), on the horizontal CRS.
+bool NorthingFirst(PJ_CONTEXT* ctx, const PJ* cs, PJ_TYPE horizontalType) {
+    auto axis = [&](int i, const char** name, const char** direction) {
+        *name = nullptr;
+        *direction = nullptr;
+        return proj_cs_get_axis_count(ctx, cs) > i &&
+               proj_cs_get_axis_info(ctx, cs, i, name, nullptr, direction, nullptr, nullptr, nullptr, nullptr) &&
+               *direction != nullptr;
+    };
+    auto is = [](const char* s, const char* what) {
+        if (s == nullptr) return false;
+        for (; *s != '\0' && *what != '\0'; ++s, ++what)
+            if (std::tolower(static_cast<unsigned char>(*s)) != *what) return false;
+        return *s == '\0' && *what == '\0';
+    };
+    auto startsWith = [](const char* s, const char* prefix) {
+        if (s == nullptr) return false;
+        for (; *prefix != '\0'; ++s, ++prefix)
+            if (*s == '\0' || std::tolower(static_cast<unsigned char>(*s)) != *prefix) return false;
+        return true;
+    };
+    const char *name0, *dir0, *name1, *dir1;
+    if (!axis(0, &name0, &dir0)) return false;
+    if (horizontalType == PJ_TYPE_GEOGRAPHIC_2D_CRS || horizontalType == PJ_TYPE_GEOGRAPHIC_3D_CRS)
+        return is(dir0, "north");
+    if (horizontalType != PJ_TYPE_PROJECTED_CRS || !axis(1, &name1, &dir1)) return false;
+    if (is(dir0, "north") && is(dir1, "east")) return true;
+    return ((is(dir0, "north") && is(dir1, "north")) || (is(dir0, "south") && is(dir1, "south"))) &&
+           startsWith(name0, "northing") && startsWith(name1, "easting");
 }
 
 Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj) {
@@ -100,6 +135,7 @@ Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj) {
                                       nullptr)) {
                 d.unitFactor = factor;
             }
+            d.northingFirst = NorthingFirst(ctx, cs.get(), ht);
         }
     }
     double w = 0, s = 0, e = 0, n = 0;
@@ -157,6 +193,7 @@ CrsType Crs::Type() const { return Need(d_).type; }
 std::optional<int> Crs::Epsg() const { return Need(d_).epsg; }
 double Crs::HorizontalUnitFactor() const { return Need(d_).unitFactor; }
 bool Crs::IsHorizontallyGeographic() const { return Need(d_).horizontalGeographic; }
+bool Crs::NorthingFirst() const { return Need(d_).northingFirst; }
 std::optional<LonLatBox> Crs::AreaOfUse() const { return Need(d_).area; }
 
 std::string Crs::ToWkt(WktFlavor flavor) const {

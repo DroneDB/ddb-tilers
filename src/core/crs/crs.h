@@ -80,6 +80,9 @@ public:
     /// GDAL's OGRSpatialReference::IsGeographic: geographic, or a bound or compound CRS whose
     /// horizontal part is geographic.
     bool IsHorizontallyGeographic() const;
+    /// The first axis of the horizontal CRS is a latitude or a northing: GDAL's
+    /// EPSGTreatsAsLatLong() || EPSGTreatsAsNorthingEasting() (EPSG:4326, EPSG:3035 ...).
+    bool NorthingFirst() const;
     bool IsGeocentric() const { return Type() == CrsType::Geocentric; }
     bool IsCompound() const { return Type() == CrsType::Compound; }
     /// Metres per unit of the first horizontal axis (1 for metres, 0.30480060960121924 for US

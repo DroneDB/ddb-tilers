@@ -76,6 +76,18 @@ TEST(Crs, Parse) {
     EXPECT_FALSE(Crs().Valid());
 }
 
+// GDAL's EPSGTreatsAsLatLong / EPSGTreatsAsNorthingEasting, which decide the axis swap of a
+// GMLJP2 grid.
+TEST(Crs, NorthingFirstFollowsTheAxisOrder) {
+    EXPECT_TRUE(Crs::FromUserInput("urn:ogc:def:crs:EPSG::4326").NorthingFirst());
+    EXPECT_TRUE(Crs::FromEpsg(3035).NorthingFirst());
+    EXPECT_TRUE(Crs::FromEpsg(2193).NorthingFirst());   // NZGD2000 / NZTM: northing, easting
+    EXPECT_FALSE(Crs::FromEpsg(32631).NorthingFirst());
+    EXPECT_FALSE(Crs::FromEpsg(3857).NorthingFirst());
+    EXPECT_FALSE(Crs::FromUserInput("OGC:CRS84").NorthingFirst());
+    EXPECT_FALSE(Crs::FromUserInput("+proj=longlat +datum=WGS84 +type=crs").NorthingFirst());
+}
+
 TEST(Crs, OfficialDefinitionPreferred) {
     // A WKT1 with AUTHORITY["EPSG","3857"] equivalent to the database: the definition becomes the
     // code (GDAL's OGR_CT_PREFER_OFFICIAL_SRS_DEF), so the analytic path and the area of use apply.

@@ -16,6 +16,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "cog/tiff/geotiff.h"
@@ -102,13 +103,20 @@ protected:
 };
 
 /// Opens `path` with the reader of its format (TIFF / BigTIFF, JPEG 2000), recognised by its
-/// first bytes as GDAL recognises it.
-Expected<std::unique_ptr<RasterSource>> OpenRasterSource(const std::string& path);
+/// first bytes as GDAL recognises it. `memoryBudget` bounds the reader's decoding buffers.
+Expected<std::unique_ptr<RasterSource>> OpenRasterSource(const std::string& path,
+                                                         uint64_t memoryBudget = uint64_t{2} << 30);
 
 /// TIFF tags as GDAL's GTiff driver writes TIFFTAG_* metadata items: ASCII (NUL-terminated),
 /// SHORT, and RATIONAL from the double GDAL sets (integers as n / 1).
 writer::RawTag AsciiTag(uint16_t tag, const std::string& value);
 writer::RawTag ShortTag(uint16_t tag, uint16_t value);
 writer::RawTag RationalTag(uint16_t tag, double value);
+
+/// GDAL's GTiff writer for the default-domain metadata of a dataset (WriteMDMetadata): the
+/// TIFFTAG_* items it knows become TIFF tags (`tags`), AREA_OR_POINT is left to the GeoKeys, the
+/// other items become the GDAL_METADATA document (`gdalMetadata`, "" when there is none).
+void GtiffMetadata(const std::vector<std::pair<std::string, std::string>>& items, std::vector<writer::RawTag>& tags,
+                   std::string& gdalMetadata);
 
 }  // namespace ddbt::cog::build
