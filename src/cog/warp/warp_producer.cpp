@@ -543,10 +543,15 @@ Expected<build::Plan> WarpPlan(const build::SourceRaster& src, const WarpSetting
             p.alphaBand = p.bands - 1;
         }
         build::SetPhotometric(p, interps);
+        if (src.Complex()) {
+            std::vector<std::string> complexInterps;
+            for (int b = 0; b < src.Bands() / 2; ++b) complexInterps.push_back(src.ColorInterp(b));
+            build::SetComplex(p, complexInterps);
+        }
         // gdalwarp keeps the colour table of a 1-band source (its indices are warped as values)
         if (const auto table = src.ColorTable(); table && p.bands == 1) build::SetPalette(p, *table);
         p.codec = settings.losslessCodec;
-        p.predictor = build::IsFloatType(p.type) ? 3 : 2;
+        if (!p.complex) p.predictor = build::IsFloatType(p.type) ? 3 : 2;
         p.level = settings.level;
         if (spec.dstNodata) {
             p.transparency = Transparency::kNoData;

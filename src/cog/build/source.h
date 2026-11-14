@@ -30,7 +30,11 @@ public:
 
     uint32_t Width() const noexcept { return Main().width; }
     uint32_t Height() const noexcept { return Main().height; }
-    int Bands() const noexcept { return Main().samplesPerPixel; }
+    /// The values of a pixel: its bands, each complex band counting its two components (real,
+    /// imaginary), which the builder warps and resamples as separate values.
+    int Bands() const noexcept { return Main().samplesPerPixel * static_cast<int>(Main().Components()); }
+    /// Complex samples (GDAL's CInt16 ... CFloat64): Bands() / 2 complex bands.
+    bool Complex() const noexcept { return Main().complex; }
     /// The sample type of the bands; a 1-bit image reads as bytes 0 / 1 (GDAL's Byte).
     tiff::SampleType Type() const noexcept {
         return Main().sampleType == tiff::SampleType::kBit1 ? tiff::SampleType::kU8 : Main().sampleType;

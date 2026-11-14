@@ -238,7 +238,7 @@ struct CogWriter::Impl {
     // The directories, with placeholder offsets.
     std::vector<Ifd> BuildIfds(bool big) const {
         std::vector<Ifd> ifds;
-        const uint16_t bits = static_cast<uint16_t>(tiff::SampleTypeSize(spec.type) * 8);
+        const uint16_t bits = static_cast<uint16_t>(tiff::SampleTypeSize(spec.type) * 8 * (spec.complex ? 2 : 1));
         uint16_t format = 1;
         switch (spec.type) {
             case tiff::SampleType::kI8: case tiff::SampleType::kI16: case tiff::SampleType::kI32:
@@ -246,6 +246,7 @@ struct CogWriter::Impl {
             case tiff::SampleType::kF16: case tiff::SampleType::kF32: case tiff::SampleType::kF64: format = 3; break;
             default: format = 1;
         }
+        if (spec.complex) format = format == 3 ? 6 : 5;  // complex IEEE float / complex integer
         const uint16_t offType = big ? 16 : 4;
         auto blockArrays = [&](Ifd& d, size_t blocks) {
             Entry off{tiff::tag::kTileOffsets, offType, blocks, {}};

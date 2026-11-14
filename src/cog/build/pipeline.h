@@ -51,6 +51,7 @@ struct Plan {
     uint16_t photometric = 1;
     std::vector<uint16_t> extraSamples;
     std::vector<uint16_t> colorMap;  // the ColorMap of a palette output (TIFF's R, G, B values)
+    bool complex = false;            // complex samples: `bands` counts both components of each
     bool nearestOverviews = false;   // the COG driver's NEAREST (palette), else CUBIC
     std::string gdalMetadata;
 
@@ -120,6 +121,12 @@ bool IsFloatType(tiff::SampleType t);
 /// palette, the ColorMap GDAL writes for `table` (8-bit entries times 257, 2^bits entries, the
 /// missing ones black), overviews by nearest neighbour (the COG driver's rule).
 void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table);
+/// A complex output (the source's complex bands, `bands` counting both components of each): the
+/// photometric and ExtraSamples of its complex bands (`interps`, one per complex band), overviews
+/// by nearest neighbour (the COG driver's rule for complex data), predictor 2 on the whole sample
+/// for integers (GDAL's choice) and none for floats (libtiff writes no floating-point predictor
+/// for complex samples).
+void SetComplex(Plan& p, const std::vector<std::string>& interps);
 /// GDAL_METADATA of the output: the source's items (minus its IMAGE_STRUCTURE domain, without
 /// the band statistics when `dropStatistics`, and without the colour interpretations when the
 /// photometric gives them: RGB of YCbCr JPEG, palette), and the COG driver's

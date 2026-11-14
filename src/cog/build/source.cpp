@@ -201,12 +201,13 @@ Expected<uint32_t> SourceRaster::ReadBlock(uint32_t col, uint32_t row, uint8_t* 
         if (!r.ok()) return r.status();
         return m.BlockRows(index);
     }
-    // BAND interleave: decode each plane and interleave.
-    const size_t ss = SampleSize();
-    const size_t bands = static_cast<size_t>(m.samplesPerPixel);
+    // BAND interleave: decode each plane (a band: one value, or the two of a complex sample) and
+    // interleave.
+    const size_t vs = SampleSize() * m.Components();  // bytes of a band's sample
+    const size_t planes = static_cast<size_t>(m.samplesPerPixel);
     thread_local std::vector<uint8_t> plane;
     uint32_t rows = 0;
-    for (size_t b = 0; b < bands; ++b) {
+    for (size_t b = 0; b < planes; ++b) {
         const uint32_t index = m.BlockIndex(col, row, static_cast<uint32_t>(b));
         const uint64_t size = reader_->DecodedSize(ifd, index);
         plane.resize(static_cast<size_t>(size));
@@ -214,7 +215,7 @@ Expected<uint32_t> SourceRaster::ReadBlock(uint32_t col, uint32_t row, uint8_t* 
         if (!r.ok()) return r.status();
         rows = m.BlockRows(index);
         const size_t n = static_cast<size_t>(m.blockWidth) * rows;
-        for (size_t i = 0; i < n; ++i) std::memcpy(out + (i * bands + b) * ss, plane.data() + i * ss, ss);
+        for (size_t i = 0; i < n; ++i) std::memcpy(out + (i * planes + b) * vs, plane.data() + i * vs, vs);
     }
     return rows;
 }

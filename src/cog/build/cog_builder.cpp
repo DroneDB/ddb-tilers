@@ -67,6 +67,16 @@ void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table) {
     p.nearestOverviews = true;
 }
 
+void SetComplex(Plan& p, const std::vector<std::string>& interps) {
+    const int values = p.bands;
+    p.bands = values / 2;
+    SetPhotometric(p, interps);
+    p.bands = values;
+    p.complex = true;
+    p.nearestOverviews = true;
+    p.predictor = IsFloatType(p.type) ? 1 : 2;
+}
+
 std::string OutputMetadata(const std::string& src, const Plan& plan, bool dropStatistics) {
     // The colour interpretations GTiff stores in GDAL_METADATA are those the photometric does not
     // give: a YCbCr JPEG is RGB, a palette image is a palette
@@ -121,7 +131,7 @@ int ConfiguredJpegQuality() {
 
 void SetLossless(Plan& p, const BuildOptions& o) {
     p.codec = o.losslessCodec == Codec::kJpeg || o.losslessCodec == Codec::kNone ? Codec::kLzw : o.losslessCodec;
-    p.predictor = IsFloatType(p.type) ? 3 : 2;
+    p.predictor = p.complex ? (IsFloatType(p.type) ? 1 : 2) : (IsFloatType(p.type) ? 3 : 2);
     p.level = o.level;
 }
 
@@ -151,6 +161,11 @@ Expected<Plan> OwnGridPlan(const SourceRaster& src, const BuildOptions& o) {
         p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
     }
     if (const auto table = src.ColorTable(); table && p.bands == 1) SetPalette(p, *table);
+    if (src.Complex()) {
+        std::vector<std::string> complexInterps;
+        for (int b = 0; b < p.bands / 2; ++b) complexInterps.push_back(src.ColorInterp(b));
+        SetComplex(p, complexInterps);
+    }
     // cogOwnGridCreationOptions: JPEG at the source's quality for a 3-band 8-bit JPEG source
     // without nodata, LZW + predictor otherwise.
     const std::optional<int> q = src.IsJpeg() ? std::optional<int>(src.JpegQuality().value_or(ConfiguredJpegQuality()))
@@ -224,7 +239,15 @@ public:
                     alpha = plan.alphaBand;
                 }
             }
-            stats_ = std::make_unique<StatsAccumulator>(plan.bands, plan.type, std::move(masks), alpha, plan.nodata);
+            if (plan.complex) {
+                // GDAL's statistics of a complex band are those of its magnitude (sqrt(re^2 + im^2)):
+                // the strips' magnitudes, one Float64 band per complex band
+                masks.resize(static_cast<size_t>(plan.bands / 2));
+                stats_ = std::make_unique<StatsAccumulator>(plan.bands / 2, tiff::SampleType::kF64, std::move(masks), -1,
+                                                            std::nullopt);
+            } else {
+                stats_ = std::make_unique<StatsAccumulator>(plan.bands, plan.type, std::move(masks), alpha, plan.nodata);
+            }
         }
         jpegStats_ = options_.statistics && plan.codec == Codec::kJpeg;
         // Fill value of a sparse block: what a reader gets for it.
@@ -364,6 +387,7 @@ private:
             encode::BlockFormat f;
             f.width = f.height = B;
             f.samples = static_cast<uint32_t>(plan_.bands);
+            f.components = plan_.complex ? 2 : 1;
             f.type = plan_.type;
             f.codec = plan_.codec;
             f.predictor = plan_.predictor;
@@ -616,11 +640,47 @@ private:
     }
 
     void RunStats(exec::TaskGroup& g, const std::shared_ptr<Strip>& s) {
+        if (plan_.complex) {
+            // The magnitudes of the strip, then each complex band's statistics over them
+            const int nb = plan_.bands / 2;
+            auto magnitudes = std::make_shared<std::vector<double>>(Magnitudes(*s));
+            const size_t stride = static_cast<size_t>(s->width) * static_cast<size_t>(nb) * sizeof(double);
+            for (int b = 0; b < nb; ++b) {
+                g.Spawn([this, s, b, magnitudes, stride] {
+                    stats_->AccumulateRows(b, reinterpret_cast<const uint8_t*>(magnitudes->data()), stride, s->width,
+                                           s->rows, s->mask.get());
+                });
+            }
+            return;
+        }
         for (int b = 0; b < plan_.bands; ++b) {
             g.Spawn([this, s, b] {
                 stats_->AccumulateRows(b, s->pixels.get(), s->Stride(), s->width, s->rows, s->mask.get());
             });
         }
+    }
+
+    // sqrt(re^2 + im^2) of every complex sample of a strip, as GDAL computes it (in double)
+    std::vector<double> Magnitudes(const Strip& s) const {
+        const size_t n = static_cast<size_t>(s.width) * s.rows * static_cast<size_t>(plan_.bands / 2);
+        std::vector<double> out(n);
+        const uint8_t* p = s.pixels.get();
+        auto run = [&](auto tag) {
+            using T = decltype(tag);
+            const T* v = reinterpret_cast<const T*>(p);
+            for (size_t i = 0; i < n; ++i) {
+                const double re = static_cast<double>(v[2 * i]), im = static_cast<double>(v[2 * i + 1]);
+                out[i] = std::sqrt(re * re + im * im);
+            }
+        };
+        switch (plan_.type) {
+            case tiff::SampleType::kI16: run(int16_t{}); break;
+            case tiff::SampleType::kI32: run(int32_t{}); break;
+            case tiff::SampleType::kF32: run(float{}); break;
+            case tiff::SampleType::kF64: run(double{}); break;
+            default: throw std::runtime_error("complex statistics: unsupported component type");
+        }
+        return out;
     }
 
     void Report(double f) {
@@ -760,7 +820,8 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
     spec.width = plan.width;
     spec.height = plan.height;
     spec.blockSize = plan.blockSize;
-    spec.samples = static_cast<uint16_t>(plan.bands);
+    spec.samples = static_cast<uint16_t>(plan.complex ? plan.bands / 2 : plan.bands);
+    spec.complex = plan.complex;
     spec.type = plan.type;
     spec.photometric = plan.photometric;
     spec.extraSamples = plan.extraSamples;

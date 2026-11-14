@@ -282,6 +282,7 @@ struct SourceCog {
     std::vector<uint8_t> pixels;
     std::vector<uint8_t> maskBytes;
     std::vector<uint16_t> colorMap;  // a palette source (1 band, 8-bit)
+    bool complex = false;            // `bands` values are bands / 2 complex samples
 
     SourceCog(tiff::SampleType t, int n, bool m, std::optional<double> nd) : type(t), bands(n), mask(m), nodata(nd) {
         const size_t ss = tiff::SampleTypeSize(t);
@@ -309,9 +310,10 @@ struct SourceCog {
         s.width = W;
         s.height = H;
         s.blockSize = B;
-        s.samples = static_cast<uint16_t>(bands);
+        s.samples = static_cast<uint16_t>(complex ? bands / 2 : bands);
         s.type = type;
-        s.photometric = !colorMap.empty() ? 3 : bands >= 3 ? 2 : 1;
+        s.complex = complex;
+        s.photometric = !colorMap.empty() ? 3 : (!complex && bands >= 3) ? 2 : 1;
         s.colorMap = colorMap;
         s.codec = encode::Codec::kDeflate;
         s.predictor = 1;
@@ -478,6 +480,54 @@ TEST(CogBuild, OwnGridPaletteKeepsItsColorMapAndNearestOverviews) {
         prev = std::move(cur);
         ps = cs;
     }
+}
+
+// A complex source (CInt16) keeps its samples (SampleFormat 5, 32 bits, predictor 2 on the whole
+// sample), its overviews are by nearest neighbour, its statistics are those of the magnitudes
+TEST(CogBuild, OwnGridComplexKeepsItsSamplesAndMeasuresTheirMagnitude) {
+    TempDir dir;
+    SourceCog src(tiff::SampleType::kI16, 2, false, std::nullopt);
+    src.complex = true;
+    auto* v = reinterpret_cast<int16_t*>(src.pixels.data());
+    double sum = 0, maxMag = 0;
+    for (size_t i = 0; i < src.pixels.size() / 4; ++i) {
+        v[2 * i] = static_cast<int16_t>((i * 37) % 2000 - 1000);
+        v[2 * i + 1] = static_cast<int16_t>((i * 11) % 600 - 300);
+        const double m = std::sqrt(double(v[2 * i]) * v[2 * i] + double(v[2 * i + 1]) * v[2 * i + 1]);
+        sum += m;
+        maxMag = std::max(maxMag, m);
+    }
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    src.Write(in);
+    ASSERT_TRUE(build::BuildCog(in, out, {}).ok());
+    auto r = tiff::TiffReader::Open(out);
+    ASSERT_TRUE(r.ok());
+    const tiff::IfdInfo& m = (*r)->Ifd((*r)->MainImage());
+    EXPECT_TRUE(m.complex);
+    EXPECT_EQ(m.sampleFormat, 5);
+    EXPECT_EQ(m.bitsPerSample, 32);
+    EXPECT_EQ(m.samplesPerPixel, 1);
+    EXPECT_EQ(m.predictor, 2);
+    EXPECT_NE(m.gdalMetadata.find(">NEAREST<"), std::string::npos);
+    for (uint32_t row = 0; row < m.blocksDown; ++row)
+        for (uint32_t col = 0; col < m.blocksAcross; ++col) {
+            auto b = (*r)->ReadBlock(m.index, m.BlockIndex(col, row));
+            ASSERT_TRUE(b.ok());
+            for (uint32_t y = 0; y < src.B && row * src.B + y < src.H; ++y) {
+                const uint32_t vw = std::min(src.B, src.W - col * src.B);
+                const size_t i = static_cast<size_t>(row * src.B + y) * src.W + col * src.B;
+                ASSERT_EQ(0, std::memcmp(b->data() + static_cast<size_t>(y) * src.B * 4, &src.pixels[i * 4], vw * 4));
+            }
+        }
+    std::ifstream sin(out + ".stats.json");
+    std::stringstream ss;
+    ss << sin.rdbuf();
+    const auto j = tiler::json::Parse(ss.str());
+    ASSERT_TRUE(j && j->IsObject());
+    const auto* band = j->Find("bands")->Find("1");
+    ASSERT_NE(band, nullptr);
+    EXPECT_NEAR(band->Find("mean")->num, sum / (src.pixels.size() / 4), 1e-9);
+    EXPECT_NEAR(band->Find("max")->num, maxMag, 1e-9);
 }
 
 // GDAL_METADATA of an output: OVERVIEW_RESAMPLING only with overviews; the colour

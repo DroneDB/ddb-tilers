@@ -300,13 +300,16 @@ void EncodeBlock(const BlockFormat& f, const uint8_t* pixels, ByteBuffer& out) {
     const size_t bytes = static_cast<size_t>(f.width) * f.height * f.samples * ss;
     const uint8_t* data = pixels;
     ByteBuffer& scratch = ThreadScratch();
+    // libtiff's predictors work on its sample words: a complex sample is one word of two values
+    const uint32_t words = f.samples / std::max<uint32_t>(f.components, 1);
+    const size_t wordBytes = ss * std::max<uint32_t>(f.components, 1);
     if (f.predictor == 2) {
         scratch.assign(pixels, bytes);
-        ApplyHorizontalPredictor(scratch.data(), f.width, f.height, f.samples, ss);
+        ApplyHorizontalPredictor(scratch.data(), f.width, f.height, words, wordBytes);
         data = scratch.data();
     } else if (f.predictor == 3) {
         scratch.resize(bytes);
-        ApplyFloatingPointPredictor(pixels, scratch.data(), f.width, f.height, f.samples, ss);
+        ApplyFloatingPointPredictor(pixels, scratch.data(), f.width, f.height, words, wordBytes);
         data = scratch.data();
     }
     switch (f.codec) {

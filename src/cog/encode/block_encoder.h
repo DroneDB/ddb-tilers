@@ -45,6 +45,7 @@ struct BlockFormat {
     tiff::SampleType type = tiff::SampleType::kU8;
     Codec codec = Codec::kLzw;
     int predictor = 1;       // 1 none, 2 horizontal, 3 floating point (lossless codecs)
+    uint32_t components = 1; // 2: complex samples, two values of `type` each (predictors on the pair)
     int level = 0;           // DEFLATE / ZSTD level; 0 = GDAL's default (6 / 9)
     int jpegQuality = 75;
 };
