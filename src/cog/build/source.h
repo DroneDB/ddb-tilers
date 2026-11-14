@@ -72,6 +72,9 @@ public:
     virtual std::string ColorInterp(int b) const = 0;
     /// The colour table of the first band, when it has one (RGB, 8 bits per component).
     virtual std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const = 0;
+    /// GDAL's NBITS of band b (IMAGE_STRUCTURE metadata): its bits when they are not those of the
+    /// sample type, none otherwise.
+    virtual std::optional<int> Nbits(int b) const = 0;
 
     /// DroneDB's isOptimizedCogDataset: a COG in EPSG:3857 with square 256 / 512 tiles and
     /// overviews, re-encoded at its own grid instead of warped.
@@ -108,14 +111,19 @@ Expected<std::unique_ptr<RasterSource>> OpenRasterSource(const std::string& path
                                                          uint64_t memoryBudget = uint64_t{2} << 30);
 
 /// TIFF tags as GDAL's GTiff driver writes TIFFTAG_* metadata items: ASCII (NUL-terminated),
-/// SHORT, and RATIONAL from the double GDAL sets (integers as n / 1).
+/// SHORT, and RATIONAL from the double GDAL sets (kept as a float by libtiff, then written as
+/// libtiff's continued-fraction rational of it).
 writer::RawTag AsciiTag(uint16_t tag, const std::string& value);
 writer::RawTag ShortTag(uint16_t tag, uint16_t value);
 writer::RawTag RationalTag(uint16_t tag, double value);
+/// The value GDAL's GTiff driver reports for a FLOAT tag it reads (X / YResolution): libtiff's
+/// float, printed with %.8g and parsed back.
+double GdalFloatTag(double value);
 
 /// GDAL's GTiff writer for the default-domain metadata of a dataset (WriteMDMetadata): the
 /// TIFFTAG_* items it knows become TIFF tags (`tags`), AREA_OR_POINT is left to the GeoKeys, the
-/// other items become the GDAL_METADATA document (`gdalMetadata`, "" when there is none).
+/// other items become the GDAL_METADATA document (`gdalMetadata`, "" when there is none), each
+/// value escaped twice as GDAL writes it.
 void GtiffMetadata(const std::vector<std::pair<std::string, std::string>>& items, std::vector<writer::RawTag>& tags,
                    std::string& gdalMetadata);
 

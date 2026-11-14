@@ -257,10 +257,10 @@ private:
         if (p_.alphaOut == -1) {
             *mask = static_cast<uint8_t>(static_cast<int>(dd * 255.1f));
         } else if constexpr (!std::is_floating_point_v<T>) {
-            const T a = static_cast<T>(static_cast<int>(dd * 255.1f));
+            const T a = static_cast<T>(static_cast<int>(dd * (p_.dstAlphaMax + 0.1f)));
             std::memcpy(out + static_cast<size_t>(p_.alphaOut) * ss, &a, ss);
         } else {
-            const T a = static_cast<T>(dd * 255.0f);
+            const T a = static_cast<T>(dd * p_.dstAlphaMax);
             std::memcpy(out + static_cast<size_t>(p_.alphaOut) * ss, &a, ss);
         }
     }

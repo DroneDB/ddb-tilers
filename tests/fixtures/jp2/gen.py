@@ -5,7 +5,9 @@ same files every time), for the cases GDAL's own samples do not cover: a colour 
 4:2:0 YCbCr, lossy multi-tile RGB with the YCC transform, RGBA with an alpha channel definition,
 16-bit RGBA, GCPs in the GeoJP2 box, RPC metadata, a GMLJP2 box only, a rotated geotransform,
 signed 24-bit samples (Int32), dataset metadata (the GDAL metadata box), and a single-tile image larger
-than 1024 (decoded by areas). Then run expected.py.
+than 1024 (decoded by areas). Then GeoTIFF copies of some of them (gtiff/, GDAL's translation to
+GTiff), which the COG builder must turn into the COG it builds from the JPEG 2000 file. Then run
+expected.py.
 
     python3 -I tests/fixtures/jp2/gen.py
 """
@@ -144,5 +146,37 @@ def main():
           ["QUALITY=0.5", "BLOCKXSIZE=1500", "BLOCKYSIZE=1100", "RESOLUTIONS=4"])
 
 
+# The files whose GeoTIFF copy (gdal.Translate) the end-to-end test builds a COG from: lossless or
+# decoded alike by the system's OpenJPEG and the one libddb ships (expected.tsv checks the copies).
+TIFF_COPIES = ["gen_palette.jp2", "gen_rgba.jp2", "gen_uint16_rgba.jp2", "gen_gcps.jp2", "gen_rotated.jp2",
+               "gen_gml_only.jp2", "gen_ycbcr420.jp2", "gen_metadata.jp2", "gen_int32.jp2", "small_200ppcm.jp2",
+               "tile_size_16.jp2", "513x513.jp2"]
+
+
+def half_alpha_tiff():
+    """A 16-bit RGBA GeoTIFF whose alpha is half of 65535: gdalwarp's SRC_ALPHA_MAX makes it a
+    density of 32768 / 65535 (32768 again in the output), not an opaque pixel."""
+    rng = np.random.default_rng(7)
+    w, h = 64, 48
+    bands = [pattern(rng, w, h, b, 0, 4000, 30).astype(np.uint16) for b in range(3)]
+    bands.append(np.full((h, w), 32768, np.uint16))
+    ds = mem(w, h, 4, gdal.GDT_UInt16, bands)
+    ds.GetRasterBand(4).SetColorInterpretation(gdal.GCI_AlphaBand)
+    out = os.path.join(HERE, "gtiff", "uint16_half_alpha.tif")
+    gdal.GetDriverByName("GTiff").CreateCopy(out, ds, options=["COMPRESS=DEFLATE", "PREDICTOR=2", "ALPHA=YES"])
+    print(os.path.basename(out), os.path.getsize(out))
+
+
+def tiff_copies():
+    os.makedirs(os.path.join(HERE, "gtiff"), exist_ok=True)
+    for name in TIFF_COPIES:
+        out = os.path.join(HERE, "gtiff", os.path.splitext(name)[0] + ".tif")
+        gdal.Translate(out, os.path.join(HERE, name), format="GTiff",
+                       creationOptions=["TILED=YES", "COMPRESS=DEFLATE", "PREDICTOR=2"])
+        print(os.path.basename(out), os.path.getsize(out))
+
+
 if __name__ == "__main__":
     main()
+    tiff_copies()
+    half_alpha_tiff()

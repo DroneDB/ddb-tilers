@@ -58,6 +58,7 @@ struct SourceSpec {
     int bands = 0;                 // source bands
     std::vector<int> warped;       // source bands warped into the output (alpha excluded)
     int alpha = -1;                // source alpha band (density)
+    float alphaScale = 1.0f / 255.0f;  // 1 / SRC_ALPHA_MAX
     bool mask = false;             // the internal mask as the unified validity
     std::optional<double> nodata;  // source nodata (per band and unified validity)
     bool unifiedOnly = false;      // UNIFIED_SRC_NODATA=YES: no per-band validity
@@ -66,11 +67,23 @@ struct SourceSpec {
     bool NoMasks() const { return alpha < 0 && !mask && !nodata; }
 };
 
+// GDAL's SetAlphaMax (gdalwarpoperation.cpp): the SRC_ALPHA_MAX / DST_ALPHA_MAX of an alpha band,
+// 2^NBITS - 1, else 32767 for Int16 and 65535 for UInt16, else the warper's default 255.
+double AlphaMax(tiff::SampleType type, std::optional<int> nbits) {
+    if (nbits && *nbits > 0 && *nbits < 32) return static_cast<double>((1u << *nbits) - 1u);
+    if (type == tiff::SampleType::kI16) return 32767;
+    if (type == tiff::SampleType::kU16) return 65535;
+    return 255;
+}
+
 SourceSpec Analyse(const RasterSource& src) {
     SourceSpec s;
     s.bands = src.Bands();
     // gdalwarp takes the last band as the source alpha when it is an alpha band.
-    if (src.AlphaBand() == s.bands - 1 && s.bands > 1) s.alpha = s.bands - 1;
+    if (src.AlphaBand() == s.bands - 1 && s.bands > 1) {
+        s.alpha = s.bands - 1;
+        s.alphaScale = static_cast<float>(1.0 / AlphaMax(src.Type(), src.Nbits(s.alpha)));
+    }
     for (int b = 0; b < s.bands; ++b)
         if (b != s.alpha) s.warped.push_back(b);
     s.nodata = src.NoData();
@@ -585,7 +598,7 @@ private:
             win.density.resize(np);
             const uint8_t* const alpha = win.px.data() + static_cast<size_t>(spec_.alpha) * ss;
             VisitSampleType(src_.Type(), [&]<typename T>() {
-                const float inv = 1.0f / 255.0f;
+                const float inv = spec_.alphaScale;
                 for (size_t i = 0; i < np; ++i) {
                     // GDALWarpSrcAlphaMasker: value * (1 / SRC_ALPHA_MAX), at most 1.
                     win.density[i] = std::min(1.0f, static_cast<float>(LoadSample<T>(alpha + i * win.pb)) * inv);
@@ -639,6 +652,8 @@ private:
         // nodata mask starts at 0; without either the destination counts as fully valid.
         p.dstDensityInit = (spec_.dstAlpha || hasDstNd) ? 0.0 : 1.0;
         p.alphaOut = spec_.dstAlpha ? (plan_.MaskOut() ? -1 : plan_.alphaBand) : -2;
+        // The output alpha band has the type of the others and no NBITS.
+        p.dstAlphaMax = static_cast<float>(AlphaMax(plan_.type, std::nullopt));
     }
 
     const RasterSource& src_;

@@ -44,6 +44,8 @@ public:
     /// bits as GDAL scales it), else black and white for a 1-bit image, an inverted grey ramp for
     /// min-is-white. None otherwise.
     std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const override;
+    /// BitsPerSample when it is not 8, 16, 32 or 64.
+    std::optional<int> Nbits(int b) const override;
 
     bool IsOptimizedCog() const override;
     std::optional<int> JpegQuality() const override;

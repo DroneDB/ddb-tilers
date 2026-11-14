@@ -245,12 +245,21 @@ std::optional<Element> Parse(std::string_view text) { return Parser(text).Docume
 std::string Escape(std::string_view text, bool attribute) {
     std::string out;
     out.reserve(text.size());
-    for (const char c : text) {
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        const auto u = static_cast<unsigned char>(c);
         if (c == '&') out += "&amp;";
         else if (c == '<') out += "&lt;";
         else if (c == '>') out += "&gt;";
         else if (c == '"' && attribute) out += "&quot;";
-        else out += c;
+        else if (u == 0xEF && text.substr(i, 3) == "\xEF\xBB\xBF") {
+            out += "&#xFEFF;";
+            i += 2;
+        } else if (u < 0x20 && c != '\t' && c != '\n' && c != '\r') {
+            continue;
+        } else {
+            out += c;
+        }
     }
     return out;
 }

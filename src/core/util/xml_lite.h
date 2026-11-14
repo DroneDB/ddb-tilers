@@ -38,7 +38,9 @@ struct Element {
 /// The root element of `text`, or nullopt when it is not a well-formed document.
 std::optional<Element> Parse(std::string_view text);
 
-/// `text` with the characters XML reserves escaped (&, <, >; and " when `attribute`).
+/// `text` escaped as GDAL's CPLEscapeString escapes XML: &, <, > (and " when `attribute`) as
+/// entities, a UTF-8 byte-order mark as &#xFEFF;, control characters other than tab, line feed and
+/// carriage return dropped (XML cannot hold them).
 std::string Escape(std::string_view text, bool attribute);
 
 }  // namespace ddbt::xml

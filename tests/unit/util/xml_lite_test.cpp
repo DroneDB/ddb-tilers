@@ -44,6 +44,7 @@ TEST(XmlLite, MalformedDocumentsAreRefused) {
 TEST(XmlLite, Escape) {
     EXPECT_EQ(Escape("a<b>&\"c\"", false), "a&lt;b&gt;&amp;\"c\"");
     EXPECT_EQ(Escape("a<b>&\"c\"", true), "a&lt;b&gt;&amp;&quot;c&quot;");
+    EXPECT_EQ(Escape("\xEF\xBB\xBFx\x01\ty\n", false), "&#xFEFF;x\ty\n");
 }
 
 }  // namespace

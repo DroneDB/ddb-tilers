@@ -104,6 +104,12 @@ std::optional<std::vector<std::array<uint8_t, 3>>> TiffSource::ColorTable() cons
     return std::nullopt;
 }
 
+std::optional<int> TiffSource::Nbits(int b) const {
+    const int bits = Main().bitsPerSample;
+    if (b < 0 || b >= Bands() || bits == 8 || bits == 16 || bits == 32 || bits == 64) return std::nullopt;
+    return bits;
+}
+
 bool TiffSource::IsOptimizedCog() const {
     // GDAL reports no CRS for a raster georeferenced by GCPs (only a GCP CRS): it is warped.
     if (!georef_.crs || !georef_.geoTransform) return false;
@@ -146,7 +152,7 @@ std::vector<writer::RawTag> TiffSource::MetadataTags() const {
         const tiff::TagEntry* e = m.FindTag(tag);
         if (e == nullptr) return;
         auto v = reader_->ReadTagDoubles(*e, 1);
-        if (v.ok() && !v->empty()) out.push_back(RationalTag(tag, (*v)[0]));
+        if (v.ok() && !v->empty()) out.push_back(RationalTag(tag, GdalFloatTag((*v)[0])));
     };
     auto shortTag = [&](uint16_t tag) {
         const tiff::TagEntry* e = m.FindTag(tag);

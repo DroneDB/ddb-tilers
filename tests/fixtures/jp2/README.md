@@ -16,6 +16,10 @@ JP2OpenJPEG driver reads it.
   GCPs and RPC metadata in the GeoJP2 box, a GMLJP2 box only, a rotated geotransform, 24-bit signed
   samples, the GDAL metadata box, and a single lossy tile larger than 1024 x 1024.
 
+- `gtiff/`: GDAL's GeoTIFF copies (gdal.Translate) of 12 of them, for `Jp2Cog.IsTheCogOfItsGeoTiffCopy`
+  (tests/unit/jp2/jp2_cog_test.cpp: the COG of the JPEG 2000 file is byte for byte the COG of its
+  copy), and `uint16_half_alpha.tif` (16-bit RGBA, alpha 32768) for the alpha scaling of the warp.
+
 `expected.tsv` holds what GDAL reads in each (size, band types, CRC-32 of every band, colour
 interpretation, NBITS, colour table, geotransform, GCPs, CRS, RPC presence, or the refusal);
 `expected.py` writes it, with the samples decoded by `gdal_bands.cpp` built against the GDAL libddb

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 
 #include "cog/build/jp2_source.h"
@@ -40,15 +41,110 @@ writer::RawTag ShortTag(uint16_t tag, uint16_t value) {
     return writer::RawTag{tag, 3, 1, {static_cast<uint8_t>(value), static_cast<uint8_t>(value >> 8)}};
 }
 
-writer::RawTag RationalTag(uint16_t tag, double value) {
-    // libtiff stores the float GDAL sets as a rational: integers as n / 1.
-    uint32_t num, den = 1;
-    if (value >= 0 && value == std::floor(value) && value < 4294967296.0) {
-        num = static_cast<uint32_t>(value);
-    } else {
-        den = 1000000;
-        num = static_cast<uint32_t>(std::max(0.0, std::min(4294967295.0, std::round(value * den))));
+namespace {
+
+// libtiff 4.7's DoubleToRational and ToRationalEuclideanGCD (libtiff/tif_dirwrite.c), the rational
+// libtiff writes for a double: the best of two continued-fraction approximations. Their notice:
+//
+//   Copyright (c) 1988-1997 Sam Leffler
+//   Copyright (c) 1991-1997 Silicon Graphics, Inc.
+//
+//   Permission to use, copy, modify, distribute, and sell this software and its documentation for
+//   any purpose is hereby granted without fee, provided that (i) the above copyright notices and
+//   this permission notice appear in all copies of the software and related documentation, and
+//   (ii) the names of Sam Leffler and Silicon Graphics may not be used in any advertising or
+//   publicity relating to the software without the specific, prior written permission of Sam
+//   Leffler and Silicon Graphics.
+//
+//   THE SOFTWARE IS PROVIDED "AS-IS" AND WITHOUT WARRANTY OF ANY KIND, EXPRESS, IMPLIED OR
+//   OTHERWISE, INCLUDING WITHOUT LIMITATION, ANY WARRANTY OF MERCHANTABILITY OR FITNESS FOR A
+//   PARTICULAR PURPOSE.
+//
+//   IN NO EVENT SHALL SAM LEFFLER OR SILICON GRAPHICS BE LIABLE FOR ANY SPECIAL, INCIDENTAL,
+//   INDIRECT OR CONSEQUENTIAL DAMAGES OF ANY KIND, OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
+//   OF USE, DATA OR PROFITS, WHETHER OR NOT ADVISED OF THE POSSIBILITY OF DAMAGE, AND ON ANY
+//   THEORY OF LIABILITY, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+//   SOFTWARE.
+void ToRationalEuclideanGcd(double value, bool smallRange, uint64_t& num, uint64_t& den) {
+    uint64_t numSum[3] = {0, 1, 0}, denomSum[3] = {1, 0, 0};
+    const uint64_t nMax = smallRange ? uint64_t{(2147483647 - 1) / 2} : uint64_t{(9223372036854775807 - 1) / 2};
+    const double fMax = static_cast<double>(nMax);
+    constexpr uint64_t kMaxDenom = 0xFFFFFFFFu, kReturnLimit = 0xFFFFFFFFu;
+    uint64_t bigDenom = 1;
+    while (value != std::floor(value) && value < fMax && bigDenom < nMax) {
+        bigDenom <<= 1;
+        value *= 2;
     }
+    uint64_t bigNum = static_cast<uint64_t>(value);
+    constexpr int kMaxIterations = 64;
+    for (int i = 0; i < kMaxIterations; ++i) {
+        if (bigDenom == 0) break;
+        const uint64_t val = bigNum / bigDenom;
+        uint64_t aux = bigNum;
+        bigNum = bigDenom;
+        bigDenom = aux % bigDenom;
+        aux = val;
+        if (denomSum[1] * val + denomSum[0] >= kMaxDenom) {
+            aux = (kMaxDenom - denomSum[0]) / denomSum[1];
+            if (aux * 2 >= val || denomSum[1] >= kMaxDenom) i = kMaxIterations + 1;
+            else break;
+        }
+        numSum[2] = aux * numSum[1] + numSum[0];
+        numSum[0] = numSum[1];
+        numSum[1] = numSum[2];
+        denomSum[2] = aux * denomSum[1] + denomSum[0];
+        denomSum[0] = denomSum[1];
+        denomSum[1] = denomSum[2];
+    }
+    while (numSum[1] > kReturnLimit || denomSum[1] > kReturnLimit) {
+        numSum[1] /= 2;
+        denomSum[1] /= 2;
+    }
+    num = numSum[1];
+    den = denomSum[1];
+}
+
+void DoubleToRational(double value, uint32_t& num, uint32_t& den) {
+    if (!(value >= 0)) {
+        num = den = 0;
+        return;
+    }
+    if (value > 4294967295.0) {
+        num = 0xFFFFFFFFu;
+        den = 0;
+        return;
+    }
+    if (value == static_cast<double>(static_cast<uint32_t>(value))) {
+        num = static_cast<uint32_t>(value);
+        den = 1;
+        return;
+    }
+    if (value < 1.0 / 4294967295.0) {
+        num = 0;
+        den = 0xFFFFFFFFu;
+        return;
+    }
+    uint64_t n1, d1, n2, d2;
+    ToRationalEuclideanGcd(value, false, n1, d1);
+    ToRationalEuclideanGcd(value, true, n2, d2);
+    const double diff1 = std::fabs(value - static_cast<double>(n1) / static_cast<double>(d1));
+    const double diff2 = std::fabs(value - static_cast<double>(n2) / static_cast<double>(d2));
+    num = static_cast<uint32_t>(diff1 < diff2 ? n1 : n2);
+    den = static_cast<uint32_t>(diff1 < diff2 ? d1 : d2);
+}
+
+}  // namespace
+
+double GdalFloatTag(double value) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "%.8g", static_cast<double>(static_cast<float>(value)));
+    return std::strtod(text, nullptr);
+}
+
+writer::RawTag RationalTag(uint16_t tag, double value) {
+    // libtiff keeps X / YResolution as floats and writes them as the rational of that float.
+    uint32_t num = 0, den = 1;
+    DoubleToRational(static_cast<double>(static_cast<float>(value)), num, den);
     writer::RawTag t{tag, 5, 1, std::vector<uint8_t>(8)};
     for (int i = 0; i < 4; ++i) {
         t.data[static_cast<size_t>(i)] = static_cast<uint8_t>(num >> (8 * i));
@@ -101,7 +197,10 @@ void GtiffMetadata(const std::vector<std::pair<std::string, std::string>>& items
             continue;
         }
         if (key == "AREA_OR_POINT") continue;
-        doc += "  <Item name=\"" + xml::Escape(name, true) + "\">" + xml::Escape(value, false) + "</Item>\n";
+        // GDAL escapes the value, then the XML serialization escapes it again (its GDAL_METADATA
+        // readers unescape twice).
+        doc += "  <Item name=\"" + xml::Escape(name, true) + "\">" + xml::Escape(xml::Escape(value, true), false) +
+               "</Item>\n";
     }
     gdalMetadata = doc.empty() ? std::string() : "<GDALMetadata>\n" + doc + "</GDALMetadata>\n";
 }

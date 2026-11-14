@@ -9,8 +9,8 @@
 //     valid; GWKBilinearResample4Sample (taps with density > 1e-9, renormalised, the density
 //     interpolated too), the destination blend of GWKSetPixelValue, ClampRoundAndAvoidNoData,
 //     GWKAvoidNoDataMultiBand, and the destination alpha from the centre pixel's density
-//     (GWKOverlayDensity, then GDALWarpDstAlphaMasker: (int)(density * 255.1) for integer alpha,
-//     density * 255 for floating point).
+//     (GWKOverlayDensity, then GDALWarpDstAlphaMasker: (int)(density * (DST_ALPHA_MAX + 0.1)) for
+//     integer alpha, density * DST_ALPHA_MAX for floating point).
 //
 // The pixels whose four taps are inside the source and fully valid (the interior of almost every
 // raster) go through a SIMD kernel (warp_kernels.h); every other pixel through the scalar code
@@ -76,6 +76,9 @@ struct BilinearParams {
     double dstDensityInit = 1.0;
     /// Destination alpha: -2 none, -1 the output mask, >= 0 that band of the output pixel.
     int alphaOut = -2;
+    /// GDAL's DST_ALPHA_MAX of an alpha band (alphaOut >= 0): 65535 for UInt16, 32767 for Int16,
+    /// 255 otherwise (the output mask is always 255).
+    float dstAlphaMax = 255.0f;
 };
 
 enum class KernelPath : uint8_t {

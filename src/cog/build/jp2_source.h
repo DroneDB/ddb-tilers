@@ -52,8 +52,8 @@ public:
     std::string ColorInterp(int b) const override;
     std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const override;
     bool HasRpc() const noexcept override { return rpc_; }
-    /// GDAL's NBITS of band b: its precision when not a multiple of 8 (8 for a promoted alpha).
-    std::optional<int> Nbits(int b) const;
+    /// Its precision when not a multiple of 8 (8 for a promoted alpha).
+    std::optional<int> Nbits(int b) const override;
 
     const std::string& GdalMetadata() const noexcept override { return gdalMetadata_; }
     std::vector<writer::RawTag> MetadataTags() const override { return tags_; }
