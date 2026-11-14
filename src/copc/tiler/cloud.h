@@ -60,9 +60,10 @@ public:
     const std::shared_ptr<const CopcFile>& sharedFile() const noexcept { return file_; }
     const crs::Crs& crs() const noexcept { return crs_; }
     bool geocentric() const noexcept { return geocentric_; }
-    /// Cloud CRS -> EPSG:3857 (DroneDB's toMercator).
+    /// Cloud CRS -> EPSG:3857 (DroneDB's toMercator). Only for a cloud with a footprint (a
+    /// cloud without one has no transformation to EPSG:3857, and no tile).
     const crs::Transform& toMercator() const noexcept { return *toMercator_; }
-    /// EPSG:3857 -> cloud CRS (DroneDB's toCloud).
+    /// EPSG:3857 -> cloud CRS (DroneDB's toCloud). Only for a cloud with a footprint.
     const crs::Transform& toCloud() const noexcept { return *toCloud_; }
 
     /// The baseline's footprint in EPSG:3857 (oMinX = transformed min corner x, ... as

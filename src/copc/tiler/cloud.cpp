@@ -366,12 +366,18 @@ std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t s
         c->footprintError_ = e.what();
     }
 
-    // The two transforms of PointCloudTiler (CoordsTransformer(3857, wkt), (wkt, 3857)).
+    // The two transforms of PointCloudTiler (CoordsTransformer(3857, wkt), (wkt, 3857)). A cloud
+    // without a footprint (a CRS without a transformation to EPSG:3857, a site grid) has none
+    // either: it opens, and every tile is refused with the reason the footprint gives, as
+    // PointCloudTiler's constructor refused it before it made them.
     try {
         c->toMercator_ = crs::TransformCache::Global().Get(c->crs_, merc);
         c->toCloud_ = crs::TransformCache::Global().Get(merc, c->crs_);
     } catch (const crs::CrsError&) {
-        throw TileError(TileErrorCode::kException, "Failed to create coordinate transformation");
+        if (c->compatFootprint_) throw TileError(TileErrorCode::kException, "Failed to create coordinate transformation");
+        c->toMercator_.reset();
+        c->toCloud_.reset();
+        return c;
     }
 
     // Densified outline for the default mode.

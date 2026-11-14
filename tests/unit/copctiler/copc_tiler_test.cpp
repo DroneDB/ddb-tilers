@@ -675,6 +675,40 @@ TEST_F(CopcTilerTest, ErrorsAreTheBaselines) {
     }
 }
 
+// A CRS without a transformation to EPSG:3857 (a site grid): the cloud opens, and its extent and
+// every tile are refused with the reason, in every mode (PointCloudTiler's constructor refused it
+// before it made its transforms)
+TEST_F(CopcTilerTest, ACloudWithoutATransformationToWebMercatorIsRefusedWithTheReason) {
+    CloudSpec s;
+    s.wkt = "ENGCRS[\"Site grid\",EDATUM[\"Site datum\"],CS[Cartesian,2],"
+            "AXIS[\"easting (X)\",east,ORDER[1],LENGTHUNIT[\"metre\",1]],"
+            "AXIS[\"northing (Y)\",north,ORDER[2],LENGTHUNIT[\"metre\",1]]]";
+    const std::string path = Cloud("site", s);
+    auto cloud = tiler::Cloud::Get(path);
+    EXPECT_FALSE(cloud->compatFootprint().has_value());
+    EXPECT_FALSE(cloud->footprint().has_value());
+    const std::string reason = "Cannot tile " + path + ": footprint unavailable: No coordinate transformation from Site grid to EPSG:3857";
+    try {
+        Extent(path, 256);
+        ADD_FAILURE() << "an extent";
+    } catch (const ddbt::cog::tiler::TileError& e) {
+        EXPECT_EQ(e.code(), ddbt::cog::tiler::TileErrorCode::kInvalidArgs);
+        EXPECT_EQ(std::string(e.what()), reason);
+    }
+    for (const Mode mode : {Mode::kCompat, Mode::kHybrid, Mode::kModern}) {
+        TileRequest r;
+        r.path = path;
+        r.z = 20, r.x = 0, r.y = 0, r.tms = false, r.mode = mode, r.noCache = true;
+        try {
+            RenderTile(r);
+            ADD_FAILURE() << "a tile";
+        } catch (const ddbt::cog::tiler::TileError& e) {
+            EXPECT_EQ(e.code(), ddbt::cog::tiler::TileErrorCode::kInvalidArgs);
+            EXPECT_EQ(std::string(e.what()), reason);
+        }
+    }
+}
+
 TEST_F(CopcTilerTest, AnyZoomInRangeIsAcceptedAndEmptyTilesAreBlankBytes) {
     CloudSpec s;
     const std::string path = Cloud("rgb8", s);
