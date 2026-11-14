@@ -186,6 +186,13 @@ DDBT_API ddbtErr ddbtConfigure(const char *configJson);
  * @return codes as ddbtMemoryTileFmt */
 DDBT_API ddbtErr ddbtTileInfo(const char *inputPath, int tileSize, char **outJson);
 
+/** Closes the files the tilers keep open between calls (the shared sources of rasters and point
+ * clouds), so that the host can delete or replace them on any platform and release its own file
+ * handles at once (DDBReleaseConnections). A file in use by a call that is running closes when that
+ * call returns; the next tile of a file opens it again. The decoded-block, node and encoded-tile
+ * caches are kept: their entries belong to a file version and stay valid. */
+DDBT_API ddbtErr ddbtReleaseSources(void);
+
 /** Information about the build and the CPU dispatch, as a JSON object (Highway targets
  * compiled in, supported by this CPU, and the one selected at runtime).
  * @param outJson receives a NUL-terminated string; release it with ddbtFree */

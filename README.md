@@ -146,6 +146,7 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | `ddbtMemoryTileFmt(...)` | A tile of a COG or COPC file in PNG, JPEG or WebP |
 | `ddbtMemoryTileEx2(...)`, `ddbtMemoryTileEx3(...)` | A raster tile with visualisation parameters, in PNG (Ex2) or a chosen format (Ex3) |
 | `ddbtTileInfo(input, tileSize, outJson)` | Bounds (EPSG:3857) and zoom range of a COG or COPC file |
+| `ddbtReleaseSources()` | Closes the files the tilers keep open between calls |
 | `ddbtConfigure(configJson)` | Process-wide settings of a host that embeds the library: `projDataDir`, `threads`, cache budgets (`blockCacheMb`, `tileCacheMb`, `copcNodeCacheMb`, `copcTileCacheMb`), `copcTilerMode`, `copcBuildMemMb`; they win over the environment variables |
 | `ddbtFree`, `ddbtLastError`, `ddbtVersion`, `ddbtCpuInfo` | Memory release, error message of the last call on the thread, version, CPU dispatch |
 

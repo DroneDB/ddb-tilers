@@ -9,10 +9,12 @@
 #include "api/api_common.h"
 #include "api/copc_tile.h"
 #include "cog/tiler/block_cache.h"
+#include "cog/tiler/cog_source.h"
 #include "cog/tiler/cog_tiler.h"
 #include "cog/tiler/json_lite.h"
 #include "copc/build/copc_builder.h"
 #include "copc/cache/node_cache.h"
+#include "copc/tiler/cloud.h"
 #include "copc/tiler/copc_tiler.h"
 #include "core/crs/crs.h"
 #include "core/exec/thread_pool.h"
@@ -87,6 +89,14 @@ ddbtErr ddbtConfigure(const char* configJson) {
         if (c.copcTileCacheMb) ddbt::copc::tiler::SetTileCacheBudget(Bytes(*c.copcTileCacheMb));
         if (c.copcTilerMode) ddbt::copc::tiler::SetMode(*c.copcTilerMode);
         if (c.copcBuildMemMb) ddbt::copc::build::SetDefaultCopcMemoryBudget(*c.copcBuildMemMb << 20);
+        return DDBT_ERR_NONE;
+    });
+}
+
+ddbtErr ddbtReleaseSources(void) {
+    return GuardedCall([&]() -> ddbtErr {
+        ddbt::cog::tiler::CogSource::ClearRegistry();
+        ddbt::copc::tiler::Cloud::ClearRegistry();
         return DDBT_ERR_NONE;
     });
 }

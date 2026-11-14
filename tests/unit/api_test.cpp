@@ -231,6 +231,53 @@ TEST(HostApi, TileInfoOfARasterIsGdalTilersBoundsAndZooms) {
     std::filesystem::remove_all(dir);
 }
 
+#ifdef __linux__
+namespace {
+// Open descriptors of this process on `path` (Linux: the links of /proc/self/fd).
+int OpenDescriptorsOf(const std::string& path) {
+    const auto target = std::filesystem::weakly_canonical(path);
+    int n = 0;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/fd")) {
+        std::error_code ec;
+        const auto p = std::filesystem::read_symlink(e.path(), ec);
+        if (!ec && p == target) ++n;
+    }
+    return n;
+}
+}  // namespace
+
+TEST(HostApi, ReleaseSourcesClosesTheFilesOfTheTilers) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("release");
+    const std::string path = (dir / "r.tif").string();
+    syn::WriteSynth(path, syn::Spec(512, 1, 1));
+    char* json = nullptr;
+    ASSERT_EQ(ddbtTileInfo(path.c_str(), 256, &json), DDBT_ERR_NONE);
+    ddbtFree(json);
+    uint8_t* buf = nullptr;
+    int size = 0;
+    const auto tile = [&] {
+        const json::Value v = TileInfoOf(path, 256);
+        const int z = static_cast<int>(Num(v, "maxZoom"));
+        const double res = 2 * 20037508.342789244 / (256.0 * double(1u << z));
+        const int x = static_cast<int>((Num(v, "minX") + 20037508.342789244) / (256 * res));
+        const int y = static_cast<int>((20037508.342789244 - Num(v, "maxY")) / (256 * res));
+        ASSERT_EQ(ddbtMemoryTileFmt(path.c_str(), z, x, y, &buf, &size, 256, true, false, nullptr, "png"), DDBT_ERR_NONE)
+            << ddbtLastError();
+        ddbtFree(buf);
+    };
+    tile();
+    EXPECT_GE(OpenDescriptorsOf(path), 1);
+    ASSERT_EQ(ddbtReleaseSources(), DDBT_ERR_NONE);
+    EXPECT_EQ(OpenDescriptorsOf(path), 0);
+    tile();  // opened again on the next tile
+    EXPECT_GE(OpenDescriptorsOf(path), 1);
+    ASSERT_EQ(ddbtReleaseSources(), DDBT_ERR_NONE);
+    EXPECT_EQ(OpenDescriptorsOf(path), 0);
+    std::filesystem::remove_all(dir);
+}
+#endif
+
 TEST(HostApi, TileInfoOfAPointCloudFollowsTheMode) {
     namespace syn = ddbt::copc::tiler::test;
     const auto dir = ApiScratch("tileinfo-cloud");
