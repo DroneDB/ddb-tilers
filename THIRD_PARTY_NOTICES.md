@@ -14,6 +14,7 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 |---|---|---|---|
 | laz-perf 3.4.0, modified | `third_party/lazperf` | Apache-2.0 | `LICENSE` and `NOTICE` in the folder; every change is listed in `FORK.md` and marked with a `ddbt fork` comment |
 | fpnge (commit 097ebccf) | `third_party/fpnge` | Apache-2.0 | Unmodified (compiled twice for SSE 4.1 and AVX2 by the wrappers in `variants/`); `LICENSE` in the folder |
+| GDAL 3.13.3, ported code | `src/core/crs/gcp_transform.cpp` | MIT | The GCP transforms of `alg/gdal_crs.cpp` (with the GRASS CRS.C routines, Copyright (c) 1992 Michigan State University), `alg/gdal_homography.cpp`, `alg/gdallinearsystem.cpp` and `alg/gdaltransformer.cpp`, ported to C++20; the copyright notices and the MIT permission notice are at the top of the file |
 | vcpkg port of libjpeg-turbo, modified | `ports/libjpeg-turbo` | MIT | Build script only, not linked; see `ports/NOTICE.libjpeg-turbo` |
 
 ## Libraries linked through vcpkg (static)

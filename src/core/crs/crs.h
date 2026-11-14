@@ -77,6 +77,9 @@ public:
     std::optional<int> Epsg() const;
     bool IsGeographic() const { return Type() == CrsType::Geographic2D || Type() == CrsType::Geographic3D; }
     bool IsProjected() const { return Type() == CrsType::Projected; }
+    /// GDAL's OGRSpatialReference::IsGeographic: geographic, or a bound or compound CRS whose
+    /// horizontal part is geographic.
+    bool IsHorizontallyGeographic() const;
     bool IsGeocentric() const { return Type() == CrsType::Geocentric; }
     bool IsCompound() const { return Type() == CrsType::Compound; }
     /// Metres per unit of the first horizontal axis (1 for metres, 0.30480060960121924 for US

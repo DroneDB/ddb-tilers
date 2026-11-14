@@ -18,6 +18,7 @@ struct Crs::Data {
     CrsType type = CrsType::Other;
     std::optional<int> epsg;
     double unitFactor = 1.0;
+    bool horizontalGeographic = false;
     std::optional<LonLatBox> area;
 };
 
@@ -90,6 +91,8 @@ Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj) {
         if (end != code && *end == '\0') d.epsg = static_cast<int>(v);
     }
     if (PjPtr h = HorizontalOf(ctx, use)) {
+        const PJ_TYPE ht = proj_get_type(h.get());
+        d.horizontalGeographic = ht == PJ_TYPE_GEOGRAPHIC_2D_CRS || ht == PJ_TYPE_GEOGRAPHIC_3D_CRS;
         if (PjPtr cs{proj_crs_get_coordinate_system(ctx, h.get())}) {
             double factor = 0;
             if (proj_cs_get_axis_count(ctx, cs.get()) > 0 &&
@@ -153,6 +156,7 @@ const std::string& Crs::Name() const { return Need(d_).name; }
 CrsType Crs::Type() const { return Need(d_).type; }
 std::optional<int> Crs::Epsg() const { return Need(d_).epsg; }
 double Crs::HorizontalUnitFactor() const { return Need(d_).unitFactor; }
+bool Crs::IsHorizontallyGeographic() const { return Need(d_).horizontalGeographic; }
 std::optional<LonLatBox> Crs::AreaOfUse() const { return Need(d_).area; }
 
 std::string Crs::ToWkt(WktFlavor flavor) const {
