@@ -624,7 +624,116 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
     if (info.opaque == 0) info.blank = true;
 }
 
+
+// The deepest depth whose points, with those of every shallower depth, fit the budget (0 when even
+// the root exceeds it): what a thumbnail reads.
+int ThumbnailDepth(const Cloud& cloud, uint64_t budget) {
+    auto all = cloud.file().hierarchy().All(NodeOrder::kFileOrder);
+    if (!all.ok()) cog::tiler::ThrowIfError(all.status(), "Cannot read the hierarchy of " + cloud.path());
+    std::vector<uint64_t> perDepth;
+    for (const HierarchyNode* n : all->nodes) {
+        const auto d = static_cast<size_t>(n->key.d);
+        if (perDepth.size() <= d) perDepth.resize(d + 1, 0);
+        perDepth[d] += static_cast<uint64_t>(n->pointCount);
+    }
+    int depth = 0;
+    uint64_t cumulative = 0;
+    for (size_t d = 0; d < perDepth.size(); ++d) {
+        cumulative += perDepth[d];
+        if (cumulative > budget) break;
+        depth = static_cast<int>(d);
+    }
+    return depth;
+}
+
 }  // namespace
+
+void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, RenderInfo* infoOut) {
+    if (r.size <= 0 || r.size > 16384) throw TileError(TileErrorCode::kInvalidArgs, "Invalid thumbnail size");
+    const auto cloud = Cloud::Get(r.path);
+    const las::LasHeader& h = cloud->file().header();
+
+    // The area drawn: the footprint in EPSG:3857, else the header bounds in the cloud's x, y
+    const bool mercator = cloud->crsError().empty() && cloud->footprint().has_value();
+    const Rect area = mercator ? *cloud->footprint() : Rect{h.min[0], h.min[1], h.max[0], h.max[1]};
+    const double width = area.maxX - area.minX, height = area.maxY - area.minY;
+    if (!(std::max(width, height) > 0) || !std::isfinite(width) || !std::isfinite(height))
+        throw TileError(TileErrorCode::kException, "Cannot calculate length: point cloud has zero extent");
+    const double scale = r.size / std::max(width, height);
+    // Centred: the margins of the shorter side split evenly
+    const double offX = (r.size - width * scale) / 2, offY = (r.size - height * scale) / 2;
+    const PixelMap pm{area.minX - offX / scale, area.maxY + offY / scale, scale};
+
+    RenderInfo info;
+    const uint64_t budget = r.pointBudget > 0 ? r.pointBudget
+                                              : 2 * static_cast<uint64_t>(r.size) * static_cast<uint64_t>(r.size);
+    SelectQuery q;
+    q.box = Box3::Xy(h.min[0], h.min[1], h.max[0], h.max[1]);
+    q.depthEnd = ThumbnailDepth(*cloud, budget) + 1;
+    info.depthEnd = q.depthEnd;
+    Selection sel = SelectOrThrow(*cloud, q, NodeOrder::kFileOrder);
+    info.nodes = static_cast<uint32_t>(sel.nodes.size());
+    info.points = sel.points;
+    if (sel.points == 0) throw TileError(TileErrorCode::kException, "No points fetched from cloud, check zoom level");
+
+    const bool geo = mercator && cloud->geocentric();
+    const kernels::Window window{h.min[0], h.min[1], h.max[0], h.max[1]};
+    std::optional<crs::PolyFit> fit;
+    if (mercator && !geo && sel.points >= kExactBelow) {
+        double residual = 0;
+        fit = FitWindow(cloud->toMercator(), window, pm, residual);
+        if (fit) info.fitResidual = residual;
+    }
+    info.transform = !mercator ? RenderInfo::Transform::kNone
+                     : !fit    ? RenderInfo::Transform::kExact
+                     : fit->Degree() == 1 ? RenderInfo::Transform::kAffine
+                     : fit->Degree() == 2 ? RenderInfo::Transform::kQuadratic
+                                          : RenderInfo::Transform::kCubic;
+
+    ScratchLease s;
+    FetchNodes(*cloud, sel.nodes, s->nodes);
+    s->splat.Reset(r.size, SplatRasterizer::Disc::kDisc13);
+    const int P = s->splat.PaddedSize();
+    const kernels::Scaling& sc = cloud->scaling();
+    const bool colored = cloud->hasColor();
+    const double zOrigin = geo ? cloud->heightMin() : cloud->zMin();
+    for (const auto& np : s->nodes) {
+        const CompactNode& node = np->points;
+        const kernels::NodeView view = ViewOf(node);
+        const uint32_t* colors = node.rgba();
+        for (size_t at = 0; at < node.size(); at += kBatch) {
+            const size_t end = std::min<size_t>(node.size(), at + kBatch);
+            const size_t n = kernels::DecodeCull(view, at, end, sc, window, s->xs.data(), s->ys.data(), s->zs.data(),
+                                                 s->idx.data());
+            if (n == 0) continue;
+            info.inWindow += n;
+            if (colored) {
+                for (size_t i = 0; i < n; ++i) s->rgba[i] = colors[s->idx[i]];
+            } else {
+                kernels::RampRgba(s->zs.data(), n, cloud->zMin(), cloud->zMax(), s->rgba.data());
+            }
+            if (fit) {
+                fit->Eval(s->xs.data(), s->ys.data(), s->us.data(), s->vs.data(), n);
+            } else {
+                std::memcpy(s->us.data(), s->xs.data(), n * sizeof(double));
+                std::memcpy(s->vs.data(), s->ys.data(), n * sizeof(double));
+                if (mercator) cloud->toMercator().TransformPoints(s->us.data(), s->vs.data(), geo ? s->zs.data() : nullptr, n);
+                pm.ToPixels(s->us.data(), s->vs.data(), n);
+            }
+            for (size_t i = 0; i < n; ++i) {
+                const double u = s->us[i], v = s->vs[i];
+                if (!(u >= 0.0 && u < P && v >= 0.0 && v < P)) continue;
+                s->splat.Add(static_cast<int>(u), static_cast<int>(v),
+                             SplatKey(static_cast<float>(s->zs[i] - zOrigin), s->rgba[i]));
+            }
+        }
+    }
+    rgba.resize(static_cast<size_t>(r.size) * static_cast<size_t>(r.size) * 4);
+    info.opaque = s->splat.Resolve(rgba.data());
+    s->nodes.clear();
+    if (info.opaque == 0) info.blank = true;
+    if (infoOut) *infoOut = info;
+}
 
 std::optional<Mode> ParseMode(std::string_view name) {
     if (name == "compat") return Mode::kCompat;
@@ -659,6 +768,7 @@ void RequireTileSize(int tileSize) {
 // The footprint the tiles of `mode` are bounded by (Tiler::getMinMaxCoordsForZ): the baseline's,
 // else (outside compat) the densified outline's. Throws when there is none.
 const Rect& TilingFootprint(const Cloud& cloud, Mode mode) {
+    if (!cloud.crsError().empty()) throw TileError(TileErrorCode::kInvalidArgs, cloud.crsError());
     const std::optional<Rect>* footprint = &cloud.compatFootprint();
     if (!*footprint && mode != Mode::kCompat) footprint = &cloud.footprint();
     if (!*footprint) {

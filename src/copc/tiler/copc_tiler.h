@@ -100,6 +100,23 @@ encode::ByteBuffer RenderTile(const TileRequest& request);
 void RenderRgba(const Cloud& cloud, const TileRequest& request, std::vector<uint8_t>& rgba,
                 RenderInfo* info = nullptr);
 
+/// A thumbnail: the whole cloud fitted, centred, in a square of size x size pixels.
+struct ThumbnailRequest {
+    std::string path;
+    int size = 512;
+    /// The points it may read: the deepest octree levels whose points, with those of every
+    /// shallower level, are at most this many (at least the root); 0 = 2 per pixel.
+    uint64_t pointBudget = 0;
+};
+
+/// Renders a thumbnail into RGBA (size^2 * 4 bytes, straight alpha, transparent background),
+/// drawn as the modern tiles are (the 13-pixel disc on each point, a per-pixel depth test,
+/// coloured points in their colours, others in the ramp over the header z range): in EPSG:3857
+/// (north up) when the cloud has a footprint, else in its own x, y (a cloud without a CRS, or
+/// without a transformation to EPSG:3857). Throws cog::tiler::TileError: kInvalidArgs for a
+/// bad size, kException for a cloud of zero extent or without points, like RenderTile else.
+void RenderThumbnail(const ThumbnailRequest& request, std::vector<uint8_t>& rgba, RenderInfo* info = nullptr);
+
 /// The footprint and zoom range of `path` for `tileSize` px tiles in the process-wide mode, as
 /// PointCloudTiler's constructor computes them (the footprint the tiles are bounded by, the span
 /// DroneDB uses). Throws cog::tiler::TileError like RenderTile.

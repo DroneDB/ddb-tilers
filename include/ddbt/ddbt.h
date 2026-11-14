@@ -129,6 +129,22 @@ DDBT_API ddbtErr ddbtMemoryTileEx3(const char *inputPath, int tz, int tx, int ty
                                    const char *colormap, const char *rescale, const ddbtRasterOptions *options,
                                    const char *outputFormat, uint8_t **outBuffer, int *outBufferSize);
 
+/** A thumbnail of a COPC point cloud: the whole cloud fitted, centred, in a square of size x size
+ * pixels, as RGBA (8 bits a channel, straight alpha, transparent background; size * size * 4
+ * bytes), drawn as the modern tiles are (a disc on each point with a per-pixel depth test; points
+ * in their colours, a cloud without colours in the ramp over its height range). In EPSG:3857, north
+ * up, when the cloud has a footprint, else in its own x, y (no CRS, or none that transforms to
+ * EPSG:3857). It reads the deepest octree levels whose points, with those of every shallower level,
+ * fit pointBudget (0: 2 per pixel), at least the root. A COPC at an http(s) URL is read through the
+ * remote reader (ddbtSetRemoteReader).
+ * Codes: DDBT_ERR_INVALIDARGS for a bad argument (no path, NULL outputs, a size outside 1..16384)
+ * or a file that is not a COPC, DDBT_ERR_NOTFOUND, DDBT_ERR_NOT_IMPLEMENTED (a remote path without
+ * a reader), DDBT_ERR_EXCEPTION otherwise (a cloud of zero extent or without points).
+ * @param outRgba receives the pixels; release them with ddbtFree
+ * @param outRgbaSize receives size * size * 4 */
+DDBT_API ddbtErr ddbtRenderCopcThumbnail(const char *inputPath, int size, uint64_t pointBudget, uint8_t **outRgba,
+                                         int *outRgbaSize);
+
 /** Release a buffer or string returned by ddbt (counterpart of DDBVSIFree and DDBFree).
  * NULL is a no-op. */
 DDBT_API ddbtErr ddbtFree(void *ptr);

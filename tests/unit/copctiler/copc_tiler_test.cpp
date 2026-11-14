@@ -33,6 +33,7 @@
 #include "core/io/io_stats.h"
 #include "core/tile/compat.h"
 #include "core/util/last_error.h"
+#include "ddbt/ddbt.h"
 #include "synth_cloud.h"
 
 namespace {
@@ -696,6 +697,15 @@ TEST_F(CopcTilerTest, ACloudWithoutATransformationToWebMercatorIsRefusedWithTheR
         EXPECT_EQ(e.code(), ddbt::cog::tiler::TileErrorCode::kInvalidArgs);
         EXPECT_EQ(std::string(e.what()), reason);
     }
+    // Its thumbnail is drawn in its own coordinates
+    ThumbnailRequest t;
+    t.path = path;
+    t.size = 64;
+    std::vector<uint8_t> thumb;
+    RenderInfo info;
+    RenderThumbnail(t, thumb, &info);
+    EXPECT_EQ(info.transform, RenderInfo::Transform::kNone);
+    EXPECT_GT(Opaque(thumb), 64u * 64u / 2);
     for (const Mode mode : {Mode::kCompat, Mode::kHybrid, Mode::kModern}) {
         TileRequest r;
         r.path = path;
@@ -746,6 +756,123 @@ TEST_F(CopcTilerTest, AnyZoomInRangeIsAcceptedAndEmptyTilesAreBlankBytes) {
 
 // The chunk of a node of a mapped file is asked for whole before it is decoded: a cold node is then
 // read in one go, not 4 KiB at a time on the decoder's page faults (the mapping is advised random)
+// ------------------------------------------------------------------------------------------------
+// thumbnails
+
+namespace {
+struct Extent2 {
+    int minX = 1 << 30, minY = 1 << 30, maxX = -1, maxY = -1;
+};
+Extent2 OpaqueExtent(const std::vector<uint8_t>& rgba, int size) {
+    Extent2 e;
+    for (int y = 0; y < size; ++y)
+        for (int x = 0; x < size; ++x)
+            if (rgba[(static_cast<size_t>(y) * size + x) * 4 + 3] == 255) {
+                e.minX = std::min(e.minX, x), e.maxX = std::max(e.maxX, x);
+                e.minY = std::min(e.minY, y), e.maxY = std::max(e.maxY, y);
+            }
+    return e;
+}
+}  // namespace
+
+TEST_F(CopcTilerTest, AThumbnailFitsTheWholeCloudCentredInItsSquare) {
+    CloudSpec s;
+    const std::string path = Cloud("rgb8", s);
+    for (const int size : {64, 200, 512}) {
+        ThumbnailRequest r;
+        r.path = path;
+        r.size = size;
+        std::vector<uint8_t> rgba;
+        RenderInfo info;
+        RenderThumbnail(r, rgba, &info);
+        ASSERT_EQ(rgba.size(), static_cast<size_t>(size) * size * 4);
+        EXPECT_GT(info.points, 0u);
+        EXPECT_LE(info.points, 2ull * size * size);
+        EXPECT_NE(info.transform, RenderInfo::Transform::kNone);  // drawn in EPSG:3857
+        // Covered from edge to edge (up to the discs and the curvature of the projection), centred
+        const Extent2 e = OpaqueExtent(rgba, size);
+        EXPECT_LE(e.minX, 3) << size;
+        EXPECT_GE(e.maxX, size - 4) << size;
+        EXPECT_NEAR((e.minY + e.maxY) / 2.0, (size - 1) / 2.0, 3) << size;
+        EXPECT_GT(Opaque(rgba), static_cast<size_t>(size) * size / 2) << size;
+        // The same pixels again (deterministic)
+        std::vector<uint8_t> again;
+        RenderThumbnail(r, again);
+        EXPECT_EQ(again, rgba);
+    }
+}
+
+TEST_F(CopcTilerTest, AThumbnailReadsTheDeepestLevelsWithinItsPointBudget) {
+    CloudSpec s;
+    const std::string path = Cloud("rgb8", s);
+    ThumbnailRequest r;
+    r.path = path;
+    r.size = 256;
+    std::vector<uint8_t> rgba;
+    RenderInfo all, root, some;
+    r.pointBudget = s.points * 2;
+    RenderThumbnail(r, rgba, &all);
+    EXPECT_EQ(all.points, s.points);
+    r.pointBudget = 1;  // even the root is over budget: the root alone
+    RenderThumbnail(r, rgba, &root);
+    EXPECT_EQ(root.depthEnd, 1);
+    EXPECT_LT(root.points, s.points);
+    r.pointBudget = s.points / 2;
+    RenderThumbnail(r, rgba, &some);
+    EXPECT_LE(some.points, s.points / 2);
+    EXPECT_GT(some.points, root.points);
+    EXPECT_LT(some.depthEnd, all.depthEnd);
+}
+
+TEST_F(CopcTilerTest, ACloudWithoutACrsHasAThumbnailInItsOwnCoordinatesAndNoTiles) {
+    CloudSpec s;
+    s.wkt.clear();
+    const std::string path = Cloud("nowkt", s);
+    ThumbnailRequest r;
+    r.path = path;
+    r.size = 128;
+    std::vector<uint8_t> rgba;
+    RenderInfo info;
+    RenderThumbnail(r, rgba, &info);
+    EXPECT_EQ(info.transform, RenderInfo::Transform::kNone);
+    EXPECT_GT(Opaque(rgba), 128u * 128u / 2);
+    // The same picture as the georeferenced cloud up to the projection: a square of points
+    const Extent2 e = OpaqueExtent(rgba, 128);
+    EXPECT_LE(e.minX, 3);
+    EXPECT_GE(e.maxX, 124);
+    try {
+        Extent(path, 256);
+        ADD_FAILURE() << "an extent";
+    } catch (const ddbt::cog::tiler::TileError& err) {
+        EXPECT_EQ(std::string(err.what()), "COPC file has no WKT SRS: " + path);
+    }
+}
+
+TEST_F(CopcTilerTest, TheThumbnailApiChecksItsArgumentsAndGivesTheRgba) {
+    CloudSpec s;
+    const std::string path = Cloud("rgb8", s);
+    uint8_t* buf = nullptr;
+    int size = 0;
+    ASSERT_EQ(ddbtRenderCopcThumbnail(path.c_str(), 96, 0, &buf, &size), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_EQ(size, 96 * 96 * 4);
+    ThumbnailRequest r;
+    r.path = path;
+    r.size = 96;
+    std::vector<uint8_t> rgba;
+    RenderThumbnail(r, rgba);
+    EXPECT_TRUE(std::equal(rgba.begin(), rgba.end(), buf));
+    ddbtFree(buf);
+    buf = nullptr;
+    EXPECT_EQ(ddbtRenderCopcThumbnail(nullptr, 96, 0, &buf, &size), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtRenderCopcThumbnail(path.c_str(), 96, 0, nullptr, &size), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtRenderCopcThumbnail(path.c_str(), 0, 0, &buf, &size), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtRenderCopcThumbnail(path.c_str(), 20000, 0, &buf, &size), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtRenderCopcThumbnail((*dir_ / "missing.copc.laz").string().c_str(), 96, 0, &buf, &size),
+              DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(ddbtRenderCopcThumbnail("s3://bucket/c.copc.laz", 96, 0, &buf, &size), DDBT_ERR_NOT_IMPLEMENTED);
+    EXPECT_EQ(buf, nullptr);
+}
+
 TEST_F(CopcTilerTest, TheChunkOfAMappedNodeIsPrefetchedWhole) {
     CloudSpec s;
     const std::string path = Cloud("prefetch", s);

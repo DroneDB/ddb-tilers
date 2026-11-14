@@ -46,9 +46,9 @@ class Cloud {
 public:
     /// The shared Cloud of `path` (a file or an http(s) URL) for its current (size, mtime or version).
     /// Throws cog::tiler::TileError: kNotFound when the file does not exist, kInvalidArgs when it
-    /// is not a COPC file DroneDB can tile ("Cannot get COPC info for ...", "COPC file has no WKT
-    /// SRS: ..."), kNotImplemented for a URL without a remote reader, kException when a remote read
-    /// fails.
+    /// is not a COPC file ("Cannot get COPC info for ..."), kNotImplemented for a URL without a
+    /// remote reader, kException when a remote read fails. A cloud without a CRS opens: see
+    /// crsError().
     static std::shared_ptr<const Cloud> Get(const std::string& path);
     /// Drops every registry entry (tests; Clouds in use stay alive).
     static void ClearRegistry();
@@ -56,6 +56,9 @@ public:
     static std::shared_ptr<const Cloud> Open(const std::string& path);
 
     const std::string& path() const noexcept { return path_; }
+    /// "COPC file has no WKT SRS: <path>" for a cloud without a CRS (it has no footprint, no
+    /// transforms and no tiles; a thumbnail draws it in its own coordinates), else "".
+    const std::string& crsError() const noexcept { return crsError_; }
     const CopcFile& file() const noexcept { return *file_; }
     const std::shared_ptr<const CopcFile>& sharedFile() const noexcept { return file_; }
     const crs::Crs& crs() const noexcept { return crs_; }
@@ -103,6 +106,7 @@ private:
     static std::shared_ptr<const Cloud> OpenImpl(const std::string& path, uint64_t size);
 
     std::string path_;
+    std::string crsError_;
     std::shared_ptr<const CopcFile> file_;
     crs::Crs crs_;
     bool geocentric_ = false;

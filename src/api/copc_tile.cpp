@@ -2,11 +2,12 @@
 // The point-cloud branch of ddbtMemoryTileFmt, with DroneDB 2.4.1's argument checks and
 // messages in its order (ddb.cpp: requireText, requireBufferOutput, requireTileArgs;
 // tilerhelper.cpp: parseImageFormat; the Tiler constructor: the tile size), as tile_api.cpp does
-// for rasters.
+// for rasters; and ddbtRenderCopcThumbnail.
 #include "api/copc_tile.h"
 
 #include <cctype>
 #include <cstring>
+#include <vector>
 
 #include "api/api_common.h"
 #include "cog/tiler/tile_error.h"
@@ -54,3 +55,24 @@ ddbtErr CopcMemoryTile(const char* inputPath, int tz, int tx, int ty, uint8_t** 
 }
 
 }  // namespace ddbt::api
+
+extern "C" ddbtErr ddbtRenderCopcThumbnail(const char* inputPath, int size, uint64_t pointBudget, uint8_t** outRgba,
+                                           int* outRgbaSize) {
+    using namespace ddbt::api;
+    return GuardedBuffer(outRgba, outRgbaSize, [&] {
+        using ddbt::cog::tiler::FailInvalid;
+        if (NullOrBlank(inputPath)) FailInvalid("No input path provided");
+        if (outRgba == nullptr) FailInvalid("Output buffer pointer is null");
+        if (outRgbaSize == nullptr) FailInvalid("Output buffer size pointer is null");
+        ddbt::copc::tiler::ThumbnailRequest r;
+        r.path = inputPath;
+        RequireLocalOrUrl(r.path);
+        r.size = size;
+        r.pointBudget = pointBudget;
+        std::vector<uint8_t> rgba;
+        ddbt::copc::tiler::RenderThumbnail(r, rgba);
+        ddbt::encode::ByteBuffer out;
+        out.assign(rgba.data(), rgba.size());
+        return out;
+    });
+}

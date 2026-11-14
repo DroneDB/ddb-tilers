@@ -312,11 +312,6 @@ std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t s
     c->file_ = std::move(file).value();
     const las::LasHeader& h = c->file_->header();
 
-    auto cr = c->file_->Crs();
-    if (!cr.ok() || !cr->Valid()) throw TileError(TileErrorCode::kInvalidArgs, "COPC file has no WKT SRS: " + path);
-    c->crs_ = std::move(cr).value();
-    c->geocentric_ = c->crs_.IsGeocentric();
-
     for (int a = 0; a < 3; ++a) {
         c->scaling_.scale[a] = h.scale[static_cast<size_t>(a)];
         c->scaling_.offset[a] = h.offset[static_cast<size_t>(a)];
@@ -332,6 +327,16 @@ std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t s
                                                                       std::string(c16.status().message()));
         c->color16_ = *c16;
     }
+
+    // A cloud without a CRS opens (a thumbnail draws it in its own coordinates); it has no
+    // footprint, and its tiles are refused with the reason (tilingError).
+    auto cr = c->file_->Crs();
+    if (!cr.ok() || !cr->Valid()) {
+        c->crsError_ = "COPC file has no WKT SRS: " + path;
+        return c;
+    }
+    c->crs_ = std::move(cr).value();
+    c->geocentric_ = c->crs_.IsGeocentric();
 
     const crs::Crs merc = crs::Crs::FromEpsg(3857);
 
