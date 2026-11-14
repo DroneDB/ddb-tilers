@@ -11,7 +11,7 @@ less memory, and output that does not depend on the number of threads. The outpu
 DroneDB's: the same COG grid, codecs and statistics sidecar, the same tile coordinates and
 pixels, so a tile server can switch between the two and compare them.
 
-Status: version 0.5.0, under active development. The C API is not stable yet.
+Status: version 0.5.1, under active development. The C API is not stable yet.
 
 ## What it does
 
