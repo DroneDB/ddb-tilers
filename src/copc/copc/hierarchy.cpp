@@ -147,6 +147,7 @@ Expected<std::unique_ptr<Page>> ReadPage(const io::ByteSource& source, const Nod
                        std::to_string(size));
     std::span<const uint8_t> view = source.View(offset, static_cast<size_t>(size));
     std::vector<uint8_t> owned;
+    if (!view.empty()) source.Prefetch(offset, size);  // one read of a cold page (see NodeChunk)
     if (view.empty() && size > 0) {
         owned.resize(static_cast<size_t>(size));
         DDBT_TRY(source.Read(offset, owned));

@@ -30,6 +30,7 @@
 #include "copc/tiler/kernels.h"
 #include "copc/tiler/rasterizer.h"
 #include "core/crs/transform.h"
+#include "core/io/io_stats.h"
 #include "core/tile/compat.h"
 #include "core/util/last_error.h"
 #include "synth_cloud.h"
@@ -740,6 +741,29 @@ TEST_F(CopcTilerTest, AnyZoomInRangeIsAcceptedAndEmptyTilesAreBlankBytes) {
             const auto& blank = ddbt::encode::BlankTileBytes(256, 256, 3, o);
             EXPECT_EQ(std::vector<uint8_t>(bytes.data(), bytes.data() + bytes.size()), blank);
         }
+    }
+}
+
+// The chunk of a node of a mapped file is asked for whole before it is decoded: a cold node is then
+// read in one go, not 4 KiB at a time on the decoder's page faults (the mapping is advised random)
+TEST_F(CopcTilerTest, TheChunkOfAMappedNodeIsPrefetchedWhole) {
+    CloudSpec s;
+    const std::string path = Cloud("prefetch", s);
+    ddbt::copc::CopcOpenOptions options;
+    options.sourceKind = ddbt::io::SourceKind::kMmap;
+    auto file = ddbt::copc::CopcFile::Open(path, options);
+    ASSERT_TRUE(file.ok()) << file.status().message();
+    ASSERT_NE((*file)->source().Data(), nullptr);
+    auto all = (*file)->hierarchy().All();
+    ASSERT_TRUE(all.ok());
+    ASSERT_FALSE(all->nodes.empty());
+    std::vector<uint8_t> scratch;
+    for (const auto* node : all->nodes) {
+        const uint64_t before = ddbt::io::IoStats::Snapshot().prefetches;
+        auto chunk = ddbt::copc::NodeChunk(**file, *node, scratch);
+        ASSERT_TRUE(chunk.ok());
+        EXPECT_EQ(chunk->size(), static_cast<size_t>(node->byteSize));
+        EXPECT_GE(ddbt::io::IoStats::Snapshot().prefetches, before + 1);
     }
 }
 

@@ -28,7 +28,14 @@ Expected<std::span<const uint8_t>> NodeChunk(const CopcFile& file, const Hierarc
         return Corrupt(NodeName(node) + ": chunk range outside the file");
     const size_t size = static_cast<size_t>(node.byteSize);
     std::span<const uint8_t> view = src.View(node.offset, size);
-    if (!view.empty() || size == 0) return view;
+    if (!view.empty()) {
+        // A mapped file is read on the decoder's page faults: one read of 4 KiB each when the
+        // pages are not in memory (the mapping is advised random). The whole chunk is asked for
+        // first, so a cold node is read in one go.
+        src.Prefetch(node.offset, size);
+        return view;
+    }
+    if (size == 0) return view;
     scratch.resize(size);
     DDBT_TRY(src.Read(node.offset, scratch));
     return std::span<const uint8_t>(scratch);
