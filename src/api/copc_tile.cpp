@@ -42,7 +42,7 @@ ddbtErr CopcMemoryTile(const char* inputPath, int tz, int tx, int ty, uint8_t** 
         if (tileSize <= 0 || (tileSize & (tileSize - 1)) != 0)
             FailInvalid("Tile size must be a power of 2 greater than 0");
         r.path = inputPath;
-        RequireLocal(r.path);
+        RequireLocalOrUrl(r.path);
         r.z = tz;
         r.x = tx;
         r.y = ty;

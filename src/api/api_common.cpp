@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <system_error>
 
+#include "core/io/remote_source.h"
 #include "core/util/last_error.h"
 
 namespace ddbt::api {
@@ -67,7 +68,9 @@ encode::TileFormat ParseFormat(const char* outputFormat) {
     return *parsed;
 }
 
-void RequireLocal(const std::string& path) {
+namespace {
+
+bool IsRemote(const std::string& path) {
     const auto starts = [&](const char* p) {
         const size_t n = std::strlen(p);
         if (path.size() < n) return false;
@@ -75,9 +78,21 @@ void RequireLocal(const std::string& path) {
             if (std::tolower(static_cast<unsigned char>(path[i])) != p[i]) return false;
         return true;
     };
-    if (starts("http://") || starts("https://") || starts("s3://") || starts("/vsi"))
-        throw cog::tiler::TileError(cog::tiler::TileErrorCode::kNotImplemented,
-                                    "Remote inputs are not supported yet: " + path);
+    return starts("http://") || starts("https://") || starts("s3://") || starts("/vsi");
+}
+
+[[noreturn]] void FailRemote(const std::string& path) {
+    throw cog::tiler::TileError(cog::tiler::TileErrorCode::kNotImplemented, "Remote inputs are not supported yet: " + path);
+}
+
+}  // namespace
+
+void RequireLocal(const std::string& path) {
+    if (IsRemote(path)) FailRemote(path);
+}
+
+void RequireLocalOrUrl(const std::string& path) {
+    if (IsRemote(path) && !io::IsRemotePath(path)) FailRemote(path);
 }
 
 }  // namespace ddbt::api

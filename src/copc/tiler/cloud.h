@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 //
 // Cloud: one COPC file as the tiler sees it, immutable and shared by every request for the same
-// (path, size, mtime). Cloud::Get() looks it up in a process-wide registry (one stat() per call;
-// a changed file gets a new Cloud, and its CopcFile a new id, so the node cache never serves the
+// (path, size, mtime), or (URL, size, version) for a remote file read through the host's remote
+// reader (io/remote_source.h). Cloud::Get() looks it up in a process-wide registry (one stat per
+// call; a changed file gets a new Cloud, and its CopcFile a new id, so the node cache never serves the
 // old nodes; the old Cloud lives on while requests hold it). Concurrent first requests open the
 // file once.
 //
@@ -43,9 +44,11 @@ struct Rect {
 
 class Cloud {
 public:
-    /// The shared Cloud of `path` for its current (size, mtime). Throws cog::tiler::TileError:
-    /// kNotFound when the file does not exist, kInvalidArgs when it is not a COPC file DroneDB
-    /// can tile ("Cannot get COPC info for ...", "COPC file has no WKT SRS: ...").
+    /// The shared Cloud of `path` (a file or an http(s) URL) for its current (size, mtime or version).
+    /// Throws cog::tiler::TileError: kNotFound when the file does not exist, kInvalidArgs when it
+    /// is not a COPC file DroneDB can tile ("Cannot get COPC info for ...", "COPC file has no WKT
+    /// SRS: ..."), kNotImplemented for a URL without a remote reader, kException when a remote read
+    /// fails.
     static std::shared_ptr<const Cloud> Get(const std::string& path);
     /// Drops every registry entry (tests; Clouds in use stay alive).
     static void ClearRegistry();
@@ -96,11 +99,9 @@ public:
 
 private:
     Cloud() = default;
-    static std::shared_ptr<const Cloud> OpenImpl(const std::string& path, uint64_t size, int64_t mtimeNs);
+    static std::shared_ptr<const Cloud> OpenImpl(const std::string& path, uint64_t size);
 
     std::string path_;
-    uint64_t size_ = 0;
-    int64_t mtimeNs_ = 0;
     std::shared_ptr<const CopcFile> file_;
     crs::Crs crs_;
     bool geocentric_ = false;

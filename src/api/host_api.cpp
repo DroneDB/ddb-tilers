@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
 // The exports a host library uses to run ddbt inside itself: ddbtConfigure (process-wide
 // settings the host owns: where proj.db is, threads, cache budgets, the COPC tile mode and build
-// memory) and ddbtTileInfo (the bounds and zoom range of an input, which the host's tilers expose).
+// memory), ddbtTileInfo (the bounds and zoom range of an input, which the host's tilers expose),
+// ddbtReleaseSources and ddbtSetRemoteReader (the host's range reads of remote inputs).
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <optional>
 #include <string>
 
@@ -18,6 +21,8 @@
 #include "copc/tiler/copc_tiler.h"
 #include "core/crs/crs.h"
 #include "core/exec/thread_pool.h"
+#include "core/io/remote_source.h"
+#include "core/util/status.h"
 #include "ddbt/ddbt.h"
 
 namespace {
@@ -70,6 +75,43 @@ std::string Parse(const char* text, Config& c) {
 
 size_t Bytes(uint64_t mib) { return static_cast<size_t>(mib << 20); }
 
+// A host callback's code and reason as a Status of the remote reader.
+ddbt::Status CallbackStatus(ddbtErr code, const char* error, const std::string& what) {
+    if (code == DDBT_ERR_NONE) return ddbt::Status::Ok();
+    std::string message = what + ": " + (error[0] != '\0' ? error : "the host's remote reader failed");
+    switch (code) {
+        case DDBT_ERR_NOTFOUND: return ddbt::NotFound(std::move(message));
+        case DDBT_ERR_CANCELED: return ddbt::Cancelled(std::move(message));
+        default: return ddbt::IoError(std::move(message));
+    }
+}
+
+// The host's reader as the callbacks of io::RemoteReader.
+std::shared_ptr<const ddbt::io::RemoteReader> AdaptReader(const ddbtRemoteReader& host) {
+    constexpr size_t kErrorSize = 512;
+    constexpr size_t kVersionSize = 256;
+    auto reader = std::make_shared<ddbt::io::RemoteReader>();
+    reader->stat = [host](const std::string& url, ddbt::io::RemoteStat& out) {
+        char error[kErrorSize] = {};
+        char version[kVersionSize] = {};
+        uint64_t size = 0;
+        const ddbtErr code = host.stat(url.c_str(), &size, version, kVersionSize, error, kErrorSize, host.userData);
+        error[kErrorSize - 1] = '\0';
+        version[kVersionSize - 1] = '\0';
+        if (code != DDBT_ERR_NONE) return CallbackStatus(code, error, "Cannot stat " + url);
+        out.size = size;
+        out.version = version;
+        return ddbt::Status::Ok();
+    };
+    reader->read = [host](const std::string& url, uint64_t offset, std::span<uint8_t> out) {
+        char error[kErrorSize] = {};
+        const ddbtErr code = host.read(url.c_str(), offset, out.data(), out.size(), error, kErrorSize, host.userData);
+        error[kErrorSize - 1] = '\0';
+        return CallbackStatus(code, error, "Cannot read " + url);
+    };
+    return reader;
+}
+
 }  // namespace
 
 extern "C" {
@@ -101,13 +143,31 @@ ddbtErr ddbtReleaseSources(void) {
     });
 }
 
+ddbtErr ddbtSetRemoteReader(const ddbtRemoteReader* reader) {
+    return GuardedCall([&]() -> ddbtErr {
+        if (reader == nullptr) {
+            ddbt::io::SetRemoteReader(nullptr);
+            return DDBT_ERR_NONE;
+        }
+        if (reader->structSize < sizeof(ddbtRemoteReader))
+            return Fail(DDBT_ERR_INVALIDARGS, "Invalid remote reader: structSize is too small");
+        if (reader->stat == nullptr || reader->read == nullptr)
+            return Fail(DDBT_ERR_INVALIDARGS, "Invalid remote reader: a callback is NULL");
+        ddbt::io::SetRemoteReader(AdaptReader(*reader));
+        return DDBT_ERR_NONE;
+    });
+}
+
 ddbtErr ddbtTileInfo(const char* inputPath, int tileSize, char** outJson) {
     return GuardedCall([&]() -> ddbtErr {
         if (ddbt::api::NullOrBlank(inputPath)) return Fail(DDBT_ERR_INVALIDARGS, "No input path provided");
         if (outJson == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid outJson: NULL");
         const std::string path(inputPath);
-        ddbt::api::RequireLocal(path);
         const bool pointCloud = ddbt::api::IsCopcPath(inputPath);
+        if (pointCloud)
+            ddbt::api::RequireLocalOrUrl(path);
+        else
+            ddbt::api::RequireLocal(path);
         const ddbt::tile::compat::TileExtent e =
             pointCloud ? ddbt::copc::tiler::Extent(path, tileSize) : ddbt::cog::tiler::Extent(path, tileSize);
         json::Value j = json::Object();

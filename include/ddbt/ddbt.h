@@ -14,6 +14,7 @@
 #define DDBT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #if defined(_WIN32)
@@ -63,7 +64,8 @@ DDBT_API const char *ddbtLastError(void);
  * Inputs: a GeoTIFF / COG is tiled in place (directly when it is in EPSG:3857, else on the grid of
  * the EPSG:3857 COG DroneDB would build for it); a COPC point cloud (a name ending in ".copc.laz")
  * is tiled by the point-cloud tiler. Other rasters need a conversion to a COG first, which ddbt
- * does not do yet: DDBT_ERR_NOT_IMPLEMENTED (so do remote URLs).
+ * does not do yet: DDBT_ERR_NOT_IMPLEMENTED (so do remote URLs, but a COPC at an http(s) URL with
+ * a remote reader: ddbtSetRemoteReader).
  * Codes: DDBT_ERR_INVALIDARGS for a bad argument (no path, NULL outputs, negative coordinates or
  * tile size, a tile size that is not a power of two, an unknown format), DDBT_ERR_NOTFOUND when
  * the input does not exist, DDBT_ERR_EXCEPTION otherwise (libddb 2.4.1's DDBMemoryTileFmt, a 1.x
@@ -195,6 +197,31 @@ DDBT_API ddbtErr ddbtTileInfo(const char *inputPath, int tileSize, char **outJso
  * call returns; the next tile of a file opens it again. The decoded-block, node and encoded-tile
  * caches are kept: their entries belong to a file version and stay valid. */
 DDBT_API ddbtErr ddbtReleaseSources(void);
+
+/** Range reads of remote inputs, done by the host (with its HTTP client, proxy, certificates and
+ * credentials): the point-cloud tiler (ddbtMemoryTileFmt, ddbtTileInfo) reads a COPC at an
+ * http:// or https:// URL through them. Without a reader such a URL is DDBT_ERR_NOT_IMPLEMENTED.
+ * Both callbacks may run concurrently on several threads, also after ddbtSetRemoteReader replaced
+ * the reader for the calls that started before. They return DDBT_ERR_NONE, DDBT_ERR_NOTFOUND when
+ * the object does not exist, or another code; on an error they may write a NUL-terminated reason
+ * (truncated to errorSize bytes) into error.
+ *   stat: the size of the object and its version (an ETag or Last-Modified value, "" when the
+ *         server gives none; NUL-terminated, at most versionSize bytes with the NUL). Called once
+ *         per tile: a new size or version opens the object again.
+ *   read: exactly size bytes at offset into buffer. */
+typedef struct ddbtRemoteReader
+{
+    uint32_t structSize; /* sizeof(ddbtRemoteReader) */
+    ddbtErr (*stat)(const char *url, uint64_t *outSize, char *version, size_t versionSize, char *error,
+                    size_t errorSize, void *userData);
+    ddbtErr (*read)(const char *url, uint64_t offset, uint8_t *buffer, size_t size, char *error, size_t errorSize,
+                    void *userData);
+    void *userData;
+} ddbtRemoteReader;
+
+/** Sets the remote reader of the process (its fields are copied), or removes it (NULL).
+ * @return DDBT_ERR_INVALIDARGS when structSize is too small or a callback is NULL */
+DDBT_API ddbtErr ddbtSetRemoteReader(const ddbtRemoteReader *reader);
 
 /** Information about the build and the CPU dispatch, as a JSON object (Highway targets
  * compiled in, supported by this CPU, and the one selected at runtime).

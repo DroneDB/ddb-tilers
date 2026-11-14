@@ -2,8 +2,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -309,6 +312,144 @@ TEST(HostApi, TileInfoOfAPointCloudFollowsTheMode) {
         ddbtFree(buf);
     }
     ddbt::copc::tiler::SetMode(mode);
+    std::filesystem::remove_all(dir);
+}
+
+namespace {
+// A remote reader over local files: the URL https://host.test/<name> is the file <dir>/<name>.
+struct FakeRemote {
+    std::filesystem::path dir;
+    std::string version = "v1";
+    ddbtErr statCode = DDBT_ERR_NONE;
+    ddbtErr readCode = DDBT_ERR_NONE;
+    std::atomic<int> headerReads{0};
+    std::atomic<int> reads{0};
+
+    std::filesystem::path FileOf(const char* url) const {
+        const std::string u(url);
+        return dir / u.substr(u.rfind('/') + 1);
+    }
+    static void Say(char* error, size_t errorSize, const char* text) {
+        std::snprintf(error, errorSize, "%s", text);
+    }
+    static ddbtErr Stat(const char* url, uint64_t* outSize, char* version, size_t versionSize, char* error,
+                        size_t errorSize, void* user) {
+        auto& self = *static_cast<FakeRemote*>(user);
+        if (self.statCode != DDBT_ERR_NONE) {
+            Say(error, errorSize, "HTTP 404");
+            return self.statCode;
+        }
+        std::error_code ec;
+        *outSize = std::filesystem::file_size(self.FileOf(url), ec);
+        if (ec) return DDBT_ERR_NOTFOUND;
+        std::snprintf(version, versionSize, "%s", self.version.c_str());
+        return DDBT_ERR_NONE;
+    }
+    static ddbtErr Read(const char* url, uint64_t offset, uint8_t* buffer, size_t size, char* error,
+                        size_t errorSize, void* user) {
+        auto& self = *static_cast<FakeRemote*>(user);
+        ++self.reads;
+        if (offset == 0) ++self.headerReads;
+        if (self.readCode != DDBT_ERR_NONE) {
+            Say(error, errorSize, "connection reset");
+            return self.readCode;
+        }
+        std::ifstream in(self.FileOf(url), std::ios::binary);
+        in.seekg(static_cast<std::streamoff>(offset));
+        in.read(reinterpret_cast<char*>(buffer), static_cast<std::streamsize>(size));
+        return in.gcount() == static_cast<std::streamsize>(size) ? DDBT_ERR_NONE : DDBT_ERR_EXCEPTION;
+    }
+    ddbtRemoteReader Reader() {
+        return ddbtRemoteReader{sizeof(ddbtRemoteReader), &FakeRemote::Stat, &FakeRemote::Read, this};
+    }
+};
+
+std::vector<uint8_t> TileBytes(const std::string& input, int z, int x, int y) {
+    uint8_t* buf = nullptr;
+    int size = 0;
+    if (ddbtMemoryTileFmt(input.c_str(), z, x, y, &buf, &size, 256, false, true, nullptr, "png") != DDBT_ERR_NONE)
+        return {};
+    std::vector<uint8_t> bytes(buf, buf + size);
+    ddbtFree(buf);
+    return bytes;
+}
+}  // namespace
+
+TEST(HostApi, ARemotePointCloudIsReadThroughTheHostsRemoteReader) {
+    namespace syn = ddbt::copc::tiler::test;
+    const auto dir = ApiScratch("remote-cloud");
+    syn::CloudSpec spec;
+    spec.points = 4000;
+    const std::string local = syn::WriteCloud(dir, "c", spec);
+    const std::string name = std::filesystem::path(local).filename().string();
+    const std::string url = "https://host.test/" + name;
+    char* out = nullptr;
+    uint8_t* buf = nullptr;
+    int size = 0;
+
+    // No reader: not implemented, as before
+    ASSERT_EQ(ddbtSetRemoteReader(nullptr), DDBT_ERR_NONE);
+    EXPECT_EQ(ddbtTileInfo(url.c_str(), 256, &out), DDBT_ERR_NOT_IMPLEMENTED);
+    EXPECT_EQ(ddbtMemoryTileFmt(url.c_str(), 0, 0, 0, &buf, &size, 256, false, true, nullptr, "png"),
+              DDBT_ERR_NOT_IMPLEMENTED);
+
+    FakeRemote remote;
+    remote.dir = dir;
+    const ddbtRemoteReader reader = remote.Reader();
+    ASSERT_EQ(ddbtSetRemoteReader(&reader), DDBT_ERR_NONE) << ddbtLastError();
+
+    // The bounds, the zooms and the tiles of the local file
+    const json::Value v = TileInfoOf(url, 256);
+    const json::Value l = TileInfoOf(local, 256);
+    for (const char* k : {"minX", "minY", "maxX", "maxY", "minZoom", "maxZoom"}) EXPECT_EQ(Num(v, k), Num(l, k)) << k;
+    const ddbt::tile::compat::GlobalMercator merc(256);
+    const int z = static_cast<int>(Num(v, "maxZoom"));
+    const auto range = ddbt::tile::compat::MinMaxCoordsForZ(merc, Num(v, "minX"), Num(v, "minY"), Num(v, "maxX"),
+                                                            Num(v, "maxY"), z);
+    for (int x = static_cast<int>(range.min.x); x <= static_cast<int>(range.max.x); ++x)
+        for (int y = static_cast<int>(range.min.y); y <= static_cast<int>(range.max.y); ++y) {
+            const auto remoteTile = TileBytes(url, z, x, y);
+            ASSERT_FALSE(remoteTile.empty()) << ddbtLastError();
+            EXPECT_EQ(remoteTile, TileBytes(local, z, x, y)) << z << "/" << x << "/" << y;
+        }
+
+    // An unchanged object is not opened again; another version is
+    const int headers = remote.headerReads.load();
+    EXPECT_GE(headers, 1);
+    TileBytes(url, z, static_cast<int>(range.min.x), static_cast<int>(range.min.y));
+    EXPECT_EQ(remote.headerReads.load(), headers);
+    remote.version = "v2";
+    EXPECT_FALSE(TileBytes(url, z, static_cast<int>(range.min.x), static_cast<int>(range.min.y)).empty());
+    EXPECT_EQ(remote.headerReads.load(), headers + 1);
+
+    // The host's codes and reasons
+    EXPECT_EQ(ddbtTileInfo("https://host.test/missing.copc.laz", 256, &out), DDBT_ERR_NOTFOUND);
+    remote.statCode = DDBT_ERR_EXCEPTION;
+    EXPECT_EQ(ddbtTileInfo(url.c_str(), 256, &out), DDBT_ERR_EXCEPTION);
+    EXPECT_NE(std::string(ddbtLastError()).find("HTTP 404"), std::string::npos) << ddbtLastError();
+    remote.statCode = DDBT_ERR_NONE;
+    remote.version = "v3";
+    remote.readCode = DDBT_ERR_EXCEPTION;
+    EXPECT_EQ(ddbtTileInfo(url.c_str(), 256, &out), DDBT_ERR_EXCEPTION);
+    EXPECT_NE(std::string(ddbtLastError()).find("connection reset"), std::string::npos) << ddbtLastError();
+    remote.readCode = DDBT_ERR_NONE;
+
+    // Only http(s) URLs go to the reader, and rasters are not read remotely
+    EXPECT_EQ(ddbtTileInfo("s3://bucket/c.copc.laz", 256, &out), DDBT_ERR_NOT_IMPLEMENTED);
+    EXPECT_EQ(ddbtTileInfo("https://host.test/r.tif", 256, &out), DDBT_ERR_NOT_IMPLEMENTED);
+    EXPECT_EQ(out, nullptr);
+
+    // Bad readers change nothing
+    ddbtRemoteReader bad = reader;
+    bad.read = nullptr;
+    EXPECT_EQ(ddbtSetRemoteReader(&bad), DDBT_ERR_INVALIDARGS);
+    bad = reader;
+    bad.structSize = 4;
+    EXPECT_EQ(ddbtSetRemoteReader(&bad), DDBT_ERR_INVALIDARGS);
+    EXPECT_FALSE(TileBytes(url, z, static_cast<int>(range.min.x), static_cast<int>(range.min.y)).empty());
+
+    ASSERT_EQ(ddbtSetRemoteReader(nullptr), DDBT_ERR_NONE);
+    ASSERT_EQ(ddbtReleaseSources(), DDBT_ERR_NONE);
     std::filesystem::remove_all(dir);
 }
 

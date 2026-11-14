@@ -47,6 +47,10 @@ encode::TileFormat ParseFormat(const char* outputFormat);
 /// Throws TileError (kNotImplemented) for a remote path (http, https, s3, GDAL /vsi).
 void RequireLocal(const std::string& path);
 
+/// The inputs of the point-cloud tiler: a local file, or an http(s) URL read through the remote
+/// reader (ddbtSetRemoteReader). Throws TileError (kNotImplemented) for the other remote paths.
+void RequireLocalOrUrl(const std::string& path);
+
 /// Clears the last error and runs body(), which returns a ddbtErr. Exceptions become codes and
 /// the last error: TileError by its code, bad_alloc "Out of memory", anything else
 /// DDBT_ERR_EXCEPTION.

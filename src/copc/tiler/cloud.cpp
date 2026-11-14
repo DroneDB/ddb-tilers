@@ -14,7 +14,10 @@
 #include <vector>
 
 #include "cog/tiler/tile_error.h"
+#include "core/io/byte_source.h"
+#include "core/io/remote_source.h"
 #include "core/tile/compat.h"
+#include "core/util/status.h"
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -110,29 +113,64 @@ std::optional<std::string_view> TopLevelArrayElement(std::string_view json, std:
 
 // ---------------------------------------------------------------------------------------------
 
+// The identity of an input when a request comes: a changed file (or remote object) gets a new
+// Cloud. A local file is its size and modification time, a URL its size and the version the host's
+// remote reader gives.
 struct FileStat {
     bool exists = false;
     uint64_t size = 0;
-    int64_t mtimeNs = 0;
+    std::string version;
 };
 
-FileStat StatFile(const std::string& path) {
+FileStat StatLocal(const std::string& path) {
     FileStat st;
+    int64_t mtimeNs = 0;
 #ifndef _WIN32
     struct stat s {};
     if (::stat(path.c_str(), &s) != 0 || !S_ISREG(s.st_mode)) return st;
-    st.exists = true;
     st.size = static_cast<uint64_t>(s.st_size);
-    st.mtimeNs = static_cast<int64_t>(s.st_mtim.tv_sec) * 1000000000 + s.st_mtim.tv_nsec;
+    mtimeNs = static_cast<int64_t>(s.st_mtim.tv_sec) * 1000000000 + s.st_mtim.tv_nsec;
 #else
     std::error_code ec;
     const std::filesystem::path p = std::filesystem::u8path(path);
     if (!std::filesystem::is_regular_file(p, ec)) return st;
-    st.exists = true;
     st.size = std::filesystem::file_size(p, ec);
-    st.mtimeNs = std::filesystem::last_write_time(p, ec).time_since_epoch().count();
+    mtimeNs = std::filesystem::last_write_time(p, ec).time_since_epoch().count();
 #endif
+    st.exists = true;
+    st.version = std::to_string(mtimeNs);
     return st;
+}
+
+[[noreturn]] void FailOpen(const std::string& path, const Status& s) {
+    const TileErrorCode code = s.code() == StatusCode::kNotFound      ? TileErrorCode::kNotFound
+                               : s.code() == StatusCode::kUnsupported ? TileErrorCode::kNotImplemented
+                                                                      : TileErrorCode::kException;
+    throw TileError(code, code == TileErrorCode::kNotFound ? path + " does not exist" : std::string(s.message()));
+}
+
+FileStat StatInput(const std::string& path) {
+    if (!io::IsRemotePath(path)) {
+        FileStat st = StatLocal(path);
+        if (!st.exists) throw TileError(TileErrorCode::kNotFound, path + " does not exist");
+        return st;
+    }
+    auto remote = io::StatRemote(path);
+    if (!remote.ok()) FailOpen(path, remote.status());
+    return FileStat{true, remote->size, "remote:" + remote->version};
+}
+
+// The bytes of the input; nullptr when a local file cannot be opened (the caller refuses it as
+// before, "Cannot get COPC info").
+std::shared_ptr<const io::ByteSource> OpenSource(const std::string& path, uint64_t size) {
+    if (io::IsRemotePath(path)) {
+        auto source = io::OpenRemoteSource(path, size);
+        if (!source.ok()) FailOpen(path, source.status());
+        return std::move(source).value();
+    }
+    auto source = io::OpenByteSource(path);
+    if (!source.ok()) return nullptr;
+    return std::move(source).value();
 }
 
 std::string Box3Wkt(const las::LasHeader& h) {
@@ -157,7 +195,7 @@ void Grow(std::optional<Rect>& r, double x, double y) {
 
 struct Slot {
     uint64_t size = 0;
-    int64_t mtimeNs = 0;
+    std::string version;
     std::shared_future<std::shared_ptr<const Cloud>> cloud;
 };
 
@@ -211,8 +249,7 @@ double PdalOptionDouble(double v) {
 }
 
 std::shared_ptr<const Cloud> Cloud::Get(const std::string& path) {
-    const FileStat st = StatFile(path);
-    if (!st.exists) throw TileError(TileErrorCode::kNotFound, path + " does not exist");
+    const FileStat st = StatInput(path);
 
     std::shared_ptr<Slot> slot;
     std::promise<std::shared_ptr<const Cloud>> promise;
@@ -221,12 +258,12 @@ std::shared_ptr<const Cloud> Cloud::Get(const std::string& path) {
         std::lock_guard lock(RegistryMutex());
         auto& reg = Registry();
         auto it = reg.find(path);
-        if (it != reg.end() && it->second->size == st.size && it->second->mtimeNs == st.mtimeNs) {
+        if (it != reg.end() && it->second->size == st.size && it->second->version == st.version) {
             slot = it->second;
         } else {
             slot = std::make_shared<Slot>();
             slot->size = st.size;
-            slot->mtimeNs = st.mtimeNs;
+            slot->version = st.version;
             slot->cloud = promise.get_future().share();
             reg[path] = slot;
             leader = true;
@@ -235,7 +272,7 @@ std::shared_ptr<const Cloud> Cloud::Get(const std::string& path) {
     if (!leader) return slot->cloud.get();
 
     try {
-        auto cloud = OpenImpl(path, st.size, st.mtimeNs);
+        auto cloud = OpenImpl(path, st.size);
         promise.set_value(cloud);
         return cloud;
     } catch (...) {
@@ -253,20 +290,25 @@ void Cloud::ClearRegistry() {
 }
 
 std::shared_ptr<const Cloud> Cloud::Open(const std::string& path) {
-    const FileStat st = StatFile(path);
-    if (!st.exists) throw TileError(TileErrorCode::kNotFound, path + " does not exist");
-    return OpenImpl(path, st.size, st.mtimeNs);
+    return OpenImpl(path, StatInput(path).size);
 }
 
-std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t size, int64_t mtimeNs) {
+std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t size) {
     std::shared_ptr<Cloud> c(new Cloud());
     c->path_ = path;
-    c->size_ = size;
-    c->mtimeNs_ = mtimeNs;
 
     // PointCloudTiler: getCopcInfo (readers.copc's preview), then the WKT, then the footprint.
-    auto file = CopcFile::Open(path);
-    if (!file.ok()) throw TileError(TileErrorCode::kInvalidArgs, "Cannot get COPC info for " + path);
+    auto source = OpenSource(path, size);
+    if (!source) throw TileError(TileErrorCode::kInvalidArgs, "Cannot get COPC info for " + path);
+    auto file = CopcFile::Open(std::move(source));
+    if (!file.ok()) {
+        // A remote read can fail for reasons of its own (the network, the server): they are said
+        if (io::IsRemotePath(path) && file.status().code() != StatusCode::kUnsupported &&
+            file.status().code() != StatusCode::kCorrupt)
+            throw TileError(TileErrorCode::kException,
+                            "Cannot get COPC info for " + path + ": " + std::string(file.status().message()));
+        throw TileError(TileErrorCode::kInvalidArgs, "Cannot get COPC info for " + path);
+    }
     c->file_ = std::move(file).value();
     const las::LasHeader& h = c->file_->header();
 
