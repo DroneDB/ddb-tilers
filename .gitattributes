@@ -1,0 +1,3 @@
+# Test fixtures are data whose bytes the tests check (expectation tables, world files, point
+# clouds as text): never convert their line endings on checkout
+tests/fixtures/** -text
