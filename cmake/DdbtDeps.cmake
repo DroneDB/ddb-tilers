@@ -23,6 +23,7 @@ set(_ddbt_libjpeg "")
 if(_ddbt_turbojpeg STREQUAL "libjpeg-turbo::turbojpeg")
   ddbt_pick_target(_ddbt_libjpeg libjpeg-turbo::jpeg)
 endif()
+ddbt_pick_target(_ddbt_spng spng::spng_static spng::spng)
 ddbt_pick_target(_ddbt_zstd zstd::libzstd zstd::libzstd_static zstd::libzstd_shared)
 
 add_library(ddbt_deps INTERFACE)
@@ -34,6 +35,8 @@ target_link_libraries(ddbt_deps INTERFACE
   ${_ddbt_libjpeg}
   WebP::webp
   WebP::sharpyuv
+  ${_ddbt_spng}
+  GIF::GIF
   ${_ddbt_zstd}
   openjp2
   unofficial::Lerc::Lerc

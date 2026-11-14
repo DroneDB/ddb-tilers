@@ -1,0 +1,152 @@
+size	dng_fc220_preview.dng	160	120	3	Byte
+band	dng_fc220_preview.dng	1	Red	-	dd1c3ce9
+band	dng_fc220_preview.dng	2	Green	-	67e7f391
+band	dng_fc220_preview.dng	3	Blue	-	82a25812
+size	gdal_12bit_rose_extract.jpg	50	50	1	UInt16
+band	gdal_12bit_rose_extract.jpg	1	Gray	12	c4e7dba2
+size	gdal_bug407.gif	400	400	1	Byte
+band	gdal_bug407.gif	1	Palette	-	b39fa72d
+ct	gdal_bug407.gif	16	ab7edd66
+size	gdal_byte_corrupted.jpg	20	20	1	Byte
+band	gdal_byte_corrupted.jpg	1	Gray	-	8e24c513
+refused	gdal_byte_corrupted2.jpg
+size	gdal_byte_lossless.jpg	20	20	1	Byte
+band	gdal_byte_lossless.jpg	1	Gray	-	d4057158
+refused	gdal_idat_broken.png
+size	gdal_masked.jpg	512	512	3	Byte
+band	gdal_masked.jpg	1	Red	-	09417fb9
+band	gdal_masked.jpg	2	Green	-	3dd0db6f
+band	gdal_masked.jpg	3	Blue	-	9dfb3d64
+mask	gdal_masked.jpg	6301d325
+size	gdal_rgb_ntf_cmyk.jpg	50	50	3	Byte
+band	gdal_rgb_ntf_cmyk.jpg	1	Red	-	67142d45
+band	gdal_rgb_ntf_cmyk.jpg	2	Green	-	55f629fd
+band	gdal_rgb_ntf_cmyk.jpg	3	Blue	-	bbeda869
+size	gdal_rgba16.png	20	20	4	UInt16
+band	gdal_rgba16.png	1	Red	-	72ea908a
+band	gdal_rgba16.png	2	Green	-	801bc1eb
+band	gdal_rgba16.png	3	Blue	-	340b7d2e
+band	gdal_rgba16.png	4	Alpha	-	32024c02
+size	gdal_rgbsmall.webp	50	50	3	Byte
+band	gdal_rgbsmall.webp	1	Red	-	3868feaf
+band	gdal_rgbsmall.webp	2	Green	-	2a54b4da
+band	gdal_rgbsmall.webp	3	Blue	-	1b6ad295
+size	gdal_tbbn2c16.png	32	32	3	UInt16
+band	gdal_tbbn2c16.png	1	Red	-	79b36817
+nodata	gdal_tbbn2c16.png	1	32639
+band	gdal_tbbn2c16.png	2	Green	-	826e876b
+nodata	gdal_tbbn2c16.png	2	32639
+band	gdal_tbbn2c16.png	3	Blue	-	ed4d44f5
+nodata	gdal_tbbn2c16.png	3	32639
+size	gdal_uint16_interlaced.png	20	20	1	UInt16
+band	gdal_uint16_interlaced.png	1	Gray	-	effa4880
+refused	gdal_uint16_lossless.jpg
+size	geo_photo.jpg	320	240	3	Byte
+band	geo_photo.jpg	1	Red	-	9c4a06ee
+band	geo_photo.jpg	2	Green	-	00be654f
+band	geo_photo.jpg	3	Blue	-	4f6d9647
+size	gif_interlaced.gif	65	41	1	Byte
+band	gif_interlaced.gif	1	Palette	-	47534a3f
+ct	gif_interlaced.gif	128	9da83c0f
+size	gif_plain.gif	65	41	1	Byte
+band	gif_plain.gif	1	Palette	-	47534a3f
+ct	gif_plain.gif	128	9da83c0f
+size	gif_transparent.gif	65	41	1	Byte
+band	gif_transparent.gif	1	Palette	-	47534a3f
+nodata	gif_transparent.gif	1	8
+ct	gif_transparent.gif	128	9da83c0f
+size	jpeg_422.jpg	65	41	3	Byte
+band	jpeg_422.jpg	1	Red	-	9ce512a5
+band	jpeg_422.jpg	2	Green	-	7e4c001c
+band	jpeg_422.jpg	3	Blue	-	9da9a0a2
+size	jpeg_444.jpg	65	41	3	Byte
+band	jpeg_444.jpg	1	Red	-	db14e554
+band	jpeg_444.jpg	2	Green	-	753251e4
+band	jpeg_444.jpg	3	Blue	-	6b56d479
+size	jpeg_baseline_420.jpg	65	41	3	Byte
+band	jpeg_baseline_420.jpg	1	Red	-	256c0b15
+band	jpeg_baseline_420.jpg	2	Green	-	78497191
+band	jpeg_baseline_420.jpg	3	Blue	-	ad56f1e6
+size	jpeg_cmyk.jpg	65	41	3	Byte
+band	jpeg_cmyk.jpg	1	Red	-	73a155c9
+band	jpeg_cmyk.jpg	2	Green	-	1db542c8
+band	jpeg_cmyk.jpg	3	Blue	-	8bb001bb
+size	jpeg_exif_orientation6.jpg	65	41	3	Byte
+band	jpeg_exif_orientation6.jpg	1	Red	-	256c0b15
+band	jpeg_exif_orientation6.jpg	2	Green	-	78497191
+band	jpeg_exif_orientation6.jpg	3	Blue	-	ad56f1e6
+size	jpeg_gray.jpg	65	41	1	Byte
+band	jpeg_gray.jpg	1	Gray	-	b5a1e694
+size	jpeg_optimized.jpg	65	41	3	Byte
+band	jpeg_optimized.jpg	1	Red	-	f026c46d
+band	jpeg_optimized.jpg	2	Green	-	e8b1c30b
+band	jpeg_optimized.jpg	3	Blue	-	64d65e78
+size	jpeg_progressive.jpg	65	41	3	Byte
+band	jpeg_progressive.jpg	1	Red	-	0b2d93d5
+band	jpeg_progressive.jpg	2	Green	-	cd91f9ee
+band	jpeg_progressive.jpg	3	Blue	-	e1a85253
+refused	jpeg_truncated.jpg
+size	png_1bit.png	65	41	1	Byte
+band	png_1bit.png	1	Gray	1	f08c93ec
+size	png_gray.png	65	41	1	Byte
+band	png_gray.png	1	Gray	-	415cb643
+size	png_gray16.png	65	41	1	UInt16
+band	png_gray16.png	1	Gray	-	37734559
+size	png_gray_alpha.png	65	41	2	Byte
+band	png_gray_alpha.png	1	Gray	-	415cb643
+band	png_gray_alpha.png	2	Alpha	-	a701c016
+size	png_gray_trns.png	65	41	1	Byte
+band	png_gray_trns.png	1	Gray	-	415cb643
+nodata	png_gray_trns.png	1	21
+size	png_palette_4bit.png	65	41	1	Byte
+band	png_palette_4bit.png	1	Palette	4	ffbc0a7f
+ct	png_palette_4bit.png	16	d01608bc
+size	png_palette_alpha.png	65	41	1	Byte
+band	png_palette_alpha.png	1	Palette	-	cf4655fb
+ct	png_palette_alpha.png	64	dd1ff4b9
+size	png_palette_trns.png	65	41	1	Byte
+band	png_palette_trns.png	1	Palette	-	cf4655fb
+nodata	png_palette_trns.png	1	5
+ct	png_palette_trns.png	64	dd1ff4b9
+size	png_rgb.png	65	41	3	Byte
+band	png_rgb.png	1	Red	-	7e05b26e
+band	png_rgb.png	2	Green	-	eee569ba
+band	png_rgb.png	3	Blue	-	8f959e49
+size	png_rgb_trns.png	65	41	3	Byte
+band	png_rgb_trns.png	1	Red	-	7e05b26e
+nodata	png_rgb_trns.png	1	40
+band	png_rgb_trns.png	2	Green	-	eee569ba
+nodata	png_rgb_trns.png	2	40
+band	png_rgb_trns.png	3	Blue	-	8f959e49
+nodata	png_rgb_trns.png	3	40
+size	png_rgba.png	65	41	4	Byte
+band	png_rgba.png	1	Red	-	7e05b26e
+band	png_rgba.png	2	Green	-	eee569ba
+band	png_rgba.png	3	Blue	-	8f959e49
+band	png_rgba.png	4	Alpha	-	a701c016
+size	tiff_photo_deflate.tif	65	41	3	Byte
+band	tiff_photo_deflate.tif	1	Red	-	7e05b26e
+band	tiff_photo_deflate.tif	2	Green	-	eee569ba
+band	tiff_photo_deflate.tif	3	Blue	-	8f959e49
+size	tiff_photo_jpeg.tif	65	41	3	Byte
+band	tiff_photo_jpeg.tif	1	Red	-	937862c1
+band	tiff_photo_jpeg.tif	2	Green	-	d9d2bb1c
+band	tiff_photo_jpeg.tif	3	Blue	-	a27370e4
+size	webp_alpha.webp	65	41	4	Byte
+band	webp_alpha.webp	1	Red	-	be410bca
+band	webp_alpha.webp	2	Green	-	18eef6a4
+band	webp_alpha.webp	3	Blue	-	66da3209
+band	webp_alpha.webp	4	Alpha	-	f9934ce2
+size	webp_lossless.webp	65	41	3	Byte
+band	webp_lossless.webp	1	Red	-	7e05b26e
+band	webp_lossless.webp	2	Green	-	eee569ba
+band	webp_lossless.webp	3	Blue	-	8f959e49
+size	webp_lossless_alpha.webp	65	41	4	Byte
+band	webp_lossless_alpha.webp	1	Red	-	ee2c9ac8
+band	webp_lossless_alpha.webp	2	Green	-	ac10cc46
+band	webp_lossless_alpha.webp	3	Blue	-	e89ac9dc
+band	webp_lossless_alpha.webp	4	Alpha	-	f9934ce2
+size	webp_lossy.webp	65	41	3	Byte
+band	webp_lossy.webp	1	Red	-	2699b1fa
+band	webp_lossy.webp	2	Green	-	a74b9acd
+band	webp_lossy.webp	3	Blue	-	77cfa801

@@ -8,7 +8,10 @@
 // The builder and the warper depend on this interface only. Each format reads its file the way
 // GDAL's driver for it does, so that the COG is the one GDAL would build:
 //   - TiffSource (tiff_source.h): GeoTIFF, GDAL's GTiff driver;
-//   - Jp2Source (jp2_source.h): JPEG 2000 (JP2 file or raw codestream), GDAL's JP2OpenJPEG driver.
+//   - Jp2Source (jp2_source.h): JPEG 2000 (JP2 file or raw codestream), GDAL's JP2OpenJPEG driver;
+//   - the photos (image_source.h, decoded whole): JpegSource (jpeg_source.h, GDAL's JPEG
+//     driver), PngSource (png_source.h, PNG), GifSource (gif_source.h, GIF), WebpSource
+//     (webp_source.h, WEBP). TIFF photos and DNG files (TIFF-based) are TiffSources.
 #pragma once
 
 #include <array>
@@ -105,8 +108,8 @@ protected:
     RasterSource() = default;
 };
 
-/// Opens `path` with the reader of its format (TIFF / BigTIFF, JPEG 2000), recognised by its
-/// first bytes as GDAL recognises it. `memoryBudget` bounds the reader's decoding buffers.
+/// Opens `path` with the reader of its format (TIFF / BigTIFF / DNG, JPEG 2000, JPEG, PNG, GIF,
+/// WebP), recognised by its first bytes as GDAL recognises it. `memoryBudget` bounds the reader's decoding buffers.
 Expected<std::unique_ptr<RasterSource>> OpenRasterSource(const std::string& path,
                                                          uint64_t memoryBudget = uint64_t{2} << 30);
 

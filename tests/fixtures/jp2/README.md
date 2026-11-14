@@ -21,8 +21,19 @@ JP2OpenJPEG driver reads it.
   copy), and `uint16_half_alpha.tif` (16-bit RGBA, alpha 32768) for the alpha scaling of the warp.
 
 `expected.tsv` holds what GDAL reads in each (size, band types, CRC-32 of every band, colour
-interpretation, NBITS, colour table, geotransform, GCPs, CRS, RPC presence, or the refusal);
-`expected.py` writes it, with the samples decoded by `gdal_bands.cpp` built against the GDAL libddb
-ships (vcpkg's GDAL 3.13.3 and OpenJPEG 2.5.4): the system's OpenJPEG decodes the green band of the
-lossy single tile differently. The same test runs on any folder with `DDBT_JP2_PARITY_DIR` and
-`DDBT_JP2_PARITY_TSV` (expected.py's output for that folder).
+interpretation, NBITS, colour table, geotransform, GCPs, CRS, RPC presence, or the refusal), and for
+each band of a lossy file a grid of its samples (at every step-th column and row, at most 1024):
+OpenJPEG's 9/7 wavelet is floating-point and its builds round it differently (MSVC's decodes 1
+level apart in a few pixels), so the CRC of such a band is checked on Linux, where the
+expectations are made, and the grid within 1 everywhere. It is written by
+`tests/fixtures/tools/gdal_expected.py`:
+
+    python3 -I tests/fixtures/tools/gdal_expected.py --tool gdal_expected --grid-lossy --ext .jp2 \
+        --ext .j2k --ext .jpc --ext .jpx --driver JP2OpenJPEG tests/fixtures/jp2 tests/fixtures/jp2/expected.tsv
+
+with `gdal_expected` (`tests/fixtures/tools/gdal_expected.cpp`) built against the GDAL libddb ships
+(vcpkg's GDAL 3.13.3 and OpenJPEG 2.5.4): the system's OpenJPEG decodes the green band of the lossy
+single tile differently. The WKT of the five WGS 84 CRSs in the file is the system PROJ's (a DATUM
+where vcpkg's PROJ writes the WGS 84 ENSEMBLE); the test compares CRSs by equivalence. The same
+test runs on any folder with `DDBT_JP2_PARITY_DIR` and `DDBT_JP2_PARITY_TSV` (gdal_expected.py's
+output for that folder).

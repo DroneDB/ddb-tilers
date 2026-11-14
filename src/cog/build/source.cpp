@@ -7,8 +7,12 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "cog/build/gif_source.h"
 #include "cog/build/jp2_source.h"
+#include "cog/build/jpeg_source.h"
+#include "cog/build/png_source.h"
 #include "cog/build/tiff_source.h"
+#include "cog/build/webp_source.h"
 #include "cog/jp2/jp2_file.h"
 #include "core/io/byte_source.h"
 #include "core/util/xml_lite.h"
@@ -16,18 +20,23 @@
 namespace ddbt::cog::build {
 
 Expected<std::unique_ptr<RasterSource>> OpenRasterSource(const std::string& path, uint64_t memoryBudget) {
+    // The reader of the format the first bytes tell, as GDAL's drivers identify them.
+    auto open = [&](auto opener) -> Expected<std::unique_ptr<RasterSource>> {
+        auto s = opener(path, memoryBudget);
+        if (!s.ok()) return s.status();
+        return std::unique_ptr<RasterSource>(std::move(*s));
+    };
     {
         auto bytes = io::OpenByteSource(path, io::SourceKind::kPread);
         if (!bytes.ok()) return bytes.status();
-        if (jp2::IsJpeg2000(**bytes)) {
-            auto j = Jp2Source::Open(path, memoryBudget);
-            if (!j.ok()) return j.status();
-            return std::unique_ptr<RasterSource>(std::move(*j));
-        }
+        const io::ByteSource& b = **bytes;
+        if (jp2::IsJpeg2000(b)) return open(Jp2Source::Open);
+        if (IsJpegFile(b)) return open(JpegSource::Open);
+        if (IsPngFile(b)) return open(PngSource::Open);
+        if (IsGifFile(b)) return open(GifSource::Open);
+        if (IsWebpFile(b)) return open(WebpSource::Open);
     }
-    auto t = TiffSource::Open(path);
-    if (!t.ok()) return t.status();
-    return std::unique_ptr<RasterSource>(std::move(*t));
+    return open([](const std::string& p, uint64_t) { return TiffSource::Open(p); });
 }
 
 writer::RawTag AsciiTag(uint16_t tag, const std::string& value) {

@@ -17,6 +17,7 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | GDAL 3.13.3, ported code | `src/core/crs/gcp_transform.cpp` | MIT | The GCP transforms of `alg/gdal_crs.cpp` (with the GRASS CRS.C routines, Copyright (c) 1992 Michigan State University), `alg/gdal_homography.cpp`, `alg/gdallinearsystem.cpp` and `alg/gdaltransformer.cpp`, ported to C++20; the copyright notices and the MIT permission notice are at the top of the file |
 | GDAL 3.13.3, ported code | `src/cog/warp/row_approx.cpp`, `src/cog/warp/warp_chunks.cpp`, `src/cog/warp/source_georef.cpp` | MIT | The approximate transformer of `alg/gdaltransformer.cpp` (GDALApproxTransform) and its GDALInvGeoTransform, and the warp chunk list and source windows of `alg/gdalwarpoperation.cpp` (GDALWarpOperation), ported to C++20; the copyright notices and the MIT permission notice are at the top of each file |
 | GDAL 3.13.3, ported code | `src/cog/jp2/jp2_file.cpp`, `src/cog/jp2/codestream.cpp`, `src/cog/build/jp2_source.cpp` | MIT | The JPEG 2000 box reader and georeferencing of `gcore/gdaljp2box.cpp`, `gcore/gdaljp2metadata.cpp` and `gcore/gdaljp2abstractdataset.cpp`, the JP2OpenJPEG driver's decoding rules of `frmts/opjlike/jp2opjlikedataset.cpp` and `frmts/openjpeg/opjdatasetbase.h`, and OGRFastAtof of `ogr/ogrutils.cpp`, ported to C++20; the copyright notices and the MIT permission notice are at the top of each file |
+| GDAL 3.13.3, ported code | `src/cog/build/jpeg_source.cpp` | MIT | The decoding rules of the JPEG driver (`frmts/jpeg/jpgdataset.cpp`: colour spaces, the CMYK conversion, the memory check of progressive images, the warnings it fails on, the appended validity mask and its bit order), ported to C++20; the copyright notices and the MIT permission notice are at the top of the file |
 | libtiff 4.7, ported code | `src/cog/build/source.cpp` | libtiff (BSD-style) | DoubleToRational and ToRationalEuclideanGCD of `libtiff/tif_dirwrite.c` (the rational libtiff writes for a double), ported to C++20; the copyright and permission notice are with the code |
 | vcpkg port of libjpeg-turbo, modified | `ports/libjpeg-turbo` | MIT | Build script only, not linked; see `ports/NOTICE.libjpeg-turbo` |
 
@@ -28,6 +29,8 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | libdeflate | MIT | ddbt |
 | libjpeg-turbo | IJG, BSD-3-Clause, zlib | ddbt |
 | libwebp | BSD-3-Clause (with Google's patent grant) | ddbt |
+| libspng | BSD-2-Clause | ddbt (PNG photos), libjpeg-turbo (TurboJPEG image I/O) |
+| giflib | MIT | ddbt (GIF photos) |
 | zstd | BSD-3-Clause (dual licensed with GPL-2.0; used under BSD) | ddbt |
 | OpenJPEG | BSD-2-Clause | ddbt |
 | LERC | Apache-2.0 | ddbt |
@@ -40,13 +43,16 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | nlohmann/json | MIT (header-only) | PROJ |
 | zlib | zlib | libtiff, libspng |
 | liblzma (XZ Utils) | 0BSD | libtiff |
-| libspng | BSD-2-Clause | libjpeg-turbo (TurboJPEG image I/O) |
 
 The IJG licence asks binary distributions to state: "This software is based in part on the work
 of the Independent JPEG Group."
 
 Development only (not part of the library): GoogleTest (BSD-3-Clause) and Google Benchmark
 (Apache-2.0).
+
+The `gdal_*` samples in `tests/fixtures/photo/` come from GDAL's test suite (MIT/X style licence,
+`tests/fixtures/photo/GDAL-LICENSE.TXT`), and `tests/fixtures/photo/dng_fc220_preview.dng` is cut
+from a public-domain (CC0) sample of raw.pixls.us; they are not part of the library.
 
 The test samples in `tests/fixtures/gdal/` come from GDAL's test suite (MIT/X style licence,
 `tests/fixtures/gdal/GDAL-LICENSE.TXT`); they are not part of the library. The COGs

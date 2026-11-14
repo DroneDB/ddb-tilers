@@ -6,15 +6,18 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <numeric>
 #include <string>
 #include <vector>
 
 #include <Lerc_c_api.h>
+#include <gif_lib.h>
 #include <libdeflate.h>
 #include <openjpeg.h>
 #include <proj.h>
+#include <spng.h>
 #include <turbojpeg.h>
 #include <webp/decode.h>
 #include <webp/encode.h>
@@ -106,6 +109,39 @@ TEST(DepsCheck, Libwebp) {
     EXPECT_EQ(dw, w);
     EXPECT_EQ(dh, h);
     WebPFree(out);
+}
+
+TEST(DepsCheck, Libspng) {
+    // A 2 x 1 grey PNG written and read back.
+    spng_ctx* enc = spng_ctx_new(SPNG_CTX_ENCODER);
+    ASSERT_NE(enc, nullptr);
+    spng_set_option(enc, SPNG_ENCODE_TO_BUFFER, 1);
+    spng_ihdr ihdr{};
+    ihdr.width = 2;
+    ihdr.height = 1;
+    ihdr.bit_depth = 8;
+    ihdr.color_type = SPNG_COLOR_TYPE_GRAYSCALE;
+    ASSERT_EQ(spng_set_ihdr(enc, &ihdr), 0);
+    const uint8_t px[2] = {7, 200};
+    ASSERT_EQ(spng_encode_image(enc, px, sizeof(px), SPNG_FMT_PNG, SPNG_ENCODE_FINALIZE), 0);
+    size_t n = 0;
+    int err = 0;
+    auto* png = static_cast<uint8_t*>(spng_get_png_buffer(enc, &n, &err));
+    ASSERT_NE(png, nullptr);
+    spng_ctx* dec = spng_ctx_new(0);
+    ASSERT_EQ(spng_set_png_buffer(dec, png, n), 0);
+    uint8_t out[2] = {};
+    ASSERT_EQ(spng_decode_image(dec, out, sizeof(out), SPNG_FMT_PNG, 0), 0);
+    EXPECT_EQ(out[0], 7);
+    EXPECT_EQ(out[1], 200);
+    spng_ctx_free(dec);
+    std::free(png);
+    spng_ctx_free(enc);
+}
+
+TEST(DepsCheck, Giflib) {
+    EXPECT_GE(GIFLIB_MAJOR, 5);
+    EXPECT_NE(GifErrorString(D_GIF_ERR_NOT_GIF_FILE), nullptr);
 }
 
 TEST(DepsCheck, Zstd) {

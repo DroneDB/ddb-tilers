@@ -13,6 +13,8 @@
     },
     "libdeflate",
     "libjpeg-turbo",
+    "libspng",
+    "giflib",
     {
       "name": "libwebp",
       "default-features": false,
