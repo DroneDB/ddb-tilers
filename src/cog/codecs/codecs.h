@@ -41,6 +41,19 @@ enum class Compression : uint16_t {
     kJxlDng = 52546,
 };
 
+/// A JPEG-XL block (one codestream per tile or strip).
+struct JxlBlockInfo {
+    uint32_t width = 0, height = 0;  // pixels of the block (a strip: its rows)
+    uint32_t samples = 1;            // samples per pixel in the block (1 for BAND interleave)
+    uint16_t bitsPerSample = 8;
+    uint16_t sampleFormat = 1;
+};
+
+/// JPEG-XL (TIFF compression 50002, and DNG 1.7's 52546) as GDAL's TIFF codec decodes it: the
+/// colour channels and an alpha first channel, then the other extra channels, interleaved per
+/// pixel, host order. 8 / 16-bit integers, 16 / 32-bit floats.
+Status DecodeJxl(std::span<const uint8_t> in, const JxlBlockInfo& block, std::span<uint8_t> out);
+
 /// "LZW", "DEFLATE", ... or "UNKNOWN".
 std::string_view CompressionName(uint16_t compression) noexcept;
 

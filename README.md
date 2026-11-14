@@ -190,7 +190,7 @@ selects its work directory.
   (Apache-2.0) with layer-selective decoding, decoder reuse and point formats 4, 5, 9 and 10.
   `third_party/lazperf/FORK.md` lists every change.
 - `third_party/fpnge`: [fpnge](https://github.com/veluca93/fpnge) (Apache-2.0), unmodified.
-- Through vcpkg: PROJ, libdeflate, libjpeg-turbo, libwebp, zstd, OpenJPEG, LERC, libtiff, Google Highway,
+- Through vcpkg: PROJ, libdeflate, libjpeg-turbo, libwebp, zstd, OpenJPEG, LERC, libtiff, libjxl, Google Highway,
   GoogleTest and Google Benchmark.
 
 ## License

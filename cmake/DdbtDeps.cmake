@@ -39,5 +39,6 @@ target_link_libraries(ddbt_deps INTERFACE
   unofficial::Lerc::Lerc
   hwy::hwy
   TIFF::TIFF
+  ddbt_jxl
   ddbt::lazperf
   ddbt::fpnge)

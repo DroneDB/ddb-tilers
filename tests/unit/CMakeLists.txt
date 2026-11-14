@@ -9,6 +9,7 @@ add_executable(ddbt_unit_tests
   dispatch_test.cpp
   ${DDBT_AREA_TESTS})
 target_include_directories(ddbt_unit_tests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_compile_definitions(ddbt_unit_tests PRIVATE DDBT_TEST_FIXTURES="${PROJECT_SOURCE_DIR}/tests/fixtures")
 target_link_libraries(ddbt_unit_tests PRIVATE ddbt::ddbt GTest::gtest_main)
 ddbt_apply_build_settings(ddbt_unit_tests)
 gtest_discover_tests(ddbt_unit_tests DISCOVERY_TIMEOUT 60)

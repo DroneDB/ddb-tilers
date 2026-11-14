@@ -25,6 +25,10 @@
     "lerc",
     "highway",
     {
+      "name": "libjxl",
+      "default-features": false
+    },
+    {
       "name": "tiff",
       "default-features": false,
       "features": [

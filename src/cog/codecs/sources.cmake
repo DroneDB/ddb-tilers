@@ -7,5 +7,6 @@ list(APPEND DDBT_SOURCES
   cog/codecs/lzw.cpp
   cog/codecs/lerc_webp.cpp
   cog/codecs/jpeg.cpp
+  cog/codecs/jxl.cpp
   cog/codecs/predictor.cpp
   cog/codecs/lzw_encoder.cpp)

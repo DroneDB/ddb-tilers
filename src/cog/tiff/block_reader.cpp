@@ -359,6 +359,13 @@ Status TiffReader::DecodeBlock(uint32_t ifd, uint32_t index, std::span<const uin
                 st = codecs::DecodeWebp(compressed, i.blockWidth, rows, i.samplesPerPixel, stored);
                 nativeOrder = true;
                 break;
+            case Compression::kJxl:
+            case Compression::kJxlDng: {
+                const codecs::JxlBlockInfo jb{i.blockWidth, rows, spp, i.bitsPerSample, i.sampleFormat};
+                st = codecs::DecodeJxl(compressed, jb, stored);
+                nativeOrder = true;
+                break;
+            }
             case Compression::kJpeg: {
                 codecs::JpegDecodeOptions jo;
                 jo.tables = i.jpegTables;

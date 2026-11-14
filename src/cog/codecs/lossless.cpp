@@ -51,7 +51,9 @@ bool IsSupportedCompression(uint16_t compression) noexcept {
         case Compression::kPackBits:
         case Compression::kLerc:
         case Compression::kZstd:
-        case Compression::kWebp: return true;
+        case Compression::kWebp:
+        case Compression::kJxl:
+        case Compression::kJxlDng: return true;
         default: return false;
     }
 }

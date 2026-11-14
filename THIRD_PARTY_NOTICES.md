@@ -28,6 +28,9 @@ theirs in `<build>/vcpkg_installed/<triplet>/share/<port>/copyright`.
 | OpenJPEG | BSD-2-Clause | ddbt |
 | LERC | Apache-2.0 | ddbt |
 | Highway | Apache-2.0 or BSD-3-Clause | ddbt |
+| libjxl | BSD-3-Clause (with Google's patent grant) | ddbt (JPEG-XL TIFF blocks) |
+| Brotli | MIT | libjxl |
+| Little CMS (lcms2) | MIT | libjxl |
 | libtiff | libtiff (BSD-style) | ddbt (the TIFF compressions without a codec of its own), PROJ |
 | SQLite | Public domain | PROJ |
 | nlohmann/json | MIT (header-only) | PROJ |
@@ -40,3 +43,6 @@ of the Independent JPEG Group."
 
 Development only (not part of the library): GoogleTest (BSD-3-Clause) and Google Benchmark
 (Apache-2.0).
+
+The test samples in `tests/fixtures/gdal/` come from GDAL's test suite (MIT/X style licence,
+`tests/fixtures/gdal/GDAL-LICENSE.TXT`); they are not part of the library.
