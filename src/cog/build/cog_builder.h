@@ -84,6 +84,9 @@ struct BuildOptions {
     writer::WriterOptions writer;
     /// Georeferences a photo by ground control points and geoprojects it.
     std::optional<PhotoGeoreference> photo;
+    /// Where a source spills its decoded image (RasterSource::SetScratchBase); BuildCog: next to
+    /// the output ("<output>.image"), the folder it writes its other scratch files to.
+    std::string scratchBase;
     ProgressFn progress;
 };
 

@@ -103,6 +103,10 @@ public:
     virtual Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
     /// Decodes block (col, row) of the per-dataset mask as bytes 0 / 255 (rows of BlockWidth()).
     virtual Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
+    /// Where a source that decodes its whole image (a photo) writes it when it does not fit in
+    /// memory: a scratch file "<base>.<pid>.<n>.tmp" (by default "ddbt-image" in the system's
+    /// temporary folder, which a confined process may not write to). Before the first read.
+    virtual void SetScratchBase(std::string base) { (void)base; }
 
     /// The samples of block (col, row) as ReadBlock writes them, in place, when the source keeps
     /// its whole decoded image in memory (only the rows inside the raster: a last, shorter block

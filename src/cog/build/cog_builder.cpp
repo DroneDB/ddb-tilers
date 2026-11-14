@@ -819,6 +819,7 @@ constexpr double kGdalwarpDefaultMemory = 64.0 * 1024 * 1024;
 
 Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options) {
     auto src = OpenRasterSource(input, options.memoryBudget);
+    if (src.ok() && !options.scratchBase.empty()) (*src)->SetScratchBase(options.scratchBase);
     if (!src.ok() || !options.photo) return src;
     return GeoreferencePhoto(std::move(*src), *options.photo);
 }
@@ -846,7 +847,9 @@ warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
 
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options, BuildReport* report) {
     const auto t0 = std::chrono::steady_clock::now();
-    auto src = OpenBuildSource(input, options);
+    BuildOptions sourceOptions = options;
+    if (sourceOptions.scratchBase.empty()) sourceOptions.scratchBase = output + ".image";
+    auto src = OpenBuildSource(input, sourceOptions);
     if (!src.ok()) return src.status();
     const RasterSource& source = **src;
     if (!source.Georef().crs) return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no coordinate reference system: " + input);

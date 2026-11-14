@@ -86,10 +86,13 @@ Status ImageSource::Load() const {
             io::ScratchFile* file = nullptr;
             if (bytes > memoryBudget_ / 2 || bytes > std::numeric_limits<size_t>::max() / 2) {
                 // Larger than half the budget: the rows go to a scratch file.
-                std::error_code ec;
-                const std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
-                auto f = io::ScratchFile::Create(((ec ? std::filesystem::path(".") : dir) / "ddbt-image").string(),
-                                                 io::ScratchKind::kAnonymous);
+                std::string base = scratchBase_;
+                if (base.empty()) {
+                    std::error_code ec;
+                    const std::filesystem::path dir = std::filesystem::temp_directory_path(ec);
+                    base = ((ec ? std::filesystem::path(".") : dir) / "ddbt-image").string();
+                }
+                auto f = io::ScratchFile::Create(base, io::ScratchKind::kAnonymous);
                 if (!f.ok()) {
                     loadStatus_ = f.status();
                     return;

@@ -86,6 +86,7 @@ public:
     Status Load() const;
     /// The decoded rows are in a scratch file (they did not fit in half of the memory budget).
     bool Spilled() const noexcept { return spilled_; }
+    void SetScratchBase(std::string base) override { scratchBase_ = std::move(base); }
 
 protected:
     ImageSource(std::string path, uint64_t memoryBudget) : path_(std::move(path)), memoryBudget_(memoryBudget) {}
@@ -100,6 +101,7 @@ protected:
 private:
     std::string path_;
     uint64_t memoryBudget_ = 0;
+    std::string scratchBase_;
     tiff::Georeferencing georef_;
     ImageInfo info_;
     uint32_t blockHeight_ = 1;

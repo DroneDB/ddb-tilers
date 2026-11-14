@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include <filesystem>
+
 #include <cstddef>
 #include <string>
 #include <type_traits>
@@ -89,6 +91,22 @@ TEST(PhotoSource, RowsLargerThanTheBudgetGoToAScratchFile) {
             }
         }
     }
+}
+
+// A photo that does not fit in memory is decoded into a scratch file where the build says (next to
+// its output, the folder a confined process may write to), not in the system's temporary folder
+TEST(PhotoSource, TheScratchFileIsWhereTheBuildSays) {
+    const auto dir = std::filesystem::temp_directory_path() / ("ddbt-scratch-" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()));
+    std::filesystem::create_directories(dir);
+    auto missing = OpenRasterSource(Fixture("geo_photo.jpg"), 1024);
+    auto there = OpenRasterSource(Fixture("geo_photo.jpg"), 1024);
+    ASSERT_TRUE(missing.ok() && there.ok());
+    (*missing)->SetScratchBase((dir / "no-such-folder" / "photo.image").string());
+    (*there)->SetScratchBase((dir / "photo.image").string());
+    EXPECT_FALSE(dynamic_cast<const ImageSource&>(**missing).Load().ok()) << "the scratch file goes where it is told";
+    ASSERT_TRUE(dynamic_cast<const ImageSource&>(**there).Load().ok());
+    EXPECT_TRUE(dynamic_cast<const ImageSource&>(**there).Spilled());
+    std::filesystem::remove_all(dir);
 }
 
 TEST(PhotoSource, ATruncatedJpegFailsToRead) {
