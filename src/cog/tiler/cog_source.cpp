@@ -502,7 +502,8 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
                         path + " has " + std::to_string(main.samplesPerPixel) + " bands: the tiler reads rasters of up to " +
                             std::to_string(maxBands) + " bands (DDBT_TILER_MAX_BANDS)");
 
-    const auto type = PixelTypeOf(main.sampleType);
+    // A complex raster reads as the Float64 magnitudes of its samples (block_cache.cpp)
+    const auto type = PixelTypeOf(main.complex ? tiff::SampleType::kF64 : main.sampleType);
     if (!type)
         throw TileError(TileErrorCode::kException, "Unsupported sample type " +
                                                        std::string(tiff::SampleTypeName(main.sampleType)) + " in " +

@@ -39,6 +39,7 @@
 #include "cog/tiff/tiff_reader.h"
 #include "cog/tiler/json_lite.h"
 #include "cog/writer/cog_writer.h"
+#include "ddbt/ddbt.h"
 
 namespace ddbt::cog {
 namespace {
@@ -528,6 +529,52 @@ TEST(CogBuild, OwnGridComplexKeepsItsSamplesAndMeasuresTheirMagnitude) {
     ASSERT_NE(band, nullptr);
     EXPECT_NEAR(band->Find("mean")->num, sum / (src.pixels.size() / 4), 1e-9);
     EXPECT_NEAR(band->Find("max")->num, maxMag, 1e-9);
+}
+
+// A complex raster is tiled by its magnitude: its tiles are those of the Float64 raster of the
+// magnitudes of its samples
+TEST(CogBuild, AComplexRasterIsTiledByItsMagnitude) {
+    TempDir dir;
+    SourceCog cpx(tiff::SampleType::kI16, 2, false, std::nullopt);
+    cpx.complex = true;
+    SourceCog mag(tiff::SampleType::kF64, 1, false, std::nullopt);
+    const auto* v = reinterpret_cast<int16_t*>(cpx.pixels.data());
+    auto* m = reinterpret_cast<double*>(mag.pixels.data());
+    for (size_t i = 0; i < cpx.pixels.size() / 4; ++i) {
+        reinterpret_cast<int16_t*>(cpx.pixels.data())[2 * i] = static_cast<int16_t>((i * 37) % 2000 - 1000);
+        reinterpret_cast<int16_t*>(cpx.pixels.data())[2 * i + 1] = static_cast<int16_t>((i * 11) % 600 - 300);
+        m[i] = std::sqrt(double(v[2 * i]) * v[2 * i] + double(v[2 * i + 1]) * v[2 * i + 1]);
+    }
+    const std::string cin = dir.File("c.tif"), cout = dir.File("c.cog.tif"), min = dir.File("m.tif"),
+                      mout = dir.File("m.cog.tif");
+    cpx.Write(cin);
+    mag.Write(min);
+    ASSERT_TRUE(build::BuildCog(cin, cout, {}).ok());
+    ASSERT_TRUE(build::BuildCog(min, mout, {}).ok());
+    char* info = nullptr;
+    ASSERT_EQ(ddbtTileInfo(cout.c_str(), 256, &info), DDBT_ERR_NONE) << ddbtLastError();
+    const auto j = tiler::json::Parse(info);
+    ddbtFree(info);
+    const int z = static_cast<int>(j->Find("maxZoom")->num);
+    const double R = 20037508.342789244, n = std::ldexp(1.0, z);
+    const int x0 = static_cast<int>((j->Find("minX")->num + R) / (2 * R) * n);
+    const int y0 = static_cast<int>((R - j->Find("maxY")->num) / (2 * R) * n);
+    int tiles = 0;
+    for (int dy = 0; dy < 2; ++dy)
+        for (int dx = 0; dx < 2; ++dx) {
+            uint8_t *a = nullptr, *b = nullptr;
+            int as = 0, bs = 0;
+            ASSERT_EQ(ddbtMemoryTileFmt(cout.c_str(), z, x0 + dx, y0 + dy, &a, &as, 256, true, true, nullptr, "png"),
+                      DDBT_ERR_NONE)
+                << ddbtLastError();
+            ASSERT_EQ(ddbtMemoryTileFmt(mout.c_str(), z, x0 + dx, y0 + dy, &b, &bs, 256, true, true, nullptr, "png"),
+                      DDBT_ERR_NONE);
+            EXPECT_EQ(std::vector<uint8_t>(a, a + as), std::vector<uint8_t>(b, b + bs));
+            ddbtFree(a);
+            ddbtFree(b);
+            ++tiles;
+        }
+    EXPECT_EQ(tiles, 4);
 }
 
 // GDAL_METADATA of an output: OVERVIEW_RESAMPLING only with overviews; the colour
