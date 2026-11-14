@@ -2,7 +2,10 @@
 #include "cog/build/derived_source.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <utility>
+#include <vector>
 
 namespace ddbt::cog::build {
 

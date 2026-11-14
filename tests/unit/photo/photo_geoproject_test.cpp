@@ -19,10 +19,12 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 

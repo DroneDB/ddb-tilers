@@ -6,7 +6,9 @@
 
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "cog/build/gif_source.h"
@@ -29,7 +31,7 @@ std::vector<uint8_t> AllSamples(const RasterSource& s) {
         auto rows = s.ReadBlock(0, by, block.data());
         EXPECT_TRUE(rows.ok()) << rows.status().message();
         if (!rows.ok()) return {};
-        out.insert(out.end(), block.begin(), block.begin() + static_cast<ptrdiff_t>(*rows * s.BlockWidth() * s.PixelBytes()));
+        out.insert(out.end(), block.begin(), block.begin() + static_cast<std::ptrdiff_t>(*rows * s.BlockWidth() * s.PixelBytes()));
     }
     return out;
 }
