@@ -47,6 +47,7 @@ typedef enum ddbtErr
     DDBT_ERR_REFUSED = 8,          /* a valid argument the input cannot honour (a formula that does not
                                       exist or that the raster cannot compute): the same call never
                                       succeeds (libddb's RefusedArgumentException) */
+    DDBT_ERR_NO_SPACE = 9,         /* the device is full: the same call may succeed once there is room */
     DDBT_ERR_NOT_IMPLEMENTED = 100 /* the feature is not implemented (yet) */
 } ddbtErr;
 

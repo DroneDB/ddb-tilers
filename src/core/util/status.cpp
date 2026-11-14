@@ -22,6 +22,7 @@ const char* StatusCodeName(StatusCode code) noexcept {
         case StatusCode::kUnsupported: return "Unsupported";
         case StatusCode::kResourceExhausted: return "ResourceExhausted";
         case StatusCode::kCancelled: return "Cancelled";
+        case StatusCode::kNoSpace: return "NoSpace";
         case StatusCode::kInternal: return "Internal";
     }
     return "Unknown";
@@ -75,7 +76,10 @@ Status ErrnoStatus(std::string_view what, int err) {
     m += " (errno ";
     m += std::to_string(err);
     m += ')';
-    return Status(err == ENOENT ? StatusCode::kNotFound : StatusCode::kIoError, std::move(m));
+    return Status(err == ENOENT   ? StatusCode::kNotFound
+                  : err == ENOSPC ? StatusCode::kNoSpace
+                                  : StatusCode::kIoError,
+                  std::move(m));
 }
 
 #ifdef _WIN32
@@ -100,7 +104,8 @@ Status Win32Status(std::string_view what, unsigned long err) {
     m += std::to_string(err);
     m += ')';
     const bool notFound = err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND;
-    return Status(notFound ? StatusCode::kNotFound : StatusCode::kIoError, std::move(m));
+    const bool full = err == ERROR_DISK_FULL || err == ERROR_HANDLE_DISK_FULL;
+    return Status(notFound ? StatusCode::kNotFound : full ? StatusCode::kNoSpace : StatusCode::kIoError, std::move(m));
 }
 #endif
 

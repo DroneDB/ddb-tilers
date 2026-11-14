@@ -34,6 +34,7 @@ enum class StatusCode : uint8_t {
     kResourceExhausted, // memory budget or another limit reached
     kCancelled,
     kInternal,
+    kNoSpace,           // the device is full (ENOSPC, ERROR_DISK_FULL): another try may succeed
 };
 
 /// Name of a code ("IoError", ...).

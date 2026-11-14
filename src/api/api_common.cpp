@@ -44,6 +44,7 @@ ddbtErr CodeOf(const Status& status) noexcept {
         case StatusCode::kNotFound: return DDBT_ERR_NOTFOUND;
         case StatusCode::kUnsupported: return DDBT_ERR_NOT_IMPLEMENTED;
         case StatusCode::kCancelled: return DDBT_ERR_CANCELED;
+        case StatusCode::kNoSpace: return DDBT_ERR_NO_SPACE;
         default: return DDBT_ERR_EXCEPTION;
     }
 }

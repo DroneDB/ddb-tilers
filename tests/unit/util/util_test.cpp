@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 #include <gtest/gtest.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -66,6 +70,12 @@ TEST(Status, ErrnoMapsNotFound) {
     const Status s = ddbt::ErrnoStatus("open x", EACCES);
     EXPECT_EQ(s.code(), StatusCode::kIoError);
     EXPECT_NE(s.message().find("open x"), std::string_view::npos);
+    // A full device is its own code: the host may try again once there is room
+    EXPECT_EQ(ddbt::ErrnoStatus("write x", ENOSPC).code(), StatusCode::kNoSpace);
+#ifdef _WIN32
+    EXPECT_EQ(ddbt::Win32Status("write x", ERROR_DISK_FULL).code(), StatusCode::kNoSpace);
+    EXPECT_EQ(ddbt::Win32Status("write x", ERROR_HANDLE_DISK_FULL).code(), StatusCode::kNoSpace);
+#endif
 }
 
 TEST(Expected, ValueAndErrorPaths) {
