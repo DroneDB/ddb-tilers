@@ -236,6 +236,48 @@ typedef int (*ddbtPointBatchCallback)(uint64_t count, const double *xyz, const u
  * `batch` stopped the reading, DDBT_ERR_EXCEPTION for a file that cannot be read. */
 DDBT_API ddbtErr ddbtReadPoints(const char *inputPath, ddbtPointBatchCallback batch, void *userData);
 
+/** A raster a host reads itself: a GeoTIFF or COG, georeferenced or not, in any CRS, opened with
+ * ddbtRasterOpen and released with ddbtRasterClose. A handle may be used by several threads at once. */
+typedef struct ddbtRaster ddbtRaster;
+
+/** The type of the samples ddbtRasterRead writes: the type of the file, or converted as GDAL's
+ * GDALCopyWords converts them to Float32 or Float64. */
+typedef enum ddbtSampleType
+{
+    DDBT_SAMPLE_NATIVE = 0,
+    DDBT_SAMPLE_FLOAT32 = 1,
+    DDBT_SAMPLE_FLOAT64 = 2
+} ddbtSampleType;
+
+/** Opens a raster (TIFF, BigTIFF). Codes: DDBT_ERR_INVALIDARGS, DDBT_ERR_NOTFOUND,
+ * DDBT_ERR_NOT_IMPLEMENTED for a file that is not a TIFF, DDBT_ERR_EXCEPTION for one that cannot
+ * be read. Opening the same file version twice shares its parsed state.
+ * @param out receives the handle; release it with ddbtRasterClose */
+DDBT_API ddbtErr ddbtRasterOpen(const char *path, ddbtRaster **out);
+/** Releases a raster (NULL is accepted). */
+DDBT_API ddbtErr ddbtRasterClose(ddbtRaster *raster);
+
+/** What GDAL reports of a raster, as JSON: {"width", "height", "type" (GDAL's name of the data type),
+ * "pixelInterleaved", "tiled", "blockWidth", "blockHeight", "overviews" ([[width, height], ...],
+ * largest first), "mask" ("allValid" | "perDataset" | "nodata" | "alpha": GDALGetMaskFlags of band 1),
+ * "alphaBand" (1-based, 0 when none), "geoTransform" (6 numbers, when it has one), "wkt" (the CRS as
+ * WKT1 GDAL, when it has one), "bands" ([{"colorInterp", "nodata", "scale", "offset", "unit",
+ * "description", "metadata"}], each member only when set but "colorInterp" and "metadata"),
+ * "metadata" (the "KEY=VALUE" items of the dataset and its bands)}.
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree */
+DDBT_API ddbtErr ddbtRasterInfo(const ddbtRaster *raster, char **outJson);
+
+/** Reads the window (x, y, width, height) of `bands` (1-based) into bufWidth x bufHeight samples per
+ * band, band after band (each plane bufWidth * bufHeight samples, row after row), with GDAL's RasterIO
+ * resolution and nearest resampling: the overview GDAL chooses for the downsampling and the source
+ * pixel GDAL takes for each buffer pixel. `mask`, when not NULL, receives bufWidth * bufHeight bytes:
+ * the per-dataset mask of the file (GDALGetMaskBand when "mask" is "perDataset"), else 255.
+ * Codes: DDBT_ERR_INVALIDARGS for a window that is not inside the raster, a bad band, size or type,
+ * DDBT_ERR_EXCEPTION for a block that cannot be read. */
+DDBT_API ddbtErr ddbtRasterRead(const ddbtRaster *raster, int x, int y, int width, int height,
+                                int bufWidth, int bufHeight, const int *bands, int bandCount,
+                                ddbtSampleType type, void *out, uint8_t *mask);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

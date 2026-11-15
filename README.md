@@ -146,6 +146,9 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | `ddbtIsOptimizedCog(input, outOptimized)` | Whether a raster is an optimized COG (EPSG:3857, 256 or 512 px tiles, overviews), which a COG build encodes again without a warp |
 | `ddbtPointCloudInfo(input, readBounds, outJson)` | Point count, bounds, CRS (as the file states it) and PDAL's dimension names of a LAS, LAZ, COPC, PLY, E57, XYZ or PTS point cloud |
 | `ddbtReadPoints(input, batch, userData)` | Every point of a point cloud (coordinates and colours) in file order, in batches |
+| `ddbtRasterOpen(path, out)`, `ddbtRasterClose(raster)` | A raster a host reads itself (GeoTIFF or COG, georeferenced or not, any CRS) |
+| `ddbtRasterInfo(raster, outJson)` | Size, type, blocks, overviews, mask kind, georeferencing and band metadata, as GDAL reports them |
+| `ddbtRasterRead(raster, window, buffer size, bands, type, out, mask)` | A window at a resolution, as GDAL's RasterIO reads it with nearest resampling, with the dataset mask |
 | `ddbtMemoryTileFmt(...)` | A tile of a COG or COPC file in PNG, JPEG or WebP |
 | `ddbtMemoryTileEx2(...)`, `ddbtMemoryTileEx3(...)` | A raster tile with visualisation parameters, in PNG (Ex2) or a chosen format (Ex3) |
 | `ddbtTileInfo(input, tileSize, outJson)` | Bounds (EPSG:3857) and zoom range of a COG or COPC file |

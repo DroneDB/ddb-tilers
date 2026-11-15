@@ -6,4 +6,5 @@ list(APPEND DDBT_SOURCES
   api/tile_api.cpp
   api/build_api.cpp
   api/encode_api.cpp
-  api/point_info_api.cpp)
+  api/point_info_api.cpp
+  api/raster_api.cpp)

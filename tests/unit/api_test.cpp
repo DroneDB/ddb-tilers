@@ -841,6 +841,139 @@ TEST(HostApi, ReadPointsGivesEveryPointInFileOrder) {
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+// A raster opened with ddbtRasterOpen, closed when it goes
+struct OpenRaster {
+    ddbtRaster* raster = nullptr;
+    explicit OpenRaster(const std::string& path) {
+        EXPECT_EQ(ddbtRasterOpen(path.c_str(), &raster), DDBT_ERR_NONE) << ddbtLastError();
+    }
+    ~OpenRaster() { ddbtRasterClose(raster); }
+    ddbt::cog::tiler::json::Value Info() const {
+        char* out = nullptr;
+        EXPECT_EQ(ddbtRasterInfo(raster, &out), DDBT_ERR_NONE) << ddbtLastError();
+        auto v = ddbt::cog::tiler::json::Parse(out != nullptr ? out : "{}");
+        ddbtFree(out);
+        return v ? *v : ddbt::cog::tiler::json::Value{};
+    }
+};
+
+}  // namespace
+
+// ddbtRasterInfo reports the size, type, blocks, bands and georeferencing of a raster as GDAL does
+TEST(HostApi, RasterInfoReportsTheFile) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-info");
+    const std::string path = (dir / "r.tif").string();
+    syn::SynthSpec spec = syn::Spec(300, 3, 4);
+    spec.tile = 128;
+    spec.nodata = "-9999";
+    syn::WriteSynth(path, spec);
+    OpenRaster r(path);
+    ASSERT_NE(r.raster, nullptr);
+    const auto info = r.Info();
+    EXPECT_EQ(info.Find("width")->u, 300u);
+    EXPECT_EQ(info.Find("height")->u, 300u);
+    EXPECT_EQ(info.Find("type")->str, "Float32");
+    EXPECT_TRUE(info.Find("tiled")->b);
+    EXPECT_EQ(info.Find("blockWidth")->u, 128u);
+    EXPECT_EQ(info.Find("bands")->arr.size(), 3u);
+    EXPECT_EQ(info.Find("bands")->arr[0].Find("nodata")->num, -9999.0);
+    EXPECT_EQ(info.Find("mask")->str, "nodata");
+    ASSERT_NE(info.Find("geoTransform"), nullptr);
+    EXPECT_EQ(info.Find("geoTransform")->arr[0].num, syn::kOriginX);
+    EXPECT_EQ(info.Find("geoTransform")->arr[1].num, syn::kPixel);
+    ASSERT_NE(info.Find("wkt"), nullptr);
+    EXPECT_NE(info.Find("wkt")->str.find("Pseudo-Mercator"), std::string::npos) << info.Find("wkt")->str;
+    std::filesystem::remove_all(dir);
+}
+
+// ddbtRasterRead reads a window as GDAL's RasterIO with nearest resampling: every sample at full
+// resolution, and for a reduction the source pixel GDAL takes (2 i + 1 for a factor of 2)
+TEST(HostApi, RasterReadReadsAWindowAsGdal) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-read");
+    const std::string path = (dir / "r.tif").string();
+    syn::SynthSpec spec = syn::Spec(200, 2, 4);
+    spec.tile = 64;
+    spec.value = [](int band0, uint32_t x, uint32_t y) {
+        return static_cast<float>(static_cast<uint32_t>(band0) * 100000u + y * 1000u + x);
+    };
+    syn::WriteSynth(path, spec);
+    OpenRaster r(path);
+    ASSERT_NE(r.raster, nullptr);
+    const int bands[2] = {2, 1};
+
+    std::vector<float> full(2 * 50 * 40);
+    std::vector<uint8_t> mask(50 * 40, 0);
+    ASSERT_EQ(ddbtRasterRead(r.raster, 30, 70, 50, 40, 50, 40, bands, 2, DDBT_SAMPLE_FLOAT32, full.data(), mask.data()),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    for (uint32_t y = 0; y < 40; ++y)
+        for (uint32_t x = 0; x < 50; ++x) {
+            ASSERT_EQ(full[y * 50 + x], spec.value(1, 30 + x, 70 + y)) << x << "," << y;
+            ASSERT_EQ(full[2000 + y * 50 + x], spec.value(0, 30 + x, 70 + y)) << x << "," << y;
+        }
+    EXPECT_TRUE(std::all_of(mask.begin(), mask.end(), [](uint8_t m) { return m == 255; })) << "no mask: 255";
+
+    std::vector<double> half(25 * 20);
+    ASSERT_EQ(ddbtRasterRead(r.raster, 30, 70, 50, 40, 25, 20, bands + 1, 1, DDBT_SAMPLE_FLOAT64, half.data(), nullptr),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    for (uint32_t y = 0; y < 20; ++y)
+        for (uint32_t x = 0; x < 25; ++x)
+            ASSERT_EQ(half[y * 25 + x], spec.value(0, 30 + 2 * x + 1, 70 + 2 * y + 1)) << x << "," << y;
+
+    std::vector<float> native(4);
+    ASSERT_EQ(ddbtRasterRead(r.raster, 199, 199, 1, 1, 1, 1, bands + 1, 1, DDBT_SAMPLE_NATIVE, native.data(), nullptr),
+              DDBT_ERR_NONE);
+    EXPECT_EQ(native[0], spec.value(0, 199, 199));
+
+    std::vector<float> any(64);
+    EXPECT_EQ(ddbtRasterRead(r.raster, 190, 0, 20, 1, 20, 1, bands, 1, DDBT_SAMPLE_FLOAT32, any.data(), nullptr),
+              DDBT_ERR_INVALIDARGS) << "a window past the right edge";
+    EXPECT_EQ(ddbtRasterRead(r.raster, -1, 0, 2, 1, 2, 1, bands, 1, DDBT_SAMPLE_FLOAT32, any.data(), nullptr),
+              DDBT_ERR_INVALIDARGS);
+    const int badBand = 3;
+    EXPECT_EQ(ddbtRasterRead(r.raster, 0, 0, 2, 1, 2, 1, &badBand, 1, DDBT_SAMPLE_FLOAT32, any.data(), nullptr),
+              DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
+// A raster without georeferencing is opened for reading (a host reads the pixels of a photo copied to
+// a GeoTIFF), and the tiler still refuses it
+TEST(HostApi, RasterWithoutGeoreferencingIsReadNotTiled) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-plain");
+    const std::string path = (dir / "plain.tif").string();
+    syn::SynthSpec spec = syn::Spec(64, 1, 1);
+    spec.georeferenced = false;
+    spec.value = [](int, uint32_t x, uint32_t y) { return static_cast<float>((x + y) % 251); };
+    syn::WriteSynth(path, spec);
+    OpenRaster r(path);
+    ASSERT_NE(r.raster, nullptr);
+    const auto info = r.Info();
+    EXPECT_EQ(info.Find("geoTransform"), nullptr);
+    EXPECT_EQ(info.Find("wkt"), nullptr);
+    EXPECT_EQ(info.Find("type")->str, "Byte");
+    uint8_t v = 0;
+    const int band = 1;
+    ASSERT_EQ(ddbtRasterRead(r.raster, 10, 20, 1, 1, 1, 1, &band, 1, DDBT_SAMPLE_NATIVE, &v, nullptr), DDBT_ERR_NONE)
+        << ddbtLastError();
+    EXPECT_EQ(v, 30);
+    char* json = nullptr;
+    EXPECT_NE(ddbtTileInfo(path.c_str(), 256, &json), DDBT_ERR_NONE) << "the tiler needs georeferencing";
+    ddbtFree(json);
+
+    ddbtRaster* none = nullptr;
+    EXPECT_EQ(ddbtRasterOpen((dir / "missing.tif").string().c_str(), &none), DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(none, nullptr);
+    EXPECT_EQ(ddbtRasterOpen("", &none), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtRasterClose(nullptr), DDBT_ERR_NONE);
+    std::filesystem::remove_all(dir);
+}
+
 TEST(HostApi, BuildCog2ReportsProgressToOne) {
     namespace syn = ddbt::cog::tiler::testing;
     const auto dir = ApiScratch("cog2");

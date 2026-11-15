@@ -29,6 +29,7 @@ struct SynthSpec {
     int bytes = 4;  // 1: UInt8, 4: Float32
     bool planar = false;
     std::optional<std::string> nodata;
+    bool georeferenced = true;  // false: no geotransform and no GeoTIFF keys
     std::function<float(int band0, uint32_t x, uint32_t y)> value = [](int, uint32_t, uint32_t) { return 1.0f; };
 };
 
@@ -81,10 +82,12 @@ inline void WriteSynth(const std::filesystem::path& path, const SynthSpec& s) {
         t.Long(324, offsets),
         t.Long(325, counts),
         t.Short(339, std::vector<uint16_t>(bands, static_cast<uint16_t>(s.bytes == 4 ? 3 : 1))),
-        t.Double(33550, {kPixel, kPixel, 0}),
-        t.Double(33922, {0, 0, 0, kOriginX, kOriginY, 0}),
-        t.Short(34735, {1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 3857}),
     };
+    if (s.georeferenced) {
+        e.push_back(t.Double(33550, {kPixel, kPixel, 0}));
+        e.push_back(t.Double(33922, {0, 0, 0, kOriginX, kOriginY, 0}));
+        e.push_back(t.Short(34735, {1, 1, 0, 3, 1024, 0, 1, 1, 1025, 0, 1, 1, 3072, 0, 1, 3857}));
+    }
     if (s.bands > 1) e.push_back(t.Short(338, std::vector<uint16_t>(bands - 1, 0)));
     if (s.nodata) e.push_back(t.Ascii(42113, *s.nodata));
     t.AddIfd(e);

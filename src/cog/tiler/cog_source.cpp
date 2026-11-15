@@ -376,23 +376,26 @@ int CogSource::DataBandCount() const noexcept {
     return n;
 }
 
-std::shared_ptr<const CogSource> CogSource::Open(const std::string& path) {
+std::shared_ptr<const CogSource> CogSource::Open(const std::string& path, SourceUse use) {
     const FileState st = StatFile(path);
     if (!st.exists) throw TileError(TileErrorCode::kNotFound, path + " does not exist");
     std::shared_ptr<CogSource> s(new CogSource());
-    s->Init(path, CanonicalOf(path), st.id);
+    s->Init(path, CanonicalOf(path), st.id, use);
     return s;
 }
 
-std::shared_ptr<const CogSource> CogSource::Get(const std::string& path) {
+std::shared_ptr<const CogSource> CogSource::Get(const std::string& path, SourceUse use) {
     const FileState st = StatFile(path);
     if (!st.exists) throw TileError(TileErrorCode::kNotFound, path + " does not exist");
-    Shard& shard = Shards()[std::hash<std::string>{}(path) % kShards];
+    // A source opened for reading is not the tiler's (it may not be georeferenced, it has no warp):
+    // the registries keep them apart by the key
+    const std::string key = use == SourceUse::kRead ? std::string("\x01read\x01") + path : path;
+    Shard& shard = Shards()[std::hash<std::string>{}(key) % kShards];
     std::shared_ptr<Slot> slot;
     bool leader = false;
     {
         std::lock_guard lock(shard.mutex);
-        auto it = shard.map.find(path);
+        auto it = shard.map.find(key);
         if (it != shard.map.end() && !(it->second->id == st.id)) {
             shard.map.erase(it);  // the file changed: a new source (requests holding the old one keep it)
             it = shard.map.end();
@@ -410,7 +413,7 @@ std::shared_ptr<const CogSource> CogSource::Get(const std::string& path) {
             }
             slot = std::make_shared<Slot>();
             slot->id = st.id;
-            shard.map.emplace(path, slot);
+            shard.map.emplace(key, slot);
             leader = true;
         } else {
             slot = it->second;
@@ -421,11 +424,13 @@ std::shared_ptr<const CogSource> CogSource::Get(const std::string& path) {
         std::exception_ptr err;
         try {
             const std::string canon = CanonicalOf(path);
-            src = FindCanonical(canon, st.id);
+            const std::string canonKey =
+                use == SourceUse::kRead ? std::string("\x01read\x01") + canon : canon;
+            src = FindCanonical(canonKey, st.id);
             if (!src) {
                 std::shared_ptr<CogSource> s(new CogSource());
-                s->Init(path, canon, st.id);
-                src = ShareCanonical(canon, st.id, std::move(s));
+                s->Init(path, canon, st.id, use);
+                src = ShareCanonical(canonKey, st.id, std::move(s));
             }
         } catch (...) {
             err = std::current_exception();
@@ -443,7 +448,7 @@ std::shared_ptr<const CogSource> CogSource::Get(const std::string& path) {
         if (err) {
             // A failure is not kept: the next request tries again.
             std::lock_guard lock(shard.mutex);
-            auto it = shard.map.find(path);
+            auto it = shard.map.find(key);
             if (it != shard.map.end() && it->second == slot) shard.map.erase(it);
             std::rethrow_exception(err);
         }
@@ -464,8 +469,10 @@ void CogSource::ClearRegistry() {
     // The canonical index only holds weak references: its entries expire with the slots.
 }
 
-void CogSource::Init(const std::string& path, const std::string& canonicalPath, const FileIdentity& identity) {
+void CogSource::Init(const std::string& path, const std::string& canonicalPath, const FileIdentity& identity,
+                     SourceUse use) {
     path_ = path;
+    use_ = use;
     canonicalPath_ = canonicalPath;
     identity_ = identity;
     identityKey_ = IdentityKeyOf(canonicalPath, identity);
@@ -639,6 +646,11 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
 
     // Georeferencing (DroneDB: hasGeoreference, then the projection).
     georef_ = ValueOrThrow(tiff::ReadGeoreferencing(r, path), "Cannot read the georeferencing of " + path);
+    if (use == SourceUse::kRead) {
+        // A raster read as it is: its georeferencing, whatever it is, is reported, never required
+        if (georef_.geoTransform) gt_ = *georef_.geoTransform;
+        return;
+    }
     if (!georef_.geoTransform || (georef_.geoTransform == std::array<double, 6>{0, 1, 0, 0, 0, 1} &&
                                   georef_.gcps.empty()))
         throw TileError(TileErrorCode::kException, path + " is not georeferenced.");

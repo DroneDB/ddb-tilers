@@ -97,6 +97,11 @@ bool PixelTypeIsFloat(PixelType t) noexcept;
 /// GDALGetDataTypeName: "Byte", "Int8", "UInt16", ...
 const char* PixelTypeName(PixelType t) noexcept;
 
+/// What a source is opened for. kTile: the tiler's source, which needs a georeferenced file in a CRS
+/// (and a warp model when it is not EPSG:3857). kRead: a raster a host reads pixels and metadata of
+/// (ddbtRasterOpen), georeferenced or not, in any CRS, never warped.
+enum class SourceUse : uint8_t { kTile, kRead };
+
 class CogSource {
 public:
     /// Bands a source may have (DDBT_TILER_MAX_BANDS overrides it): a file with more is refused
@@ -108,9 +113,9 @@ public:
     /// file does not exist, kNotImplemented for a file that is not a TIFF, kException for a
     /// TIFF the tiler cannot read (or with more than the maximum band count, or wider or taller
     /// than INT_MAX pixels).
-    static std::shared_ptr<const CogSource> Get(const std::string& path);
+    static std::shared_ptr<const CogSource> Get(const std::string& path, SourceUse use = SourceUse::kTile);
     /// Opens without the registry (tests).
-    static std::shared_ptr<const CogSource> Open(const std::string& path);
+    static std::shared_ptr<const CogSource> Open(const std::string& path, SourceUse use = SourceUse::kTile);
     /// Forgets every registered source (tests).
     static void ClearRegistry();
 
@@ -154,6 +159,10 @@ public:
     /// DroneDB's dataBandCount(ds) on the file: all but a last band that is alpha.
     int DataBandCount() const noexcept;
 
+    SourceUse Use() const noexcept { return use_; }
+    /// The file has a geotransform (a kRead source may have none: a raster without georeferencing).
+    bool HasGeoTransform() const noexcept { return georef_.geoTransform.has_value(); }
+
     /// The CRS is EPSG:3857 (GDALTiler::sameProjection): tiles read the file directly.
     bool IsWebMercator() const noexcept { return webMercator_; }
     /// The warp model of a source in another CRS (null for EPSG:3857).
@@ -173,9 +182,11 @@ public:
 
 private:
     CogSource() = default;
-    void Init(const std::string& path, const std::string& canonicalPath, const FileIdentity& identity);
+    void Init(const std::string& path, const std::string& canonicalPath, const FileIdentity& identity,
+              SourceUse use);
 
     std::string path_;
+    SourceUse use_ = SourceUse::kTile;
     std::string canonicalPath_;
     FileIdentity identity_;
     std::string identityKey_;
