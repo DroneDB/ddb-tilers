@@ -941,6 +941,42 @@ TEST(HostApi, RasterReadReadsAWindowAsGdal) {
     std::filesystem::remove_all(dir);
 }
 
+// ddbtRasterReadLevel reads the pixels of a level one for one: level 0 is the raster itself; a level
+// the raster has not and a window outside the level are refused
+TEST(HostApi, RasterReadLevelReadsTheLevelPixelForPixel) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-read-level");
+    const std::string path = (dir / "r.tif").string();
+    syn::SynthSpec spec = syn::Spec(120, 2, 4);
+    spec.tile = 32;
+    spec.value = [](int band0, uint32_t x, uint32_t y) {
+        return static_cast<float>(static_cast<uint32_t>(band0) * 100000u + y * 1000u + x);
+    };
+    syn::WriteSynth(path, spec);
+    OpenRaster r(path);
+    ASSERT_NE(r.raster, nullptr);
+    const int bands[2] = {2, 1};
+    std::vector<double> got(2 * 30 * 20);
+    std::vector<uint8_t> mask(30 * 20, 0);
+    ASSERT_EQ(ddbtRasterReadLevel(r.raster, 0, 85, 95, 30, 20, bands, 2, DDBT_SAMPLE_FLOAT64, got.data(), mask.data()),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    for (uint32_t y = 0; y < 20; ++y)
+        for (uint32_t x = 0; x < 30; ++x) {
+            ASSERT_EQ(got[y * 30 + x], spec.value(1, 85 + x, 95 + y)) << x << "," << y;
+            ASSERT_EQ(got[600 + y * 30 + x], spec.value(0, 85 + x, 95 + y)) << x << "," << y;
+        }
+    EXPECT_TRUE(std::all_of(mask.begin(), mask.end(), [](uint8_t m) { return m == 255; })) << "no mask: 255";
+
+    EXPECT_EQ(ddbtRasterReadLevel(r.raster, 1, 0, 0, 1, 1, bands, 1, DDBT_SAMPLE_FLOAT64, got.data(), nullptr),
+              DDBT_ERR_INVALIDARGS) << "no overview";
+    EXPECT_EQ(ddbtRasterReadLevel(r.raster, 0, 100, 0, 21, 1, bands, 1, DDBT_SAMPLE_FLOAT64, got.data(), nullptr),
+              DDBT_ERR_INVALIDARGS) << "a window past the right edge";
+    EXPECT_EQ(ddbtRasterReadLevel(r.raster, -1, 0, 0, 1, 1, bands, 1, DDBT_SAMPLE_FLOAT64, got.data(), nullptr),
+              DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
 // A raster without georeferencing is opened for reading (a host reads the pixels of a photo copied to
 // a GeoTIFF), and the tiler still refuses it
 TEST(HostApi, RasterWithoutGeoreferencingIsReadNotTiled) {

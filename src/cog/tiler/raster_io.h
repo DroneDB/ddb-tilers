@@ -97,6 +97,9 @@ int BestLevel(const std::vector<std::pair<int, int>>& levels, double desired, do
 /// GDAL's RasterIO resolution of a read of window (x, y, w, h) into bufW x bufH (compat).
 SamplePlan PlanRead(const RasterView& view, int x, int y, int w, int h, int bufW, int bufH);
 
+/// The pixels of the window (x, y, w, h) of level `level` (0 = full resolution), one for one.
+SamplePlan PlanLevelRead(const RasterView& view, int level, int x, int y, int w, int h);
+
 /// Default mode: the tile pixels of a 3857 box (tile bounds, size px) on the view's level
 /// chosen from the tile resolution.
 SamplePlan PlanTile(const RasterView& view, double minX, double minY, double maxX, double maxY, int size);

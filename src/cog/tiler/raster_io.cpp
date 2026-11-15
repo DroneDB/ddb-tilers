@@ -461,6 +461,23 @@ SamplePlan PlanRead(const RasterView& view, int x, int y, int w, int h, int bufW
     return plan;
 }
 
+SamplePlan PlanLevelRead(const RasterView& view, int level, int x, int y, int w, int h) {
+    SamplePlan plan;
+    plan.bufW = w;
+    plan.bufH = h;
+    plan.viewLevel = level;
+    plan.cols.resize(static_cast<size_t>(w));
+    plan.rows.resize(static_cast<size_t>(h));
+    for (int i = 0; i < w; ++i) plan.cols[static_cast<size_t>(i)] = x + i;
+    for (int j = 0; j < h; ++j) plan.rows[static_cast<size_t>(j)] = y + j;
+    if (view.Warped()) {
+        plan.pointwise = true;
+        view.Source().Warp()->Map(view.Source(), plan.viewLevel, plan.cols, plan.rows, plan.srcLevel, plan.sx,
+                                  plan.sy);
+    }
+    return plan;
+}
+
 SamplePlan PlanTile(const RasterView& view, double minX, double minY, double maxX, double maxY, int size) {
     (void)minY;
     SamplePlan plan;

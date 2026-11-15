@@ -278,6 +278,16 @@ DDBT_API ddbtErr ddbtRasterRead(const ddbtRaster *raster, int x, int y, int widt
                                 int bufWidth, int bufHeight, const int *bands, int bandCount,
                                 ddbtSampleType type, void *out, uint8_t *mask);
 
+/** Reads the window (x, y, width, height) of one level of a raster, pixel for pixel: level 0 is the
+ * full resolution, level i the overview "overviews"[i - 1] of ddbtRasterInfo (GDALGetOverview(band,
+ * i - 1)), the window in the pixels of that level. `bands`, `type`, `out` and `mask` as for
+ * ddbtRasterRead (the mask of the level). Codes: DDBT_ERR_INVALIDARGS for a level the raster does not
+ * have, a window that is not inside the level, a bad band or type, DDBT_ERR_EXCEPTION for a block that
+ * cannot be read. */
+DDBT_API ddbtErr ddbtRasterReadLevel(const ddbtRaster *raster, int level, int x, int y, int width, int height,
+                                     const int *bands, int bandCount, ddbtSampleType type, void *out,
+                                     uint8_t *mask);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

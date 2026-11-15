@@ -156,12 +156,56 @@ ddbtErr ddbtRasterInfo(const ddbtRaster* raster, char** outJson) {
     });
 }
 
+namespace {
+
+namespace tl = ddbt::cog::tiler;
+
+// Checks the bands and the sample type of a read
+void CheckRead(const ddbtRaster* raster, const int* bands, int bandCount, ddbtSampleType type) {
+    if (bands == nullptr || bandCount <= 0) FailInvalid("Invalid bands");
+    for (int i = 0; i < bandCount; ++i)
+        if (bands[i] < 1 || bands[i] > raster->source->BandCount())
+            FailInvalid("Invalid band " + std::to_string(bands[i]));
+    if (type != DDBT_SAMPLE_NATIVE && type != DDBT_SAMPLE_FLOAT32 && type != DDBT_SAMPLE_FLOAT64)
+        FailInvalid("Invalid sample type");
+}
+
+// The samples of `bands` at the plan, converted to `type`, and the dataset mask
+void ReadPlanned(const ddbtRaster* raster, const tl::SamplePlan& plan, const int* bands, int bandCount,
+                 ddbtSampleType type, void* out, uint8_t* mask) {
+    const tl::RasterView& view = raster->view;
+    const size_t pixels = static_cast<size_t>(plan.bufW) * static_cast<size_t>(plan.bufH);
+    const size_t native = tl::PixelTypeSize(view.Type());
+    const std::span<const int> bandList(bands, static_cast<size_t>(bandCount));
+    const tl::PixelType nativeType = view.Type();
+    const bool asStored = type == DDBT_SAMPLE_NATIVE ||
+                          (type == DDBT_SAMPLE_FLOAT32 && nativeType == tl::PixelType::kF32) ||
+                          (type == DDBT_SAMPLE_FLOAT64 && nativeType == tl::PixelType::kF64);
+    if (asStored) {
+        // The samples go where they belong, with no copy
+        tl::GatherBands(view, plan, bandList, static_cast<uint8_t*>(out), pixels * native);
+    } else {
+        std::vector<uint8_t> samples(pixels * native * static_cast<size_t>(bandCount));
+        tl::GatherBands(view, plan, bandList, samples.data(), pixels * native);
+        const size_t count = pixels * static_cast<size_t>(bandCount);
+        if (type == DDBT_SAMPLE_FLOAT32)
+            ConvertSamples(nativeType, samples.data(), count, static_cast<float*>(out));
+        else
+            ConvertSamples(nativeType, samples.data(), count, static_cast<double*>(out));
+    }
+    if (mask != nullptr) {
+        if (view.HasDatasetMask()) tl::GatherDatasetMask(view, plan, mask);
+        else std::memset(mask, 255, pixels);
+    }
+}
+
+}  // namespace
+
 ddbtErr ddbtRasterRead(const ddbtRaster* raster, int x, int y, int width, int height, int bufWidth,
                        int bufHeight, const int* bands, int bandCount, ddbtSampleType type, void* out,
                        uint8_t* mask) {
     if (raster == nullptr || out == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid raster or out: NULL");
     return ddbt::api::GuardedCall([&]() -> ddbtErr {
-        namespace tl = ddbt::cog::tiler;
         const tl::RasterView& view = raster->view;
         if (width <= 0 || height <= 0 || bufWidth <= 0 || bufHeight <= 0)
             FailInvalid("Invalid window or buffer size");
@@ -169,37 +213,28 @@ ddbtErr ddbtRasterRead(const ddbtRaster* raster, int x, int y, int width, int he
         if (x < 0 || y < 0 || static_cast<int64_t>(x) + width > view.Width() ||
             static_cast<int64_t>(y) + height > view.Height())
             FailInvalid("Access window out of range in RasterIO()");
-        if (bands == nullptr || bandCount <= 0) FailInvalid("Invalid bands");
-        for (int i = 0; i < bandCount; ++i)
-            if (bands[i] < 1 || bands[i] > raster->source->BandCount())
-                FailInvalid("Invalid band " + std::to_string(bands[i]));
-        if (type != DDBT_SAMPLE_NATIVE && type != DDBT_SAMPLE_FLOAT32 && type != DDBT_SAMPLE_FLOAT64)
-            FailInvalid("Invalid sample type");
+        CheckRead(raster, bands, bandCount, type);
+        ReadPlanned(raster, tl::PlanRead(view, x, y, width, height, bufWidth, bufHeight), bands, bandCount, type,
+                    out, mask);
+        return DDBT_ERR_NONE;
+    });
+}
 
-        const tl::SamplePlan plan = tl::PlanRead(view, x, y, width, height, bufWidth, bufHeight);
-        const size_t pixels = static_cast<size_t>(bufWidth) * static_cast<size_t>(bufHeight);
-        const size_t native = tl::PixelTypeSize(view.Type());
-        const std::span<const int> bandList(bands, static_cast<size_t>(bandCount));
-        const tl::PixelType nativeType = view.Type();
-        const bool asStored = type == DDBT_SAMPLE_NATIVE ||
-                              (type == DDBT_SAMPLE_FLOAT32 && nativeType == tl::PixelType::kF32) ||
-                              (type == DDBT_SAMPLE_FLOAT64 && nativeType == tl::PixelType::kF64);
-        if (asStored) {
-            // The samples go where they belong, with no copy
-            tl::GatherBands(view, plan, bandList, static_cast<uint8_t*>(out), pixels * native);
-        } else {
-            std::vector<uint8_t> samples(pixels * native * static_cast<size_t>(bandCount));
-            tl::GatherBands(view, plan, bandList, samples.data(), pixels * native);
-            const size_t count = pixels * static_cast<size_t>(bandCount);
-            if (type == DDBT_SAMPLE_FLOAT32)
-                ConvertSamples(nativeType, samples.data(), count, static_cast<float*>(out));
-            else
-                ConvertSamples(nativeType, samples.data(), count, static_cast<double*>(out));
-        }
-        if (mask != nullptr) {
-            if (view.HasDatasetMask()) tl::GatherDatasetMask(view, plan, mask);
-            else std::memset(mask, 255, pixels);
-        }
+ddbtErr ddbtRasterReadLevel(const ddbtRaster* raster, int level, int x, int y, int width, int height,
+                            const int* bands, int bandCount, ddbtSampleType type, void* out, uint8_t* mask) {
+    if (raster == nullptr || out == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid raster or out: NULL");
+    return ddbt::api::GuardedCall([&]() -> ddbtErr {
+        const tl::RasterView& view = raster->view;
+        const auto& levels = view.Levels();
+        if (level < 0 || static_cast<size_t>(level) >= levels.size())
+            FailInvalid("Invalid level " + std::to_string(level));
+        const auto [levelWidth, levelHeight] = levels[static_cast<size_t>(level)];
+        if (width <= 0 || height <= 0) FailInvalid("Invalid window size");
+        if (x < 0 || y < 0 || static_cast<int64_t>(x) + width > levelWidth ||
+            static_cast<int64_t>(y) + height > levelHeight)
+            FailInvalid("Access window out of range in RasterIO()");
+        CheckRead(raster, bands, bandCount, type);
+        ReadPlanned(raster, tl::PlanLevelRead(view, level, x, y, width, height), bands, bandCount, type, out, mask);
         return DDBT_ERR_NONE;
     });
 }
