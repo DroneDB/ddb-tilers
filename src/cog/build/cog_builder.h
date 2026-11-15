@@ -118,7 +118,10 @@ struct HostRaster {
     encode::Codec codec = encode::Codec::kDeflate;
     int predictor = 2;
     int level = 0;  // DEFLATE / ZSTD level (0: GDAL's default)
-    std::optional<uint8_t> nodata;
+    /// The nodata value of the bands, any number (GDAL_NODATA, written as GTiff writes it): one that
+    /// Byte holds masks its pixels in the overviews; any other masks nothing, and the overviews take
+    /// GDAL's cast of it to 8 bits (pyramid/average.h)
+    std::optional<double> nodata;
     /// An internal 1-bit mask (GDAL's per-dataset mask band): the host fills it as one more sample
     /// after the bands of each pixel (0: transparent); its overviews are GDAL's AVERAGE of the mask
     /// with itself as its mask (255 wherever a pixel they cover is not 0), the bands' with it (a nodata

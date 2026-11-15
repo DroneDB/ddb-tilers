@@ -297,13 +297,15 @@ typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int hei
 
 /** Writes `outputPath`, a tiled GeoTIFF (the COG layout) of 8-bit bands whose pixels the host
  * computes, as GDAL's GTiff driver writes a raster created band by band (the photometric and
- * ExtraSamples of the colour interpretations) and given its overviews by GDALBuildOverviews
+ * ExtraSamples of the colour interpretations, and the interpretations they do not give in GDAL_METADATA, so GDAL
+ * reads every band back as named) and given its overviews by GDALBuildOverviews
  * AVERAGE (each level from the one above; an alpha band masks every band, itself included, by GDAL's
  * rule for the last of 2 or 4 bands, a nodata value every band). The output appears whole (temporary + rename), nothing is left on a
  * failure. optionsJson: {"width", "height", "colorInterp" (GDAL's names, one per band: "Red",
  * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "blockSize" (256; a multiple of 16), "codec"
  * ("deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2; 2), "level" (DEFLATE / ZSTD level,
- * 0: GDAL's default), "nodata" (0..255), "mask" (true: an internal 1-bit mask, which the host fills as one more sample after the
+ * 0: GDAL's default), "nodata" (a number, or "nan": the GDAL_NODATA of the bands; a value Byte holds masks its pixels in the
+ * overviews, any other masks nothing and is cast to 8 bits as GDAL's overviews cast it), "mask" (true: an internal 1-bit mask, which the host fills as one more sample after the
  * bands of each pixel, 0 where it is transparent; the bands' overviews honour it, and its own are 255 wherever a
  * pixel they cover is not 0), "overviewFactors" ([2, 4, ...]: level i is
  * ceil(width / f) x ceil(height / f)), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose

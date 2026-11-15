@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
 // ddbtWriteRaster: a GeoTIFF of 8-bit bands a host computes (cog_builder.h, WriteHostRaster).
+#include <cmath>
 #include <exception>
 #include <new>
 #include <stdexcept>
@@ -63,9 +64,9 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
             if (!Unsigned(val, l) || l > 22) return "Invalid optionsJson: level";
             r.level = static_cast<int>(l);
         } else if (key == "nodata") {
-            uint32_t n = 0;
-            if (!Unsigned(val, n) || n > 255) return "Invalid optionsJson: nodata must be 0..255";
-            r.nodata = static_cast<uint8_t>(n);
+            if (val.IsNumber()) r.nodata = val.num;
+            else if (val.kind == json::Value::Kind::kString && val.str == "nan") r.nodata = std::nan("");
+            else return "Invalid optionsJson: nodata must be a number or \"nan\"";
         } else if (key == "mask") {
             if (val.kind != json::Value::Kind::kBool) return "Invalid optionsJson: mask must be a boolean";
             r.mask = val.b;

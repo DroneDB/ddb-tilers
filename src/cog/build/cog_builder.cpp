@@ -234,6 +234,39 @@ private:
 // ---------------------------------------------------------------------------------------------
 // A raster a host computes: tile (col, row) is the window the host fills.
 
+// GTiffFormatGDALNoDataTagValue
+std::string GdalNoDataText(double nodata) {
+    if (std::isnan(nodata)) return "nan";
+    char text[64];
+    std::snprintf(text, sizeof text, "%.17g", nodata);
+    return text;
+}
+
+// The colour interpretation the photometric and ExtraSamples of a GTiff give band b (0-based): red,
+// green, blue for RGB, grey for the first band of min-is-black, alpha for an alpha extra sample,
+// undefined for any other
+std::string ImpliedColorInterp(const Plan& p, size_t b) {
+    const size_t colour = p.photometric == tiff::photometric::kRgb ? 3 : 1;
+    if (b < colour) {
+        static const char* const rgb[3] = {"Red", "Green", "Blue"};
+        return colour == 3 ? rgb[b] : "Gray";
+    }
+    const size_t extra = b - colour;
+    if (extra < p.extraSamples.size() && (p.extraSamples[extra] == 1 || p.extraSamples[extra] == 2)) return "Alpha";
+    return "Undefined";
+}
+
+// GDAL_METADATA with the colour interpretations the photometric does not give (role "colorinterp", as
+// GTiff writes them): GDAL reads every band back as the host named it; "" when there is none
+std::string ColorInterpMetadata(const Plan& p, const std::vector<std::string>& interps) {
+    std::string items;
+    for (size_t b = 0; b < interps.size(); ++b)
+        if (interps[b] != ImpliedColorInterp(p, b))
+            items += "  <Item name=\"COLORINTERP\" sample=\"" + std::to_string(b) + "\" role=\"colorinterp\">" +
+                     interps[b] + "</Item>\n";
+    return items.empty() ? std::string() : "<GDALMetadata>\n" + items + "</GDALMetadata>\n";
+}
+
 class HostProducer final : public TileProducer {
 public:
     explicit HostProducer(const HostRaster& raster) : raster_(raster) {}
@@ -298,18 +331,17 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     const auto alpha = std::find(r.colorInterp.begin(), r.colorInterp.end(), "Alpha");
     if (r.mask && alpha != r.colorInterp.end())
         return Status(StatusCode::kInvalidArgument, "A raster with a mask has no alpha band");
-    if (r.mask) {
-        // The mask decides which pixels the overviews average; a nodata value is kept (and replaced
-        // where an average computes it), as GTiff keeps both
-        p.transparency = Transparency::kMask;
-        if (r.nodata) {
-            p.nodata = *r.nodata;
-            p.nodataText = std::to_string(*r.nodata);
-        }
-    } else if (r.nodata) {
-        p.transparency = Transparency::kNoData;
+    if (r.nodata) {
         p.nodata = *r.nodata;
-        p.nodataText = std::to_string(*r.nodata);
+        p.nodataText = GdalNoDataText(*r.nodata);
+    }
+    const bool byteNoData = r.nodata && *r.nodata >= 0 && *r.nodata <= 255 && *r.nodata == std::floor(*r.nodata);
+    if (r.mask) {
+        // The mask decides which pixels the overviews average (a nodata value is still replaced where an
+        // average computes it), as GTiff keeps both
+        p.transparency = Transparency::kMask;
+    } else if (byteNoData) {
+        p.transparency = Transparency::kNoData;
     } else if (alpha != r.colorInterp.end()) {
         p.transparency = Transparency::kAlpha;
         p.alphaBand = static_cast<int>(alpha - r.colorInterp.begin());
@@ -320,7 +352,7 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.level = r.level;
     p.resampling = OverviewResampling::kAverage;
     p.keepMaskedTiles = true;
-    p.gdalMetadata = OutputMetadata(std::string(), p, false);
+    p.gdalMetadata = ColorInterpMetadata(p, r.colorInterp);
     return p;
 }
 

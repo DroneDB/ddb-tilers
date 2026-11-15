@@ -24,6 +24,7 @@ int AverageTaps::SrcEnd() const {
 AverageTaps AverageAxis(int srcSize, int dstSize, int dst0, int dst1) {
     AverageTaps t;
     t.dst0 = dst0;
+    t.half = srcSize == 2 * dstSize;
     const size_t n = static_cast<size_t>(std::max(0, dst1 - dst0));
     t.start.resize(n);
     t.count.resize(n);
@@ -56,10 +57,18 @@ AverageTaps AverageAxis(int srcSize, int dstSize, int dst0, int dst1) {
     return t;
 }
 
+uint8_t CastNoData(double nodata) {
+    if (std::isnan(nodata) || nodata <= -2147483648.0 || nodata >= 2147483648.0) return 0;
+    return static_cast<uint8_t>(static_cast<int32_t>(nodata));
+}
+
 namespace {
 
-// GDALGetNoDataReplacementValue for UInt8
-uint8_t Replacement(uint8_t nodata) { return nodata == 255 ? 254 : static_cast<uint8_t>(nodata + 1); }
+// GDALGetNoDataReplacementValue for UInt8: 0 for a nodata value Byte cannot hold
+uint8_t Replacement(double nodata) {
+    if (!(nodata >= 0 && nodata <= 255)) return 0;
+    return nodata == 255 ? 254 : static_cast<uint8_t>(nodata + 1);
+}
 
 uint8_t Rounded(double total, double weight) { return static_cast<uint8_t>(total / weight + 0.5); }
 
@@ -72,8 +81,8 @@ void Average(const DownsampleSpec& spec, const uint8_t* src, size_t srcStride, i
     (void)srcH;
     const int bands = spec.bands;
     const bool hasNoData = spec.hasNoData;
-    const uint8_t nodata = hasNoData ? static_cast<uint8_t>(spec.noData) : 0;
-    const uint8_t replacement = Replacement(nodata);
+    const uint8_t nodata = hasNoData ? CastNoData(spec.noData) : 0;
+    const uint8_t replacement = Replacement(spec.noData);
     // A sample at (x, y) of the source window (absolute coordinates) of band b
     const auto sample = [&](int x, int y, int b) {
         return src[static_cast<size_t>(y - srcY0) * srcStride + static_cast<size_t>(x - srcX0) * bands + b];
@@ -84,7 +93,8 @@ void Average(const DownsampleSpec& spec, const uint8_t* src, size_t srcStride, i
                 return srcMask == nullptr ||
                        srcMask[static_cast<size_t>(y - srcY0) * static_cast<size_t>(srcW) + (x - srcX0)] != 0;
             case MaskMode::kNoData:
-                return !hasNoData || sample(x, y, b) != nodata;
+                // GDALNoDataMaskBand: a nodata value Byte cannot hold masks nothing
+                return !hasNoData || !(spec.noData >= 0 && spec.noData <= 255) || sample(x, y, b) != nodata;
             default:
                 return true;
         }
@@ -100,7 +110,13 @@ void Average(const DownsampleSpec& spec, const uint8_t* src, size_t srcStride, i
             const double left = cols.first[cx], right = cols.last[cx];
             for (int b = 0; b < bands; ++b) {
                 uint8_t value;
-                if (spec.mask == MaskMode::kNone) {
+                if (spec.mask == MaskMode::kNone && cols.half && rows.count[ry] == 2) {
+                    // GDAL's fast path: the four samples, no replacement
+                    const unsigned sum = sample(x0, y0, b) + sample(x0 + 1, y0, b) + sample(x0, y0 + 1, b) +
+                                         sample(x0 + 1, y0 + 1, b);
+                    out[cx * static_cast<size_t>(bands) + static_cast<size_t>(b)] = static_cast<uint8_t>((sum + 2) / 4);
+                    continue;
+                } else if (spec.mask == MaskMode::kNone) {
                     double total = 0;
                     for (int y = y0; y < y1; ++y) {
                         double line = sample(x0, y, b) * left;
