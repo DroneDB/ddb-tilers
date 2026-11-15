@@ -288,29 +288,32 @@ DDBT_API ddbtErr ddbtRasterReadLevel(const ddbtRaster *raster, int level, int x,
                                      const int *bands, int bandCount, ddbtSampleType type, void *out,
                                      uint8_t *mask);
 
-/** Fills a window of the raster ddbtWriteRaster writes: the 8-bit samples of every band of the
- * `width` x `height` pixels at (x, y), interleaved, each row `stride` bytes after the one before.
+/** Fills a window of the raster ddbtWriteRaster writes: the samples of every band of the
+ * `width` x `height` pixels at (x, y), of the raster's type in native byte order, interleaved, each
+ * row `stride` bytes after the one before.
  * Called one window at a time. Returns 0 to go on, anything else to stop the write (which then
  * fails with DDBT_ERR_EXCEPTION). */
 typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int height, uint8_t *out,
                                 size_t stride);
 
-/** Writes `outputPath`, a tiled GeoTIFF (the COG layout) of 8-bit bands whose pixels the host
+/** Writes `outputPath`, a tiled GeoTIFF (the COG layout) of bands whose pixels the host
  * computes, as GDAL's GTiff driver writes a raster created band by band (the photometric and
  * ExtraSamples of the colour interpretations, and the interpretations they do not give in GDAL_METADATA, so GDAL
  * reads every band back as named) and given its overviews by GDALBuildOverviews
  * AVERAGE (each level from the one above; an alpha band masks every band, itself included, by GDAL's
  * rule for the last of 2 or 4 bands, a nodata value every band). The output appears whole (temporary + rename), nothing is left on a
- * failure. optionsJson: {"width", "height", "colorInterp" (GDAL's names, one per band: "Red",
+ * failure. optionsJson: {"width", "height", "type" (GDAL's name of the type of the samples: "Byte", "UInt16",
+ * "Int16", "UInt32", "Int32", "Float32", "Float64"...; "Byte"), "colorInterp" (GDAL's names, one per band: "Red",
  * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "descriptions" (the description of each band, "" for none),
  * "blockSize" (256; a multiple of 16), "codec"
- * ("deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2; 2), "level" (DEFLATE / ZSTD level,
+ * ("none" | "deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2 | 3, 3 for floating-point samples only; 2), "level" (DEFLATE / ZSTD level,
  * 0: GDAL's default), "nodata" (a number, or "nan": the GDAL_NODATA of the bands; a value Byte holds masks its pixels in the
  * overviews, any other masks nothing and is cast to 8 bits as GDAL's overviews cast it), "mask" (true: an internal 1-bit mask, which the host fills as one more sample after the
  * bands of each pixel, 0 where it is transparent; the bands' overviews honour it, and its own are 255 wherever a
  * pixel they cover is not 0), "overviewFactors" ([2, 4, ...]: level i is
- * ceil(width / f) x ceil(height / f)), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose
- * CRS, its GeoKeys as they are, the output takes), "memoryMb" (pipeline budget, 2048)}.
+ * ceil(width / f) x ceil(height / f); for 8-bit bands only), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose
+ * CRS, its GeoKeys as they are, the output takes) or "crs" (a CRS with an EPSG code, any text PROJ reads: GDAL's
+ * GeoKeys of EPSG:3857 and EPSG:4326, the code of another), "memoryMb" (pipeline budget, 2048)}.
  * progress: phases "overviews", "compressing". */
 DDBT_API ddbtErr ddbtWriteRaster(const char *outputPath, const char *optionsJson, ddbtFillCallback fill,
                                  void *fillUserData, ddbtProgressCallback progress, void *progressUserData);

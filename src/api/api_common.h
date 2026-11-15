@@ -9,8 +9,11 @@
 #include <cstdlib>
 #include <exception>
 #include <new>
+#include <optional>
 #include <string>
+#include <string_view>
 
+#include "cog/tiff/tiff_reader.h"
 #include "cog/tiler/tile_error.h"
 #include "core/encode/tile_encoder.h"
 #include "core/util/last_error.h"
@@ -43,6 +46,11 @@ ddbtErr CopyOut(const std::string& text, char** out);
 /// "webp" or their MIME types, case-insensitive; NULL or "" is PNG). Throws TileError
 /// (kInvalidArgs, "Unsupported image format: X") otherwise.
 encode::TileFormat ParseFormat(const char* outputFormat);
+
+/// GDAL's name of a sample type ("Byte", "UInt16", "Float32"...; "Unknown" for the others).
+const char* GdalTypeName(cog::tiff::SampleType t) noexcept;
+/// The sample type of a GDAL type name (the integer and floating-point types; nullopt otherwise).
+std::optional<cog::tiff::SampleType> SampleTypeOfGdalName(std::string_view name) noexcept;
 
 /// Throws TileError (kNotImplemented) for a remote path (http, https, s3, GDAL /vsi).
 void RequireLocal(const std::string& path);

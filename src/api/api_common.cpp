@@ -96,4 +96,35 @@ void RequireLocalOrUrl(const std::string& path) {
     if (IsRemote(path) && !io::IsRemotePath(path)) FailRemote(path);
 }
 
+namespace {
+
+using cog::tiff::SampleType;
+constexpr SampleType kGdalTypes[] = {SampleType::kU8,  SampleType::kI8,  SampleType::kU16, SampleType::kI16,
+                                     SampleType::kU32, SampleType::kI32, SampleType::kU64, SampleType::kI64,
+                                     SampleType::kF32, SampleType::kF64};
+
+}  // namespace
+
+const char* GdalTypeName(SampleType t) noexcept {
+    switch (t) {
+        case SampleType::kU8: return "Byte";
+        case SampleType::kI8: return "Int8";
+        case SampleType::kU16: return "UInt16";
+        case SampleType::kI16: return "Int16";
+        case SampleType::kU32: return "UInt32";
+        case SampleType::kI32: return "Int32";
+        case SampleType::kU64: return "UInt64";
+        case SampleType::kI64: return "Int64";
+        case SampleType::kF32: return "Float32";
+        case SampleType::kF64: return "Float64";
+        default: return "Unknown";
+    }
+}
+
+std::optional<SampleType> SampleTypeOfGdalName(std::string_view name) noexcept {
+    for (const SampleType t : kGdalTypes)
+        if (name == GdalTypeName(t)) return t;
+    return std::nullopt;
+}
+
 }  // namespace ddbt::api

@@ -110,6 +110,8 @@ struct BuildReport {
 /// its own grid and CRS, tiled, the overviews each from the level above.
 struct HostRaster {
     uint32_t width = 0, height = 0;
+    /// The type of the samples (any integer or floating-point type; the overviews are 8-bit only)
+    tiff::SampleType type = tiff::SampleType::kU8;
     /// GDAL's colour interpretation of each band ("Red", "Green", "Blue", "Gray", "Alpha",
     /// "Undefined"...): the photometric and ExtraSamples GTiff writes for them; an alpha band masks
     /// the others in the overviews by GDAL's rule (the last of 2 or 4 bands).
@@ -118,7 +120,7 @@ struct HostRaster {
     std::vector<std::string> descriptions;
     uint32_t blockSize = 256;  // square tiles, a multiple of 16
     encode::Codec codec = encode::Codec::kDeflate;
-    int predictor = 2;
+    int predictor = 2;  // 1 none, 2 horizontal, 3 floating point (floating-point samples only)
     int level = 0;  // DEFLATE / ZSTD level (0: GDAL's default)
     /// The nodata value of the bands, any number (GDAL_NODATA, written as GTiff writes it): one that
     /// Byte holds masks its pixels in the overviews; any other masks nothing, and the overviews take
@@ -134,8 +136,8 @@ struct HostRaster {
     std::array<double, 6> geoTransform{};
     bool georeferenced = false;
     writer::GeoKeys geoKeys;
-    /// Writes the window (x, y, w, h) of every band (and the mask, with `mask`), pixel-interleaved,
-    /// rows `stride` bytes apart into `out`. Called one at a time, in no particular order; throws to
+    /// Writes the window (x, y, w, h) of every band (samples of `type`, native byte order; and the
+    /// mask byte, with `mask`), pixel-interleaved, rows `stride` bytes apart into `out`. Called one at a time, in no particular order; throws to
     /// stop the write.
     std::function<void(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t* out, size_t stride)> fill;
 };

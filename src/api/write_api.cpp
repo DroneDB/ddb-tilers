@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-// ddbtWriteRaster: a GeoTIFF of 8-bit bands a host computes (cog_builder.h, WriteHostRaster).
+// ddbtWriteRaster: a GeoTIFF of bands a host computes (cog_builder.h, WriteHostRaster).
 #include <cmath>
 #include <exception>
 #include <new>
@@ -10,6 +10,7 @@
 #include "api/build_progress.h"
 #include "cog/build/cog_builder.h"
 #include "cog/tiler/json_lite.h"
+#include "core/crs/crs.h"
 #include "core/util/last_error.h"
 #include "ddbt/ddbt.h"
 
@@ -53,17 +54,22 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
                 if (v.kind != json::Value::Kind::kString) return "Invalid optionsJson: descriptions must be texts";
                 r.descriptions.push_back(v.str);
             }
+        } else if (key == "type") {
+            const auto t = val.kind == json::Value::Kind::kString ? ddbt::api::SampleTypeOfGdalName(val.str) : std::nullopt;
+            if (!t) return "Invalid optionsJson: type must be a GDAL data type name (Byte, UInt16, Float32...)";
+            r.type = *t;
         } else if (key == "blockSize") {
             if (!Unsigned(val, r.blockSize)) return "Invalid optionsJson: blockSize";
         } else if (key == "codec") {
             if (val.kind != json::Value::Kind::kString) return "Invalid optionsJson: codec";
-            if (val.str == "deflate") r.codec = Codec::kDeflate;
+            if (val.str == "none") r.codec = Codec::kNone;
+            else if (val.str == "deflate") r.codec = Codec::kDeflate;
             else if (val.str == "lzw") r.codec = Codec::kLzw;
             else if (val.str == "zstd") r.codec = Codec::kZstd;
-            else return "Invalid optionsJson: codec must be deflate, lzw or zstd";
+            else return "Invalid optionsJson: codec must be none, deflate, lzw or zstd";
         } else if (key == "predictor") {
             uint32_t p = 0;
-            if (!Unsigned(val, p) || (p != 1 && p != 2)) return "Invalid optionsJson: predictor must be 1 or 2";
+            if (!Unsigned(val, p) || p < 1 || p > 3) return "Invalid optionsJson: predictor must be 1, 2 or 3";
             r.predictor = static_cast<int>(p);
         } else if (key == "level") {
             uint32_t l = 0;
@@ -95,6 +101,15 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
             auto keys = ddbt::cog::writer::GeoKeysOfFile(val.str);
             if (!keys.ok()) return "Cannot read the GeoKeys of " + val.str + ": " + std::string(keys.status().message());
             r.geoKeys = std::move(*keys);
+        } else if (key == "crs") {
+            if (val.kind != json::Value::Kind::kString || val.str.empty()) return "Invalid optionsJson: crs";
+            try {
+                auto keys = ddbt::cog::writer::GeoKeysOf(ddbt::crs::Crs::FromUserInput(val.str));
+                if (!keys.ok()) return "Cannot write the GeoKeys of " + val.str + ": " + std::string(keys.status().message());
+                r.geoKeys = std::move(*keys);
+            } catch (const std::exception& e) {
+                return "Invalid optionsJson: crs: " + std::string(e.what());
+            }
         } else if (key == "memoryMb") {
             uint32_t mb = 0;
             if (!Unsigned(val, mb) || mb == 0) return "Invalid optionsJson: memoryMb";

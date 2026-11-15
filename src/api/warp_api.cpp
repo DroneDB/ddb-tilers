@@ -19,23 +19,6 @@ namespace json = ddbt::cog::tiler::json;
 using ddbt::api::Fail;
 using ddbt::cog::warp::RegionRequest;
 
-const char* GdalTypeName(ddbt::cog::tiff::SampleType t) {
-    using ddbt::cog::tiff::SampleType;
-    switch (t) {
-        case SampleType::kU8: return "Byte";
-        case SampleType::kI8: return "Int8";
-        case SampleType::kU16: return "UInt16";
-        case SampleType::kI16: return "Int16";
-        case SampleType::kU32: return "UInt32";
-        case SampleType::kI32: return "Int32";
-        case SampleType::kU64: return "UInt64";
-        case SampleType::kI64: return "Int64";
-        case SampleType::kF32: return "Float32";
-        case SampleType::kF64: return "Float64";
-        default: return "Unknown";
-    }
-}
-
 bool Size(const json::Value& v, uint32_t& out) {
     if (!v.IsNumber() || v.num < 1 || v.num > 1e6 || v.num != std::floor(v.num)) return false;
     out = static_cast<uint32_t>(v.num);
@@ -108,7 +91,7 @@ extern "C" ddbtErr ddbtWarpRaster(const char* inputPath, const char* optionsJson
         o.obj["width"] = json::Unsigned(w.width);
         o.obj["height"] = json::Unsigned(w.height);
         o.obj["bands"] = json::Unsigned(static_cast<uint64_t>(w.bands));
-        o.obj["type"] = json::String(GdalTypeName(w.type));
+        o.obj["type"] = json::String(ddbt::api::GdalTypeName(w.type));
         json::Value gt = json::Value{};
         gt.kind = json::Value::Kind::kArray;
         for (const double v : w.geoTransform) gt.arr.push_back(json::Number(v));
