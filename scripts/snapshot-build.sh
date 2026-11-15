@@ -34,13 +34,14 @@ cp -a "$BUILD/ddbcmd" "$SNAP/usr/bin/ddb"
 for helper in gdal-util metadata-util bm3d untwine; do
   [ -x "$BUILD/$helper" ] && cp -a "$BUILD/$helper" "$SNAP/usr/bin/"
 done
-# Shared libraries libddb resolves outside the system (PDAL and its plugins)
-ldd "$BUILD/libddb.so" | awk '/=> \// {print $3}' | grep -v -E '^/(usr/)?lib' | while read -r lib; do
+# Shared libraries libddb resolves outside the system (none when every library is linked statically:
+# grep then matches nothing, which is not a failure)
+ldd "$BUILD/libddb.so" | awk '/=> \// {print $3}' | { grep -v -E '^/(usr/)?lib' || true; } | while read -r lib; do
   cp -L "$lib" "$SNAP/usr/lib/"
 done
 # Data files the build copies next to its binaries
 for f in proj.db sensor-profiles.json sensor_data.sqlite timezone21.bin curl-ca-bundle.crt gdal zoneinfo; do
-  [ -e "$BUILD/$f" ] && cp -a "$BUILD/$f" "$SNAP/usr/share/ddb/"
+  if [ -e "$BUILD/$f" ]; then cp -a "$BUILD/$f" "$SNAP/usr/share/ddb/"; fi
 done
 
 cat > "$WORK/snapshots/$NAME.env" <<EOF
