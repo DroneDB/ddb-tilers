@@ -146,6 +146,35 @@ DDBT_API ddbtErr ddbtMemoryTileEx3(const char *inputPath, int tz, int tx, int ty
 DDBT_API ddbtErr ddbtRenderCopcThumbnail(const char *inputPath, int size, uint64_t pointBudget, uint8_t **outRgba,
                                          int *outRgbaSize);
 
+/** An 8-bit, pixel-interleaved image for ddbtEncodeImage. channels: 1 grey (or palette
+ * indices when palette is set), 2 grey + alpha, 3 RGB, 4 RGBA. stride: bytes from one row to the
+ * next, 0 for width * channels. palette: paletteSize (1 to 256) RGBA quadruples of a 1-channel
+ * image, NULL for grey. The pixels and the palette are not kept after the call. */
+typedef struct ddbtImage
+{
+    const uint8_t *pixels;
+    uint32_t width;
+    uint32_t height;
+    uint32_t channels;
+    size_t stride;
+    const uint8_t *palette;
+    uint32_t paletteSize;
+} ddbtImage;
+
+/** Encodes an image as PNG, JPEG or WebP with the rules of the tiles: PNG at zlib level 1, JPEG
+ * quality 75 and WebP quality 80 by default; an alpha channel that is 255 everywhere is not
+ * written; JPEG has no alpha (pixels of alpha 0 are written white, grey stays grey); WebP is
+ * always RGB or RGBA; a fully transparent image gives the same bytes as a blank tile of its size.
+ * Codes: DDBT_ERR_INVALIDARGS for a bad argument (NULL image or outputs, an image of no pixels,
+ * channels outside 1..4, a stride shorter than a row, a palette on more than one channel, a
+ * quality outside 0..100, an unknown format), DDBT_ERR_EXCEPTION otherwise.
+ * @param format "png", "jpeg"/"jpg" or "webp" (or their MIME types), NULL or "" for PNG
+ * @param quality JPEG / WebP quality 1 to 100, 0 for the default of the format; ignored for PNG
+ * @param outBuffer receives the encoded image; release it with ddbtFree
+ * @param outBufferSize receives the size in bytes of *outBuffer */
+DDBT_API ddbtErr ddbtEncodeImage(const ddbtImage *image, const char *format, int quality, uint8_t **outBuffer,
+                                 int *outBufferSize);
+
 /** Release a buffer or string returned by ddbt (counterpart of DDBVSIFree and DDBFree).
  * NULL is a no-op. */
 DDBT_API ddbtErr ddbtFree(void *ptr);

@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -23,6 +24,7 @@
 #include "copcbuild/synth_las.h"
 #include "copctiler/synth_cloud.h"
 #include "core/crs/crs.h"
+#include "core/encode/tile_encoder.h"
 #include "core/exec/thread_pool.h"
 #include "core/tile/compat.h"
 #include "ddbt/ddbt.h"
@@ -468,6 +470,106 @@ TEST(HostApi, TileInfoRefusesBadArguments) {
     EXPECT_NE(ddbtTileInfo(path.c_str(), 100, &out), DDBT_ERR_NONE);
     EXPECT_EQ(out, nullptr);
     std::filesystem::remove_all(dir);
+}
+
+// ddbtEncodeImage gives the bytes of the tile encoders for the same image and options, and refuses
+// bad arguments with DDBT_ERR_INVALIDARGS and a message.
+TEST(HostApi, EncodeImageGivesTheBytesOfTheTileEncoders) {
+    namespace encode = ddbt::encode;
+    const uint32_t w = 37, h = 23;
+    std::vector<uint8_t> rgba(size_t{w} * h * 4);
+    for (size_t i = 0; i < rgba.size(); ++i) rgba[i] = static_cast<uint8_t>(i * 7 + i / 5);
+    for (size_t p = 0; p < size_t{w} * h; ++p) rgba[p * 4 + 3] = p % 3 == 0 ? 0 : 255;
+    std::vector<uint8_t> opaque = rgba;
+    for (size_t p = 0; p < size_t{w} * h; ++p) opaque[p * 4 + 3] = 255;
+    const std::vector<uint8_t> clear(size_t{w} * h * 4, 0);
+    const uint8_t palette[] = {0, 0, 0, 0, 255, 0, 0, 255, 0, 255, 0, 128};
+    std::vector<uint8_t> indices(size_t{w} * h);
+    for (size_t i = 0; i < indices.size(); ++i) indices[i] = static_cast<uint8_t>(i % 3);
+
+    struct Case {
+        const uint8_t* pixels;
+        uint32_t channels;
+        const uint8_t* palette;
+        uint32_t paletteSize;
+    };
+    const Case cases[] = {{rgba.data(), 4, nullptr, 0}, {opaque.data(), 4, nullptr, 0},
+                          {clear.data(), 4, nullptr, 0}, {rgba.data(), 3, nullptr, 0},
+                          {rgba.data(), 2, nullptr, 0},  {rgba.data(), 1, nullptr, 0},
+                          {indices.data(), 1, palette, 3}};
+    for (const char* format : {"png", "jpeg", "webp", "image/webp"}) {
+        for (const int quality : {0, 60}) {
+            for (const Case& c : cases) {
+                if (c.palette != nullptr && std::string(format) != "png") continue;
+                std::vector<encode::PaletteEntry> entries;
+                for (uint32_t i = 0; i < c.paletteSize; ++i)
+                    entries.push_back(
+                        {c.palette[4 * i], c.palette[4 * i + 1], c.palette[4 * i + 2], c.palette[4 * i + 3]});
+                encode::TileImage view = encode::TileImage::Packed(c.pixels, w, h, c.channels);
+                view.palette = entries.empty() ? nullptr : entries.data();
+                view.paletteSize = c.paletteSize;
+                encode::EncodeOptions options;
+                options.format = *encode::ParseTileFormat(format);
+                options.quality = quality;
+                const encode::ByteBuffer expected = encode::EncodeTile(view, options);
+
+                const ddbtImage image{c.pixels, w, h, c.channels, 0, c.palette, c.paletteSize};
+                uint8_t* out = nullptr;
+                int size = 0;
+                ASSERT_EQ(ddbtEncodeImage(&image, format, quality, &out, &size), DDBT_ERR_NONE)
+                    << ddbtLastError();
+                EXPECT_STREQ(ddbtLastError(), "");
+                ASSERT_EQ(static_cast<size_t>(size), expected.size()) << format << " " << c.channels;
+                EXPECT_EQ(std::memcmp(out, expected.data(), expected.size()), 0)
+                    << format << " " << c.channels;
+                ddbtFree(out);
+            }
+        }
+    }
+
+    // A stride wider than a row reads the same pixels
+    std::vector<uint8_t> padded(size_t{w + 3} * 4 * h, 0xAB);
+    for (uint32_t y = 0; y < h; ++y)
+        std::memcpy(padded.data() + size_t{y} * (w + 3) * 4, rgba.data() + size_t{y} * w * 4, size_t{w} * 4);
+    const ddbtImage tight{rgba.data(), w, h, 4, 0, nullptr, 0};
+    const ddbtImage strided{padded.data(), w, h, 4, size_t{w + 3} * 4, nullptr, 0};
+    uint8_t *a = nullptr, *b = nullptr;
+    int sa = 0, sb = 0;
+    ASSERT_EQ(ddbtEncodeImage(&tight, "png", 0, &a, &sa), DDBT_ERR_NONE);
+    ASSERT_EQ(ddbtEncodeImage(&strided, nullptr, 0, &b, &sb), DDBT_ERR_NONE);
+    ASSERT_EQ(sa, sb);
+    EXPECT_EQ(std::memcmp(a, b, static_cast<size_t>(sa)), 0);
+    ddbtFree(a);
+    ddbtFree(b);
+
+    // Bad arguments
+    uint8_t* out = nullptr;
+    int size = 0;
+    const auto refused = [&](const ddbtImage* image, const char* format, int quality, const char* message) {
+        EXPECT_EQ(ddbtEncodeImage(image, format, quality, &out, &size), DDBT_ERR_INVALIDARGS) << message;
+        EXPECT_NE(std::string(ddbtLastError()).find(message), std::string::npos) << ddbtLastError();
+        EXPECT_EQ(out, nullptr);
+    };
+    refused(nullptr, "png", 0, "Invalid image: NULL");
+    refused(&tight, "gif", 0, "Unsupported image format: gif");
+    refused(&tight, "jpeg", 101, "Invalid quality: 101");
+    refused(&tight, "jpeg", -1, "Invalid quality: -1");
+    const ddbtImage noPixels{nullptr, w, h, 4, 0, nullptr, 0};
+    refused(&noPixels, "png", 0, "Invalid image: image has no pixels");
+    const ddbtImage empty{rgba.data(), 0, h, 4, 0, nullptr, 0};
+    refused(&empty, "png", 0, "Invalid image: image has an empty size");
+    const ddbtImage fiveChannels{rgba.data(), w, h, 5, 0, nullptr, 0};
+    refused(&fiveChannels, "png", 0, "Invalid image: image must have 1 to 4 channels");
+    const ddbtImage shortStride{rgba.data(), w, h, 4, size_t{w} * 4 - 1, nullptr, 0};
+    refused(&shortStride, "png", 0, "Invalid image: image stride is shorter than a row");
+    const ddbtImage paletteRgb{rgba.data(), w, h, 3, 0, palette, 3};
+    refused(&paletteRgb, "png", 0, "Invalid image: a palette image must have 1 channel");
+    const ddbtImage noEntries{indices.data(), w, h, 1, 0, palette, 0};
+    refused(&noEntries, "png", 0, "Invalid palette: 0 entries");
+    const ddbtImage sizeWithoutPalette{indices.data(), w, h, 1, 0, nullptr, 3};
+    refused(&sizeWithoutPalette, "png", 0, "Invalid palette: NULL with 3 entries");
+    EXPECT_EQ(ddbtEncodeImage(&tight, "png", 0, nullptr, &size), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtEncodeImage(&tight, "png", 0, &out, nullptr), DDBT_ERR_INVALIDARGS);
 }
 
 // The phase of every report is the one DroneDB's cogPhaseOfFraction gives its fraction (with a warp:

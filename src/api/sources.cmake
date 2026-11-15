@@ -4,4 +4,5 @@ list(APPEND DDBT_SOURCES
   api/api_common.cpp
   api/host_api.cpp
   api/tile_api.cpp
-  api/build_api.cpp)
+  api/build_api.cpp
+  api/encode_api.cpp)
