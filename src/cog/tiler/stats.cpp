@@ -263,6 +263,10 @@ tiff::SampleType ToSampleType(PixelType t) {
         case PixelType::kI32: return tiff::SampleType::kI32;
         case PixelType::kF32: return tiff::SampleType::kF32;
         case PixelType::kF64: return tiff::SampleType::kF64;
+        // The kernels read these as AsStatisticsSamples converts them
+        case PixelType::kF16: return tiff::SampleType::kF32;
+        case PixelType::kI64:
+        case PixelType::kU64: return tiff::SampleType::kF64;
     }
     return tiff::SampleType::kUnknown;
 }
@@ -326,7 +330,7 @@ std::string DecodeRegionBlock(const PassPlan& pp, Region& g, size_t k) {
     auto d = pp.r->ReadBlock(pp.ifd, pp.info->BlockIndex(bc, g.br, plane));
     if (!d.ok()) return "Cannot read the bands to compute their statistics: " + std::string(d.status().message());
     // A complex raster is measured by its magnitudes, as the tiler reads it
-    g.blocks[k] = pp.info->complex ? ComplexMagnitudes(*d) : std::move(*d);
+    g.blocks[k] = pp.info->complex ? ComplexMagnitudes(*d) : AsStatisticsSamples(std::move(*d));
     return {};
 }
 
@@ -490,7 +494,7 @@ std::vector<std::optional<BandStatistics>> ComputePass(const CogSource& src, con
     pp.ifd = l0.ifd;
     pp.info = &pp.r->Ifd(l0.ifd);
     const tiff::SampleType st = ToSampleType(src.Type());
-    pp.ss = PixelTypeSize(src.Type());
+    pp.ss = tiff::SampleTypeSize(st);
     pp.W = static_cast<int>(pp.info->width);
     pp.H = static_cast<int>(pp.info->height);
     pp.want = want;

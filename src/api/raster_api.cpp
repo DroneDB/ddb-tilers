@@ -17,6 +17,7 @@
 #include "cog/tiler/json_lite.h"
 #include "cog/tiler/raster_io.h"
 #include "cog/tiler/tile_error.h"
+#include "core/util/half.h"
 #include "ddbt/ddbt.h"
 
 struct ddbtRaster {
@@ -78,6 +79,15 @@ void ConvertSamples(ddbt::cog::tiler::PixelType type, const uint8_t* in, size_t 
         case PixelType::kI32: ConvertAs<int32_t>(in, count, out); break;
         case PixelType::kF32: ConvertAs<float>(in, count, out); break;
         case PixelType::kF64: ConvertAs<double>(in, count, out); break;
+        case PixelType::kI64: ConvertAs<int64_t>(in, count, out); break;
+        case PixelType::kU64: ConvertAs<uint64_t>(in, count, out); break;
+        case PixelType::kF16:
+            for (size_t i = 0; i < count; ++i) {
+                uint16_t h;
+                std::memcpy(&h, in + i * 2, 2);
+                out[i] = static_cast<Out>(ddbt::util::HalfToFloat(h));
+            }
+            break;
     }
 }
 

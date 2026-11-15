@@ -37,6 +37,15 @@ BlockPtr GetBlock(const CogSource& source, uint32_t ifd, uint32_t index);
 /// each sample, Float64 (the measure of GDAL's statistics of complex bands).
 tiff::DecodedBlock ComplexMagnitudes(const tiff::DecodedBlock& decoded);
 
+/// A block of 1-bit samples as bytes of `one` and 0 (GDAL reads a mask band as 255 and 0, a band of
+/// the image as 1 and 0), its samples of a pixel side by side.
+tiff::DecodedBlock BitsAsBytes(const tiff::DecodedBlock& decoded, uint8_t one);
+
+/// A block in a type the statistics kernels read: Float16 as Float32 (exact), 64-bit integers as
+/// Float64 (GDAL computes their statistics in double), 1-bit samples as bytes 0 and 1; any other
+/// block as it is.
+tiff::DecodedBlock AsStatisticsSamples(tiff::DecodedBlock decoded);
+
 /// The default budget of the block cache for a host with `physicalBytes` of memory: 3 % of it,
 /// between 64 MiB and 1 GiB (1 GiB when unknown), so a large server keeps the warm working set of
 /// big rasters and a small instance does not give a third of its memory to decoded blocks.

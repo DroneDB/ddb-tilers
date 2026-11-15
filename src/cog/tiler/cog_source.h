@@ -55,6 +55,10 @@ using tiff::ColorInterpName;
 struct BandMeta {
     ColorInterp interp = ColorInterp::kUndefined;
     std::optional<double> nodata;  // GDAL_NODATA (the same for every band of a GeoTIFF)
+    // The NoData value of a 64-bit integer band as GDAL keeps it (GetNoDataValueAsInt64 /
+    // AsUInt64: the text read as an integer); `nodata` is its cast to double
+    std::optional<int64_t> nodataInt64;
+    std::optional<uint64_t> nodataUInt64;
     double scale = 1.0, offset = 0.0;
     bool hasScale = false, hasOffset = false;  // GDAL's GetScale / GetOffset succeed (both or neither)
     std::string unitType;      // GDAL_METADATA role="unittype"
@@ -78,7 +82,8 @@ struct SourceLevel {
 };
 
 /// Supported sample types (GDAL data types).
-enum class PixelType : uint8_t { kU8, kI8, kU16, kI16, kU32, kI32, kF32, kF64 };
+/// A 1-bit band is kU8 (values 0 and 1, GDAL's GTiffBitmapBand); kF16 holds IEEE halves.
+enum class PixelType : uint8_t { kU8, kI8, kU16, kI16, kU32, kI32, kF32, kF64, kF16, kI64, kU64 };
 size_t PixelTypeSize(PixelType t) noexcept;
 bool PixelTypeIsFloat(PixelType t) noexcept;
 /// GDALGetDataTypeName: "Byte", "Int8", "UInt16", ...

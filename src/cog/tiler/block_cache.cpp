@@ -12,6 +12,7 @@
 #include "core/cache/sharded_lru.h"
 #include "core/mem/aligned.h"
 #include "core/mem/system_memory.h"
+#include "core/util/half.h"
 
 namespace ddbt::cog::tiler {
 
@@ -61,25 +62,13 @@ CachedBlock Decode(const CogSource& source, uint32_t ifd, uint32_t index) {
     CachedBlock cb;
     const tiff::IfdInfo& info = r.Ifd(ifd);
     if (decoded->sampleType == tiff::SampleType::kBit1) {
-        // A mask: bytes 0 / 255 (GDAL reads a 1-bit mask band as 0 / 255).
-        const uint32_t w = decoded->width, h = decoded->height;
-        tiff::DecodedBlock bytes;
-        bytes.buffer = tiff::BlockBuffer::Allocate(static_cast<size_t>(w) * h, nullptr);
-        bytes.width = w;
-        bytes.height = h;
-        bytes.samples = 1;
-        bytes.bitsPerSample = 8;
-        bytes.sampleType = tiff::SampleType::kU8;
-        bytes.rowStride = w;
-        bytes.sparse = decoded->sparse;
-        if (decoded->sparse) {
-            std::memset(bytes.data(), 0, bytes.size());
-        } else {
-            tiff::ExpandBits(decoded->data(), decoded->rowStride, w, h, 255, bytes.data(), w);
-        }
+        // Bytes: GDAL reads a 1-bit mask band as 0 / 255, a 1-bit band of the image as 0 / 1
+        const bool mask = info.kind == tiff::SubfileKind::kMask || info.kind == tiff::SubfileKind::kOverviewMask;
+        const uint32_t w = decoded->width, h = decoded->height, spp = decoded->samples;
+        tiff::DecodedBlock bytes = BitsAsBytes(*decoded, mask ? 255 : 1);
         // Summary over the valid part (the raster may end inside the block), from the packed bits.
         const uint32_t col = info.BlockColumn(index), row = info.BlockRow(index);
-        const uint32_t vw = std::min(w, info.width - col * info.blockWidth);
+        const uint32_t vw = std::min(w, info.width - col * info.blockWidth) * spp;
         const uint32_t vh = std::min(h, info.height > row * info.blockHeight ? info.height - row * info.blockHeight : 0u);
         bool any0 = false, any1 = false;
         if (decoded->sparse) {
@@ -91,7 +80,7 @@ CachedBlock Decode(const CogSource& source, uint32_t ifd, uint32_t index) {
         }
         cb.summary = any0 && any1 ? MaskSummary::kMixed : (any1 ? MaskSummary::kAllOne : MaskSummary::kAllZero);
         cb.block = std::move(bytes);
-        cb.pixelBytes = 1;
+        cb.pixelBytes = spp;
         return cb;
     }
     if (info.complex) {
@@ -126,6 +115,66 @@ cache::CacheStats BlockCacheStats() { return TheCache().Stats(); }
 void SetBlockCacheBudget(size_t bytes) { TheCache().SetBudget(bytes); }
 size_t BlockCacheBudget() { return TheCache().BudgetBytes(); }
 void ClearBlockCache() { TheCache().Clear(); }
+
+tiff::DecodedBlock BitsAsBytes(const tiff::DecodedBlock& decoded, uint8_t one) {
+    // Several 1-bit samples a pixel (pixel interleaved) are as many bytes a pixel
+    const uint32_t rowBytes = decoded.width * decoded.samples;
+    tiff::DecodedBlock bytes;
+    bytes.buffer = tiff::BlockBuffer::Allocate(static_cast<size_t>(rowBytes) * decoded.height, nullptr);
+    bytes.width = decoded.width;
+    bytes.height = decoded.height;
+    bytes.samples = decoded.samples;
+    bytes.bitsPerSample = 8;
+    bytes.sampleType = tiff::SampleType::kU8;
+    bytes.rowStride = rowBytes;
+    bytes.sparse = decoded.sparse;
+    if (decoded.sparse) std::memset(bytes.data(), 0, bytes.size());
+    else tiff::ExpandBits(decoded.data(), decoded.rowStride, rowBytes, decoded.height, one, bytes.data(), rowBytes);
+    return bytes;
+}
+
+tiff::DecodedBlock AsStatisticsSamples(tiff::DecodedBlock decoded) {
+    if (decoded.sampleType == tiff::SampleType::kBit1) return BitsAsBytes(decoded, 1);
+    const bool half = decoded.sampleType == tiff::SampleType::kF16;
+    const bool wide = decoded.sampleType == tiff::SampleType::kI64 || decoded.sampleType == tiff::SampleType::kU64;
+    if (!half && !wide) return decoded;
+    const size_t count = static_cast<size_t>(decoded.width) * decoded.samples;
+    const size_t size = half ? sizeof(float) : sizeof(double);
+    tiff::DecodedBlock out;
+    out.buffer = tiff::BlockBuffer::Allocate(count * size * decoded.height, nullptr);
+    out.width = decoded.width;
+    out.height = decoded.height;
+    out.samples = decoded.samples;
+    out.bitsPerSample = static_cast<uint32_t>(size * 8);
+    out.sampleType = half ? tiff::SampleType::kF32 : tiff::SampleType::kF64;
+    out.rowStride = count * size;
+    out.sparse = decoded.sparse;
+    for (uint32_t y = 0; y < decoded.height; ++y) {
+        const uint8_t* src = decoded.data() + static_cast<size_t>(y) * decoded.rowStride;
+        uint8_t* dst = out.data() + static_cast<size_t>(y) * out.rowStride;
+        for (size_t i = 0; i < count; ++i) {
+            if (half) {
+                uint16_t h;
+                std::memcpy(&h, src + i * 2, 2);
+                const float f = util::HalfToFloat(h);
+                std::memcpy(dst + i * 4, &f, 4);
+            } else {
+                double v;
+                if (decoded.sampleType == tiff::SampleType::kI64) {
+                    int64_t x;
+                    std::memcpy(&x, src + i * 8, 8);
+                    v = static_cast<double>(x);
+                } else {
+                    uint64_t x;
+                    std::memcpy(&x, src + i * 8, 8);
+                    v = static_cast<double>(x);
+                }
+                std::memcpy(dst + i * 8, &v, 8);
+            }
+        }
+    }
+    return out;
+}
 
 tiff::DecodedBlock ComplexMagnitudes(const tiff::DecodedBlock& decoded) {
     const uint32_t w = decoded.width, h = decoded.height, n = decoded.samples / 2;

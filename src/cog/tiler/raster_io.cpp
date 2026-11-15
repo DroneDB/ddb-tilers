@@ -9,6 +9,7 @@
 #include "cog/tiler/kernels.h"
 #include "cog/tiler/tile_error.h"
 #include "cog/tiler/warp.h"
+#include "core/util/half.h"
 
 namespace ddbt::cog::tiler {
 
@@ -542,6 +543,9 @@ void GatherBands(const RasterView& view, const SamplePlan& plan, std::span<const
                 case PixelType::kI32: { const int32_t t = static_cast<int32_t>(std::clamp(v, -2147483648.0, 2147483647.0)); std::memcpy(fill.data(), &t, 4); break; }
                 case PixelType::kF32: { const float t = static_cast<float>(v); std::memcpy(fill.data(), &t, 4); break; }
                 case PixelType::kF64: std::memcpy(fill.data(), &v, 8); break;
+                case PixelType::kF16: { const uint16_t t = util::DoubleToHalf(v); std::memcpy(fill.data(), &t, 2); break; }
+                case PixelType::kI64: { const int64_t t = static_cast<int64_t>(std::clamp(v, -9223372036854775808.0, 9223372036854774784.0)); std::memcpy(fill.data(), &t, 8); break; }
+                case PixelType::kU64: { const uint64_t t = static_cast<uint64_t>(std::clamp(v, 0.0, 18446744073709549568.0)); std::memcpy(fill.data(), &t, 8); break; }
             }
             for (size_t i = 0; i < pixels; ++i) {
                 if (plan.sx[i] != -2) continue;
@@ -569,6 +573,14 @@ bool IsNodataSample(PixelType type, const uint8_t* p, double nd) noexcept {
             if (std::isnan(nd)) return std::isnan(v);
             return AreRealEqual(v, nd);
         }
+        case PixelType::kF16: {
+            // GDAL compares Float16 samples as Float32
+            const float v = util::HalfToFloat(Load<uint16_t>(p));
+            if (std::isnan(nd)) return std::isnan(v);
+            return AreRealEqual(v, static_cast<float>(nd));
+        }
+        case PixelType::kI64: return Load<int64_t>(p) == static_cast<int64_t>(nd);
+        case PixelType::kU64: return Load<uint64_t>(p) == static_cast<uint64_t>(nd);
     }
     return false;
 }
@@ -583,6 +595,9 @@ double SampleToDouble(PixelType type, const uint8_t* p) noexcept {
         case PixelType::kI32: return Load<int32_t>(p);
         case PixelType::kF32: return Load<float>(p);
         case PixelType::kF64: return Load<double>(p);
+        case PixelType::kF16: return util::HalfToFloat(Load<uint16_t>(p));
+        case PixelType::kI64: return static_cast<double>(Load<int64_t>(p));
+        case PixelType::kU64: return static_cast<double>(Load<uint64_t>(p));
     }
     return 0;
 }
@@ -597,6 +612,9 @@ uint8_t SampleToByte(PixelType type, const uint8_t* p) noexcept {
         case PixelType::kI32: return ToByte(Load<int32_t>(p));
         case PixelType::kF32: return ToByte(Load<float>(p));
         case PixelType::kF64: return ToByte(Load<double>(p));
+        case PixelType::kF16: return ToByte(util::HalfToFloat(Load<uint16_t>(p)));
+        case PixelType::kI64: return ToByte(Load<int64_t>(p));
+        case PixelType::kU64: return ToByte(Load<uint64_t>(p));
     }
     return 0;
 }
@@ -676,7 +694,14 @@ void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, c
                     GatherBands(view, plan, std::span<const int>(&b, 1), own.data(), pixels * ss);
                     band1 = own.data();
                 }
-                if (!nd) {
+                // A 64-bit integer band compares its NoData value as GDAL keeps it, not its double
+                const BandMeta& meta1 = src.Band(1);
+                const bool ownNodata = !view.NodataOverride().has_value();
+                if (nd && ownNodata && type == PixelType::kI64 && meta1.nodataInt64) {
+                    for (size_t i = 0; i < pixels; ++i) out[i] = Load<int64_t>(band1 + i * ss) == *meta1.nodataInt64 ? 0 : 255;
+                } else if (nd && ownNodata && type == PixelType::kU64 && meta1.nodataUInt64) {
+                    for (size_t i = 0; i < pixels; ++i) out[i] = Load<uint64_t>(band1 + i * ss) == *meta1.nodataUInt64 ? 0 : 255;
+                } else if (!nd) {
                     std::memset(out, 255, pixels);
                 } else if (type == PixelType::kF32 && !std::isnan(*nd)) {
                     // The common DEM case (same test as IsNodataSample).

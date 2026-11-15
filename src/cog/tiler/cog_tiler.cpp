@@ -763,7 +763,18 @@ void StretchSamples(PixelType type, const uint8_t* src, size_t n, double lo, dou
         case PixelType::kI32: return StretchTyped<int32_t>(src, n, lo, hi, viaFloat, dst, stride);
         case PixelType::kF32: return StretchTyped<float>(src, n, lo, hi, viaFloat, dst, stride);
         case PixelType::kF64: return StretchTyped<double>(src, n, lo, hi, viaFloat, dst, stride);
-        default: break;  // 8 / 16-bit samples took the LUT
+        case PixelType::kF16:
+        case PixelType::kI64:
+        case PixelType::kU64: {
+            const size_t ss = PixelTypeSize(type);
+            for (size_t i = 0; i < n; ++i) {
+                double v = SampleToDouble(type, src + i * ss);
+                if (viaFloat) v = static_cast<double>(static_cast<float>(v));
+                dst[i * stride] = StretchToByte(v, lo, hi);
+            }
+            return;
+        }
+        default: break;  // 8 / 16-bit integer samples took the LUT
     }
 }
 

@@ -26,11 +26,14 @@ struct SynthSpec {
     uint32_t width = 256, height = 256;
     uint32_t tile = 0;
     int bands = 1;
-    int bytes = 4;  // 1: UInt8, 4: Float32
+    int bytes = 4;  // 1: UInt8, 4: Float32, 8 with `raw`
+    uint16_t sampleFormat = 0;  // TIFF SampleFormat (0: 3 for 4 bytes, else 1)
     bool planar = false;
     std::optional<std::string> nodata;
     bool georeferenced = true;  // false: no geotransform and no GeoTIFF keys
     std::function<float(int band0, uint32_t x, uint32_t y)> value = [](int, uint32_t, uint32_t) { return 1.0f; };
+    /// The bits of each sample, when set (64-bit integers, which a float does not hold)
+    std::function<uint64_t(int band0, uint32_t x, uint32_t y)> raw;
 };
 
 inline SynthSpec Spec(uint32_t size, int bands, int bytes = 4) {
@@ -54,8 +57,13 @@ inline void WriteSynth(const std::filesystem::path& path, const SynthSpec& s) {
         for (uint32_t y = 0; y < th; ++y)
             for (uint32_t x = 0; x < tw; ++x)
                 for (size_t b = 0; b < planeBands; ++b) {
-                    const float v = s.value(band0 + static_cast<int>(b), tx * tw + x, ty * th + y);
                     uint8_t* at = out.data() + ((static_cast<size_t>(y) * tw + x) * planeBands + b) * bytes;
+                    if (s.raw) {
+                        const uint64_t bits = s.raw(band0 + static_cast<int>(b), tx * tw + x, ty * th + y);
+                        std::memcpy(at, &bits, bytes);
+                        continue;
+                    }
+                    const float v = s.value(band0 + static_cast<int>(b), tx * tw + x, ty * th + y);
                     if (s.bytes == 1) *at = static_cast<uint8_t>(v);
                     else std::memcpy(at, &v, 4);
                 }
@@ -81,7 +89,8 @@ inline void WriteSynth(const std::filesystem::path& path, const SynthSpec& s) {
         t.Long(323, {th}),
         t.Long(324, offsets),
         t.Long(325, counts),
-        t.Short(339, std::vector<uint16_t>(bands, static_cast<uint16_t>(s.bytes == 4 ? 3 : 1))),
+        t.Short(339, std::vector<uint16_t>(bands, s.sampleFormat != 0 ? s.sampleFormat
+                                                                       : static_cast<uint16_t>(s.bytes == 4 ? 3 : 1))),
     };
     if (s.georeferenced) {
         e.push_back(t.Double(33550, {kPixel, kPixel, 0}));

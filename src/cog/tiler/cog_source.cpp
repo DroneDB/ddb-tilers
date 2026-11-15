@@ -140,6 +140,10 @@ std::optional<PixelType> PixelTypeOf(tiff::SampleType t) {
         case tiff::SampleType::kI32: return PixelType::kI32;
         case tiff::SampleType::kF32: return PixelType::kF32;
         case tiff::SampleType::kF64: return PixelType::kF64;
+        case tiff::SampleType::kF16: return PixelType::kF16;
+        case tiff::SampleType::kI64: return PixelType::kI64;
+        case tiff::SampleType::kU64: return PixelType::kU64;
+        case tiff::SampleType::kBit1: return PixelType::kU8;  // GDAL reads 1-bit samples as bytes 0 and 1
         default: return std::nullopt;
     }
 }
@@ -240,16 +244,21 @@ size_t PixelTypeSize(PixelType t) noexcept {
         case PixelType::kU8:
         case PixelType::kI8: return 1;
         case PixelType::kU16:
-        case PixelType::kI16: return 2;
+        case PixelType::kI16:
+        case PixelType::kF16: return 2;
         case PixelType::kU32:
         case PixelType::kI32:
         case PixelType::kF32: return 4;
-        case PixelType::kF64: return 8;
+        case PixelType::kF64:
+        case PixelType::kI64:
+        case PixelType::kU64: return 8;
     }
     return 1;
 }
 
-bool PixelTypeIsFloat(PixelType t) noexcept { return t == PixelType::kF32 || t == PixelType::kF64; }
+bool PixelTypeIsFloat(PixelType t) noexcept {
+    return t == PixelType::kF32 || t == PixelType::kF64 || t == PixelType::kF16;
+}
 
 const char* PixelTypeName(PixelType t) noexcept {
     switch (t) {
@@ -261,6 +270,9 @@ const char* PixelTypeName(PixelType t) noexcept {
         case PixelType::kI32: return "Int32";
         case PixelType::kF32: return "Float32";
         case PixelType::kF64: return "Float64";
+        case PixelType::kF16: return "Float16";
+        case PixelType::kI64: return "Int64";
+        case PixelType::kU64: return "UInt64";
     }
     return "Unknown";
 }
@@ -466,7 +478,9 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
     // Bands: colour interpretation as GTiffRasterBand's constructor sets it.
     const int n = main.samplesPerPixel;
     bands_.resize(static_cast<size_t>(n));
-    const bool palette = main.photometric == tiff::photometric::kPalette && !main.colorMap.empty();
+    // A single band of 1-bit samples is GDAL's GTiffBitmapBand: a palette band (its table black and white)
+    const bool bitmap = main.sampleType == tiff::SampleType::kBit1 && n == 1;
+    const bool palette = (main.photometric == tiff::photometric::kPalette && !main.colorMap.empty()) || bitmap;
     const bool rgb = main.photometric == tiff::photometric::kRgb ||
                      (main.photometric == tiff::photometric::kYCbCr && main.compression == 7);
     for (int b = 1; b <= n; ++b) {
@@ -506,7 +520,11 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
             }
         }
         bands_[static_cast<size_t>(b - 1)].interp = ci;
-        bands_[static_cast<size_t>(b - 1)].nodata = GdalNodataOf(main.noData, type_);
+        BandMeta& meta = bands_[static_cast<size_t>(b - 1)];
+        meta.nodata = GdalNodataOf(main.noData, type_);
+        // GDAL reads the NoData value of a 64-bit integer band from its text as an integer
+        if (main.noData && type_ == PixelType::kI64) meta.nodataInt64 = std::strtoll(main.noDataText.c_str(), nullptr, 10);
+        if (main.noData && type_ == PixelType::kU64) meta.nodataUInt64 = std::strtoull(main.noDataText.c_str(), nullptr, 10);
     }
 
     // GDAL_METADATA: band roles (scale, offset, unit type, description, colour interpretation)
@@ -520,7 +538,8 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
         bm.offset = role.offset;
         bm.unitType = role.unitType;
         bm.description = role.description;
-        if (role.colorInterp) bm.interp = *role.colorInterp;
+        // GTiffBitmapBand::GetColorInterpretation answers Palette whatever GDAL_METADATA says
+        if (role.colorInterp && !bitmap) bm.interp = *role.colorInterp;
     }
     for (int b = 1; b <= n; ++b)
         if (bands_[static_cast<size_t>(b - 1)].interp == ColorInterp::kAlpha && alphaBand_ == 0) alphaBand_ = b;

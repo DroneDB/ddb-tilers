@@ -451,6 +451,36 @@ TEST(CogTilerKernels, GatheredBandsAreThePlannedPixelsOnEveryTarget) {
     }
 }
 
+TEST(CogTilerKernels, NodataAlphaOfA64BitBandComparesTheExactInteger) {
+    // GDAL's mask of a 64-bit integer band compares its NoData value as an integer
+    // (GetNoDataValueAsInt64): 2^60 + 1 masks only itself, not 2^60, which its double is
+    for (const uint16_t format : {uint16_t{1}, uint16_t{2}}) {
+        GatherDir dir;
+        SynthSpec spec;
+        spec.width = 70;
+        spec.height = 50;
+        spec.bytes = 8;
+        spec.sampleFormat = format;
+        const uint64_t big = uint64_t{1} << 60;
+        spec.nodata = std::to_string(big + 1);
+        spec.raw = [big](int, uint32_t x, uint32_t y) { return (x + y) % 5 == 0 ? big + 1 : big; };
+        const fs::path path = dir.path() / ("big" + std::to_string(format) + ".tif");
+        WriteSynth(path, spec);
+        const auto src = CogSource::Open(path.string());
+        const RasterView view(*src);
+        const SamplePlan p = Plans(static_cast<int>(spec.width), static_cast<int>(spec.height)).front();
+        std::vector<uint8_t> alpha(static_cast<size_t>(p.bufW) * static_cast<size_t>(p.bufH), 0x5A);
+        GatherAlpha(view, p, alpha.data());
+        for (int j = 0; j < p.bufH; ++j)
+            for (int i = 0; i < p.bufW; ++i) {
+                const int32_t c = p.cols[static_cast<size_t>(i)], r = p.rows[static_cast<size_t>(j)];
+                const uint8_t want = c < 0 || r < 0 ? 0 : (static_cast<uint32_t>(c + r) % 5 == 0 ? 0 : 255);
+                ASSERT_EQ(alpha[static_cast<size_t>(j) * static_cast<size_t>(p.bufW) + static_cast<size_t>(i)], want)
+                    << format << ": " << i << "," << j;
+            }
+    }
+}
+
 TEST(CogTilerKernels, NodataAlphaClearsPixelsWithoutASampleOnEveryTarget) {
     // GatherAlpha of a Float32 band with a NoData value: 0 at the NoData value (and within 2 ulps
     // of it), 255 elsewhere (NaN included), 0 for every pixel of a row or column without a sample.
