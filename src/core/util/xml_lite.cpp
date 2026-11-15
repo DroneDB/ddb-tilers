@@ -2,6 +2,8 @@
 #include "core/util/xml_lite.h"
 
 #include <cstdint>
+#include <cctype>
+#include <cwchar>
 
 namespace ddbt::xml {
 
@@ -83,6 +85,26 @@ std::string Decode(std::string_view s) {
     return out;
 }
 
+bool StartsWithNoCase(std::string_view s, size_t at, std::string_view prefix) {
+    if (s.size() - at < prefix.size()) return false;
+    for (size_t k = 0; k < prefix.size(); ++k) {
+        char c = s[at + k];
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (c != prefix[k]) return false;
+    }
+    return true;
+}
+
+// One wchar_t of a character reference as CPLRecodeFromWChar writes it in UTF-8 (utf8fromwc): a
+// 16-bit wchar_t keeps the low 16 bits; above U+10FFFF is U+FFFD; surrogates are encoded as they are.
+void AppendGdalWideChar(std::string& out, uint32_t value) {
+    uint32_t ucs = static_cast<uint32_t>(static_cast<wchar_t>(value));
+    if constexpr (sizeof(wchar_t) == 2) ucs &= 0xFFFFu;
+    if (ucs == 0) return;  // an empty wide string
+    if (ucs > 0x10FFFF) ucs = 0xFFFD;
+    AppendUtf8(out, ucs);
+}
+
 class Parser {
 public:
     explicit Parser(std::string_view s) : s_(s) {}
@@ -97,6 +119,23 @@ public:
     }
 
 private:
+    // The nodes GDAL's parser makes of the content of an element, as far as CPLGetXMLValue needs
+    // them: how many, and the first one's text when it is a text node.
+    class GdalContent {
+    public:
+        void Text(std::string text) {
+            if (nodes_++ == 0) first_ = std::move(text);
+        }
+        void Other() {
+            if (nodes_++ == 0) first_.reset();
+        }
+        std::optional<std::string> Value() const { return nodes_ == 1 ? first_ : std::nullopt; }
+
+    private:
+        int nodes_ = 0;
+        std::optional<std::string> first_;
+    };
+
     bool At(std::string_view t) const { return s_.substr(p_, t.size()) == t; }
 
     void SkipSpace() {
@@ -168,6 +207,7 @@ private:
             p_ = end + 1;
         }
         // Content
+        GdalContent content;
         for (;;) {
             if (p_ >= s_.size()) return false;
             if (At("</")) {
@@ -177,29 +217,39 @@ private:
                 SkipSpace();
                 if (!At(">")) return false;
                 ++p_;
+                e.value = content.Value();
                 return true;
             }
             if (At("<!--")) {
                 const size_t end = s_.find("-->", p_);
                 if (end == std::string_view::npos) return false;
                 p_ = end + 3;
+                content.Other();
             } else if (At("<![CDATA[")) {
                 const size_t end = s_.find("]]>", p_);
                 if (end == std::string_view::npos) return false;
-                e.text.append(s_.substr(p_ + 9, end - p_ - 9));
+                const std::string_view cdata = s_.substr(p_ + 9, end - p_ - 9);
+                e.text.append(cdata);
+                content.Text(std::string(cdata));
                 p_ = end + 3;
             } else if (At("<?")) {
                 const size_t end = s_.find("?>", p_);
                 if (end == std::string_view::npos) return false;
                 p_ = end + 2;
+                content.Other();
             } else if (s_[p_] == '<') {
                 Element child;
                 if (!ParseElement(child, depth + 1)) return false;
                 e.children.push_back(std::move(child));
+                content.Other();
             } else {
                 const size_t end = s_.find('<', p_);
                 if (end == std::string_view::npos) return false;
-                e.text += Decode(s_.substr(p_, end - p_));
+                const std::string_view raw = s_.substr(p_, end - p_);
+                e.text += Decode(raw);
+                size_t first = 0;
+                while (first < raw.size() && std::isspace(static_cast<unsigned char>(raw[first]))) ++first;
+                if (first < raw.size()) content.Text(GdalUnescape(raw.substr(first)));
                 p_ = end;
             }
         }
@@ -241,6 +291,49 @@ const Element* Element::Find(std::string_view elementName) const {
 }
 
 std::optional<Element> Parse(std::string_view text) { return Parser(text).Document(); }
+
+std::string GdalUnescape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size() && s[i] != '\0'; ++i) {
+        if (s[i] != '&') {
+            out += s[i];
+        } else if (StartsWithNoCase(s, i, "&lt;")) {
+            out += '<';
+            i += 3;
+        } else if (StartsWithNoCase(s, i, "&gt;")) {
+            out += '>';
+            i += 3;
+        } else if (StartsWithNoCase(s, i, "&amp;")) {
+            out += '&';
+            i += 4;
+        } else if (StartsWithNoCase(s, i, "&apos;")) {
+            out += '\'';
+            i += 5;
+        } else if (StartsWithNoCase(s, i, "&quot;")) {
+            out += '"';
+            i += 5;
+        } else if (StartsWithNoCase(s, i, "&#")) {
+            // GDAL's "&#x" test is case-insensitive too: "&#X41;" is hexadecimal
+            const bool hex = StartsWithNoCase(s, i, "&#x");
+            size_t k = i + (hex ? 3 : 2);
+            uint32_t value = 0;
+            for (; k < s.size(); ++k) {
+                const char c = s[k];
+                if (c >= '0' && c <= '9') value = value * (hex ? 16u : 10u) + static_cast<uint32_t>(c - '0');
+                else if (hex && c >= 'a' && c <= 'f') value = value * 16u + static_cast<uint32_t>(c - 'a' + 10);
+                else if (hex && c >= 'A' && c <= 'F') value = value * 16u + static_cast<uint32_t>(c - 'A' + 10);
+                else break;
+            }
+            if (k >= s.size() || s[k] != ';') break;  // GDAL stops at a reference without ';'
+            AppendGdalWideChar(out, value);
+            i = k;
+        } else {
+            break;  // an '&' GDAL cannot decode ends its output
+        }
+    }
+    return out;
+}
 
 std::string Escape(std::string_view text, bool attribute) {
     std::string out;

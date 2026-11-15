@@ -21,6 +21,8 @@
 #include <string_view>
 #include <vector>
 
+#include "cog/tiff/color_interp.h"
+#include "cog/tiff/gdal_metadata.h"
 #include "cog/tiff/geotiff.h"
 #include "cog/tiff/tiff_reader.h"
 
@@ -45,34 +47,16 @@ struct FileIdentity {
 /// The version of the regular file at `path` (UTF-8); nullopt when it is not one.
 std::optional<FileIdentity> IdentifyFile(const std::string& path);
 
-/// GDAL's GDALColorInterp values the tiler needs.
-enum class ColorInterp : uint8_t {
-    kUndefined,
-    kGray,
-    kPalette,
-    kRed,
-    kGreen,
-    kBlue,
-    kAlpha,
-    kYCbCrY,
-    kYCbCrCb,
-    kYCbCrCr,
-    kCyan,
-    kMagenta,
-    kYellow,
-    kBlack,
-    kOther,
-};
-
-/// GDALGetColorInterpretationName.
-const char* ColorInterpName(ColorInterp ci) noexcept;
+/// GDAL's colour interpretations (GDALColorInterp).
+using ColorInterp = tiff::ColorInterp;
+using tiff::ColorInterpName;
 
 /// One band, as GDAL reports it.
 struct BandMeta {
     ColorInterp interp = ColorInterp::kUndefined;
     std::optional<double> nodata;  // GDAL_NODATA (the same for every band of a GeoTIFF)
     double scale = 1.0, offset = 0.0;
-    bool hasScale = false, hasOffset = false;
+    bool hasScale = false, hasOffset = false;  // GDAL's GetScale / GetOffset succeed (both or neither)
     std::string unitType;      // GDAL_METADATA role="unittype"
     std::string description;   // GDAL_METADATA role="description"
     std::vector<std::string> metadata;  // "KEY=VALUE" items of the band's default domain
@@ -171,9 +155,14 @@ public:
     /// The warp model of a source in another CRS (null for EPSG:3857).
     const WarpModel* Warp() const noexcept { return warp_.get(); }
 
-    /// Every metadata string the sensor profiles are matched against (sensorprofile.cpp
-    /// collectMatchingMetadata): TIFF description and software, dataset items, band items.
-    const std::vector<std::string>& DatasetMetadata() const noexcept { return datasetMetadata_; }
+    /// The metadata GDAL reports for the file: the domains of the dataset and of each band (read
+    /// on first use).
+    const tiff::GdalMetadata& Metadata() const;
+
+    /// Every metadata string the sensor profiles are matched against (DroneDB's
+    /// collectMatchingMetadata): the TIFF description and software, the items of every domain of
+    /// the dataset, those of the default domain of each band (read on first use).
+    const std::vector<std::string>& DatasetMetadata() const;
 
     /// The memo of DetectSensor (vis.h): `detect` runs once per source, on first use; every
     /// caller gets the same detection, alive while it holds it.
@@ -205,19 +194,12 @@ private:
     MaskKind mask_ = MaskKind::kAllValid;
     bool webMercator_ = false;
     std::unique_ptr<WarpModel> warp_;
-    std::vector<std::string> datasetMetadata_;
+    mutable std::once_flag metadataOnce_;
+    mutable tiff::GdalMetadata metadata_;
+    mutable std::vector<std::string> datasetMetadata_;
     mutable std::once_flag sensorOnce_;
     mutable std::shared_ptr<const SensorDetection> sensor_;
 };
 
-/// GDAL_METADATA XML items (name, sample (-1 dataset), role, domain, value).
-struct GdalMetadataItem {
-    std::string name;
-    int sample = -1;
-    std::string role;
-    std::string domain;
-    std::string value;
-};
-std::vector<GdalMetadataItem> ParseGdalMetadata(std::string_view xml);
 
 }  // namespace ddbt::cog::tiler

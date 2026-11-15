@@ -7,4 +7,6 @@ list(APPEND DDBT_SOURCES
   cog/tiff/libtiff_codec.cpp)
 list(APPEND DDBT_SOURCES
   cog/tiff/geotiff.cpp
-  cog/tiff/geotiff_crs.cpp)
+  cog/tiff/geotiff_crs.cpp
+  cog/tiff/color_interp.cpp
+  cog/tiff/gdal_metadata.cpp)

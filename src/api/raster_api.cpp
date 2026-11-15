@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 // The raster exports of the C API for a host that reads rasters itself (a GeoTIFF or COG, georeferenced
-// or not, in any CRS): ddbtRasterOpen / ddbtRasterClose, ddbtRasterInfo (what GDAL reports of the file)
+// or not, in any CRS): ddbtRasterOpen / ddbtRasterClose, ddbtRasterInfo (what GDAL reports of the file),
+// ddbtRasterMetadata (its metadata domains)
 // and ddbtRasterRead (a window at a resolution, as GDAL's RasterIO reads it with nearest resampling).
 #include <cstdint>
 #include <cstring>
@@ -148,7 +149,42 @@ ddbtErr ddbtRasterInfo(const ddbtRaster* raster, char** outJson) {
             bands.arr.push_back(std::move(band));
         }
         o.obj["bands"] = std::move(bands);
-        o.obj["metadata"] = Strings(s.DatasetMetadata());
+        return ddbt::api::CopyOut(json::Dump(o, 0), outJson);
+    });
+}
+
+namespace {
+
+// The domains that hold items, in the order GDAL lists them, as [{"name", "items"}]
+json::Value DomainsJson(const ddbt::cog::tiff::MetadataDomains& domains) {
+    json::Value out = json::Array();
+    for (const auto& d : domains.All()) {
+        if (d.items.empty()) continue;
+        json::Value domain = json::Object();
+        domain.obj["name"] = json::String(d.name);
+        domain.obj["items"] = Strings(d.items);
+        out.arr.push_back(std::move(domain));
+    }
+    return out;
+}
+
+}  // namespace
+
+ddbtErr ddbtRasterMetadata(const ddbtRaster* raster, char** outJson) {
+    if (raster == nullptr || outJson == nullptr)
+        return Fail(DDBT_ERR_INVALIDARGS, "Invalid raster or outJson: NULL");
+    *outJson = nullptr;
+    return ddbt::api::GuardedCall([&]() -> ddbtErr {
+        const ddbt::cog::tiff::GdalMetadata& md = raster->source->Metadata();
+        json::Value o = json::Object();
+        o.obj["domains"] = DomainsJson(md.dataset);
+        json::Value bands = json::Array();
+        for (const auto& band : md.bands) {
+            json::Value b = json::Object();
+            b.obj["domains"] = DomainsJson(band.domains);
+            bands.arr.push_back(std::move(b));
+        }
+        o.obj["bands"] = std::move(bands);
         return ddbt::api::CopyOut(json::Dump(o, 0), outJson);
     });
 }

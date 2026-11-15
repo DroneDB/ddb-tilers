@@ -262,11 +262,20 @@ DDBT_API ddbtErr ddbtRasterClose(ddbtRaster *raster);
  * largest first), "mask" ("allValid" | "perDataset" | "nodata" | "alpha": GDALGetMaskFlags of band 1),
  * "alphaBand" (1-based, 0 when none), "geoTransform" (6 numbers, when it has one), "wkt" (the CRS as
  * WKT1 GDAL, when it has one), "bands" ([{"colorInterp", "nodata" (null for NaN), "scale", "offset", "unit",
- * "description", "metadata", "colorTable" (band 1: [[r, g, b, a], ...] as GDAL gives it)}], each member only when
- * set but "colorInterp" and "metadata"),
- * "metadata" (the "KEY=VALUE" items of the dataset and its bands)}.
+ * "description", "metadata" (the "KEY=VALUE" items of the band's default domain), "colorTable" (band 1:
+ * [[r, g, b, a], ...] as GDAL gives it)}], each member only when set but "colorInterp" and "metadata")}.
  * @param outJson receives a NUL-terminated string; release it with ddbtFree */
 DDBT_API ddbtErr ddbtRasterInfo(const ddbtRaster *raster, char **outJson);
+
+/** The metadata GDAL's GTiff driver reports for a raster, string for string, as JSON:
+ * {"domains" (the domains of the dataset GDALGetMetadataDomainList lists, in its order: [{"name", "items"
+ * (GDALGetMetadata of the domain: "KEY=VALUE" items, or the one document of an xml: or json: domain)}]: the
+ * default domain ("") with the TIFFTAG_* items and AREA_OR_POINT, IMAGE_STRUCTURE, xml:XMP, COLOR_PROFILE, RPC
+ * and the domains of the GDAL_METADATA tag), "bands" ([{"domains"}] of each band, alike)}. Not reported: the
+ * EXIF and GPS directories, files next to the raster, derived and sub datasets, the reversibility of WebP and
+ * JPEG-XL blocks. Read on the first call for a raster (a COG layout check reads the first block offsets).
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree */
+DDBT_API ddbtErr ddbtRasterMetadata(const ddbtRaster *raster, char **outJson);
 
 /** Reads the window (x, y, width, height) of `bands` (1-based) into bufWidth x bufHeight samples per
  * band, band after band (each plane bufWidth * bufHeight samples, row after row), with GDAL's RasterIO

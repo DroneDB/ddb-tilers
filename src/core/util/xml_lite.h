@@ -22,6 +22,12 @@ struct Element {
     std::vector<std::pair<std::string, std::string>> attributes;
     /// The element's own text (the concatenation of its text and CDATA children).
     std::string text;
+    /// What GDAL's CPLGetXMLValue(element, nullptr) gives for the element as GDAL's
+    /// CPLParseXMLString reads it: its content is one text token and nothing else (no child
+    /// element, comment, processing instruction or second token). GDAL's parser starts a text
+    /// token at its first character that is not white space, decodes it with CPLUnescapeString
+    /// (GdalUnescape) and keeps a CDATA section as it is; content of white space only is no token.
+    std::optional<std::string> value;
     std::vector<Element> children;
 
     /// The value of attribute `name`, or nullptr.
@@ -37,6 +43,13 @@ struct Element {
 
 /// The root element of `text`, or nullopt when it is not a well-formed document.
 std::optional<Element> Parse(std::string_view text);
+
+/// `text` decoded as GDAL's CPLUnescapeString(CPLES_XML) decodes it, read as a C string: the five
+/// named references (in any case) and character references (decimal or hexadecimal, recoded to
+/// UTF-8 as CPLRecodeFromWChar does with the platform's wchar_t, a reference to 0 adding nothing);
+/// the output ends at the first NUL of `text` and at an '&' that starts no reference GDAL knows
+/// (GDAL stops there).
+std::string GdalUnescape(std::string_view text);
 
 /// `text` escaped as GDAL's CPLEscapeString escapes XML: &, <, > (and " when `attribute`) as
 /// entities, a UTF-8 byte-order mark as &#xFEFF;, control characters other than tab, line feed and

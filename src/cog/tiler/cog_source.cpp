@@ -130,80 +130,6 @@ int MaxBands() {
     return CogSource::kDefaultMaxBands;
 }
 
-std::string XmlUnescape(std::string_view s) {
-    std::string out;
-    out.reserve(s.size());
-    for (size_t i = 0; i < s.size(); ++i) {
-        if (s[i] != '&') {
-            out += s[i];
-            continue;
-        }
-        const size_t semi = s.find(';', i);
-        if (semi == std::string_view::npos) {
-            out += s[i];
-            continue;
-        }
-        const std::string_view ent = s.substr(i + 1, semi - i - 1);
-        if (ent == "amp") out += '&';
-        else if (ent == "lt") out += '<';
-        else if (ent == "gt") out += '>';
-        else if (ent == "quot") out += '"';
-        else if (ent == "apos") out += '\'';
-        else if (!ent.empty() && ent[0] == '#') {
-            const long code = ent.size() > 1 && (ent[1] == 'x' || ent[1] == 'X')
-                                  ? std::strtol(std::string(ent.substr(2)).c_str(), nullptr, 16)
-                                  : std::strtol(std::string(ent.substr(1)).c_str(), nullptr, 10);
-            if (code > 0 && code < 0x80) {
-                out += static_cast<char>(code);
-            } else if (code >= 0x80 && code < 0x800) {
-                out += static_cast<char>(0xC0 | (code >> 6));
-                out += static_cast<char>(0x80 | (code & 0x3F));
-            } else if (code >= 0x800 && code < 0x10000) {
-                out += static_cast<char>(0xE0 | (code >> 12));
-                out += static_cast<char>(0x80 | ((code >> 6) & 0x3F));
-                out += static_cast<char>(0x80 | (code & 0x3F));
-            }
-        } else {
-            out.append(s.substr(i, semi - i + 1));
-        }
-        i = semi;
-    }
-    return out;
-}
-
-std::string AttrOf(std::string_view tag, std::string_view name) {
-    size_t pos = 0;
-    while ((pos = tag.find(name, pos)) != std::string_view::npos) {
-        const bool boundary = pos == 0 || tag[pos - 1] == ' ' || tag[pos - 1] == '\t' || tag[pos - 1] == '\n';
-        size_t p = pos + name.size();
-        while (p < tag.size() && (tag[p] == ' ')) ++p;
-        if (boundary && p < tag.size() && tag[p] == '=') {
-            ++p;
-            while (p < tag.size() && tag[p] == ' ') ++p;
-            if (p < tag.size() && (tag[p] == '"' || tag[p] == '\'')) {
-                const char q = tag[p];
-                const size_t end = tag.find(q, p + 1);
-                if (end != std::string_view::npos) return XmlUnescape(tag.substr(p + 1, end - p - 1));
-            }
-        }
-        pos += name.size();
-    }
-    return {};
-}
-
-ColorInterp ColorInterpFromName(std::string_view n) {
-    std::string s(n);
-    for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    if (s == "gray" || s == "grey") return ColorInterp::kGray;
-    if (s == "palette") return ColorInterp::kPalette;
-    if (s == "red") return ColorInterp::kRed;
-    if (s == "green") return ColorInterp::kGreen;
-    if (s == "blue") return ColorInterp::kBlue;
-    if (s == "alpha") return ColorInterp::kAlpha;
-    if (s == "undefined") return ColorInterp::kUndefined;
-    return ColorInterp::kOther;
-}
-
 std::optional<PixelType> PixelTypeOf(tiff::SampleType t) {
     switch (t) {
         case tiff::SampleType::kU8: return PixelType::kU8;
@@ -309,27 +235,6 @@ std::optional<FileIdentity> IdentifyFile(const std::string& path) {
     return st.id;
 }
 
-const char* ColorInterpName(ColorInterp ci) noexcept {
-    switch (ci) {
-        case ColorInterp::kUndefined: return "Undefined";
-        case ColorInterp::kGray: return "Gray";
-        case ColorInterp::kPalette: return "Palette";
-        case ColorInterp::kRed: return "Red";
-        case ColorInterp::kGreen: return "Green";
-        case ColorInterp::kBlue: return "Blue";
-        case ColorInterp::kAlpha: return "Alpha";
-        case ColorInterp::kYCbCrY: return "YCbCr_Y";
-        case ColorInterp::kYCbCrCb: return "YCbCr_Cb";
-        case ColorInterp::kYCbCrCr: return "YCbCr_Cr";
-        case ColorInterp::kCyan: return "Cyan";
-        case ColorInterp::kMagenta: return "Magenta";
-        case ColorInterp::kYellow: return "Yellow";
-        case ColorInterp::kBlack: return "Black";
-        case ColorInterp::kOther: return "Other";
-    }
-    return "Undefined";
-}
-
 size_t PixelTypeSize(PixelType t) noexcept {
     switch (t) {
         case PixelType::kU8:
@@ -360,33 +265,30 @@ const char* PixelTypeName(PixelType t) noexcept {
     return "Unknown";
 }
 
-std::vector<GdalMetadataItem> ParseGdalMetadata(std::string_view xml) {
-    std::vector<GdalMetadataItem> items;
-    size_t pos = 0;
-    while ((pos = xml.find("<Item", pos)) != std::string_view::npos) {
-        const size_t tagEnd = xml.find('>', pos);
-        if (tagEnd == std::string_view::npos) break;
-        const std::string_view tag = xml.substr(pos + 5, tagEnd - pos - 5);
-        GdalMetadataItem it;
-        it.name = AttrOf(tag, "name");
-        const std::string sample = AttrOf(tag, "sample");
-        it.sample = sample.empty() ? -1 : std::atoi(sample.c_str());
-        it.role = AttrOf(tag, "role");
-        it.domain = AttrOf(tag, "domain");
-        if (!tag.empty() && tag.back() == '/') {
-            pos = tagEnd + 1;
-        } else {
-            const size_t close = xml.find("</Item>", tagEnd);
-            if (close == std::string_view::npos) break;
-            it.value = XmlUnescape(xml.substr(tagEnd + 1, close - tagEnd - 1));
-            pos = close + 7;
-        }
-        items.push_back(std::move(it));
-    }
-    return items;
+CogSource::~CogSource() = default;
+
+const tiff::GdalMetadata& CogSource::Metadata() const {
+    std::call_once(metadataOnce_, [this] {
+        tiff::GdalDatasetShape shape;
+        shape.bandCount = BandCount();
+        for (size_t l = 1; l < levels_.size(); ++l) shape.overviewIfds.push_back(levels_[l].ifd);
+        metadata_ = tiff::ReadGdalMetadata(*reader_, shape, georef_.keys);
+        // DroneDB's collectMatchingMetadata: the description and the software, then every domain
+        // but those that name files, then the default domain of each band
+        for (const char* item : {"TIFFTAG_IMAGEDESCRIPTION", "TIFFTAG_SOFTWARE"})
+            if (const auto v = metadata_.dataset.Item("", item)) datasetMetadata_.push_back(*v);
+        for (const std::string& domain : metadata_.DomainList())
+            for (const std::string& s : *metadata_.dataset.Items(domain)) datasetMetadata_.push_back(s);
+        for (const BandMeta& band : bands_)
+            datasetMetadata_.insert(datasetMetadata_.end(), band.metadata.begin(), band.metadata.end());
+    });
+    return metadata_;
 }
 
-CogSource::~CogSource() = default;
+const std::vector<std::string>& CogSource::DatasetMetadata() const {
+    Metadata();
+    return datasetMetadata_;
+}
 
 bool CogSource::IsJpeg() const noexcept { return reader_->Ifd(levels_[0].ifd).compression == 7; }
 
@@ -607,32 +509,18 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
         bands_[static_cast<size_t>(b - 1)].nodata = GdalNodataOf(main.noData, type_);
     }
 
-    // GDAL_METADATA: band roles (scale, offset, unit type, description, colour interpretation),
-    // band items and dataset items.
-    std::vector<std::string> datasetItems;
-    std::vector<std::pair<std::string, std::string>> domainItems;  // domain, "K=V"
-    for (const auto& it : ParseGdalMetadata(main.gdalMetadata)) {
-        if (it.sample >= 0 && it.sample < n) {
-            BandMeta& bm = bands_[static_cast<size_t>(it.sample)];
-            if (it.role == "scale") {
-                bm.hasScale = true;
-                bm.scale = std::atof(it.value.c_str());
-            } else if (it.role == "offset") {
-                bm.hasOffset = true;
-                bm.offset = std::atof(it.value.c_str());
-            } else if (it.role == "unittype") {
-                bm.unitType = it.value;
-            } else if (it.role == "description") {
-                bm.description = it.value;
-            } else if (it.role == "colorinterp") {
-                bm.interp = ColorInterpFromName(it.value);
-            } else if (it.domain.empty()) {
-                bm.metadata.push_back(it.name + "=" + it.value);
-            }
-        } else if (it.sample < 0) {
-            if (it.domain.empty()) datasetItems.push_back(it.name + "=" + it.value);
-            else domainItems.emplace_back(it.domain, it.name + "=" + it.value);
-        }
+    // GDAL_METADATA: band roles (scale, offset, unit type, description, colour interpretation)
+    const std::vector<tiff::GdalBandMetadata> bandMetadata = tiff::GdalMetadataBands(main.gdalMetadata, n);
+    for (int b = 1; b <= n; ++b) {
+        BandMeta& bm = bands_[static_cast<size_t>(b - 1)];
+        const tiff::GdalBandRoles& role = bandMetadata[static_cast<size_t>(b - 1)].roles;
+        if (const auto* items = bandMetadata[static_cast<size_t>(b - 1)].domains.Items("")) bm.metadata = *items;
+        bm.hasScale = bm.hasOffset = role.hasOffsetScale;
+        bm.scale = role.scale;
+        bm.offset = role.offset;
+        bm.unitType = role.unitType;
+        bm.description = role.description;
+        if (role.colorInterp) bm.interp = *role.colorInterp;
     }
     for (int b = 1; b <= n; ++b)
         if (bands_[static_cast<size_t>(b - 1)].interp == ColorInterp::kAlpha && alphaBand_ == 0) alphaBand_ = b;
@@ -648,21 +536,6 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
     } else {
         mask_ = MaskKind::kAllValid;
     }
-
-    // Metadata strings for the sensor profiles (the TIFF tags GDAL exposes, GDAL_METADATA
-    // items, the IMAGE_STRUCTURE domain, band items).
-    if (!main.imageDescription.empty()) datasetMetadata_.push_back(main.imageDescription);
-    if (!main.software.empty()) datasetMetadata_.push_back(main.software);
-    if (!main.imageDescription.empty()) datasetMetadata_.push_back("TIFFTAG_IMAGEDESCRIPTION=" + main.imageDescription);
-    if (!main.software.empty()) datasetMetadata_.push_back("TIFFTAG_SOFTWARE=" + main.software);
-    if (const auto* dt = main.FindTag(tiff::tag::kDateTime)) {
-        auto s = r.ReadTagString(*dt, 4096);
-        if (s.ok()) datasetMetadata_.push_back("TIFFTAG_DATETIME=" + *s);
-    }
-    for (auto& s : datasetItems) datasetMetadata_.push_back(std::move(s));
-    for (auto& [d, s] : domainItems) datasetMetadata_.push_back(std::move(s));
-    for (const auto& bm : bands_)
-        for (const auto& s : bm.metadata) datasetMetadata_.push_back(s);
 
     // Georeferencing (DroneDB: hasGeoreference, then the projection).
     georef_ = ValueOrThrow(tiff::ReadGeoreferencing(r, path), "Cannot read the georeferencing of " + path);
