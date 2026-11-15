@@ -5,6 +5,7 @@
 #include <cstring>
 #include <limits>
 
+#include "cog/tiff/tiff_reader.h"
 #include "core/util/half.h"
 
 namespace ddbt::util {
@@ -43,6 +44,25 @@ TEST(Half, aFloatIsTruncatedAndADoubleRoundedAsGdalsBuildDoes) {
 #else
     EXPECT_EQ(DoubleToHalf(static_cast<double>(between)), 0x3C00);
 #endif
+}
+
+TEST(Half, nextAfterStepsTheBitsAsGdalDoes) {
+    EXPECT_EQ(HalfNextAfter(0x3C00, kHalfMaxBits), 0x3C01);  // up from 1
+    EXPECT_EQ(HalfNextAfter(0xBC00, kHalfMaxBits), 0xBBFF);  // up from -1: towards 0
+    EXPECT_EQ(HalfNextAfter(kHalfMaxBits, 0x0000), 0x7BFE);  // down from the largest
+    EXPECT_EQ(HalfNextAfter(0x0000, kHalfMaxBits), 0x0001);  // from 0: the smallest subnormal
+    EXPECT_EQ(HalfNextAfter(0x3C00, 0x3C00), 0x3C00);
+}
+
+// GDALDataTypeUnion never gives Float16 ("not supported everywhere"): GDAL warps halves in Float32
+TEST(Half, theUnionOfAHalfIsAFloat) {
+    using cog::tiff::SampleType;
+    using cog::tiff::SampleTypeUnion;
+    EXPECT_EQ(SampleTypeUnion(SampleType::kF16, SampleType::kF16), SampleType::kF32);
+    EXPECT_EQ(SampleTypeUnion(SampleType::kU8, SampleType::kF16), SampleType::kF32);
+    EXPECT_EQ(SampleTypeUnion(SampleType::kI32, SampleType::kF16), SampleType::kF64);  // max(16, 2 x 32)
+    EXPECT_EQ(SampleTypeUnion(SampleType::kI64, SampleType::kI64), SampleType::kI64);
+    EXPECT_EQ(SampleTypeUnion(SampleType::kU64, SampleType::kF32), SampleType::kF64);
 }
 
 }  // namespace

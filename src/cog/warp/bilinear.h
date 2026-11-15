@@ -39,6 +39,7 @@
 #include <vector>
 
 #include "cog/tiff/tiff_reader.h"
+#include "core/util/half.h"
 
 namespace ddbt::cog::warp {
 
@@ -133,8 +134,29 @@ decltype(auto) VisitSampleType(tiff::SampleType type, F&& f) {
         case tiff::SampleType::kI32: return f.template operator()<int32_t>();
         case tiff::SampleType::kF32: return f.template operator()<float>();
         case tiff::SampleType::kF64: return f.template operator()<double>();
+        case tiff::SampleType::kF16: return f.template operator()<util::Half>();
+        case tiff::SampleType::kI64: return f.template operator()<int64_t>();
+        case tiff::SampleType::kU64: return f.template operator()<uint64_t>();
         default: throw std::runtime_error("warp: unsupported sample type");
     }
+}
+
+/// Whether samples of type T are real numbers (floating point, halves included)
+template <typename T>
+inline constexpr bool kRealSample = std::is_floating_point_v<T> || std::is_same_v<T, util::Half>;
+
+/// A sample as double (a half as GDAL's CPLHalfToFloat reads it)
+template <typename T>
+inline double ToDouble(T v) {
+    if constexpr (std::is_same_v<T, util::Half>) return static_cast<double>(util::HalfToFloat(v.bits));
+    else return static_cast<double>(v);
+}
+
+/// A double as a sample of type T, by C++'s conversion (a half as GDAL's GFloat16 converts it)
+template <typename T>
+inline T FromDouble(double v) {
+    if constexpr (std::is_same_v<T, util::Half>) return util::Half{util::DoubleToHalf(v)};
+    else return static_cast<T>(v);
 }
 
 /// A sample of C++ type T as double.
@@ -142,7 +164,7 @@ template <typename T>
 inline double LoadSample(const uint8_t* p) {
     T v;
     std::memcpy(&v, p, sizeof(T));
-    return static_cast<double>(v);
+    return ToDouble(v);
 }
 
 /// GDAL's ARE_REAL_EQUAL (cpl_port.h) for float / double nodata comparisons.
@@ -155,7 +177,11 @@ inline bool RealEqual(T a, T b) {
 /// ARE_REAL_EQUAL, a NaN nodata matches NaN).
 template <typename T>
 inline bool IsNodata(const uint8_t* p, double nodata) {
-    if constexpr (std::is_floating_point_v<T>) {
+    if constexpr (std::is_same_v<T, util::Half> || std::is_same_v<T, int64_t> || std::is_same_v<T, uint64_t>) {
+        // The types GDAL compares as doubles (GDALWarpNoDataMasker's default)
+        const double v = LoadSample<T>(p);
+        return std::isnan(nodata) ? std::isnan(v) : RealEqual(v, nodata);
+    } else if constexpr (std::is_floating_point_v<T>) {
         T v;
         std::memcpy(&v, p, sizeof(T));
         const T nd = static_cast<T>(nodata);

@@ -162,6 +162,7 @@ SampleType SampleTypeUnion(SampleType a, SampleType b) noexcept {
             case SampleType::kI32: bits = 32; isSigned = true; floating = false; return true;
             case SampleType::kU64: bits = 64; isSigned = false; floating = false; return true;
             case SampleType::kI64: bits = 64; isSigned = true; floating = false; return true;
+            case SampleType::kF16: bits = 16; isSigned = true; floating = true; return true;
             case SampleType::kF32: bits = 32; isSigned = true; floating = true; return true;
             case SampleType::kF64: bits = 64; isSigned = true; floating = true; return true;
             default: return false;
@@ -184,7 +185,7 @@ SampleType SampleTypeUnion(SampleType a, SampleType b) noexcept {
     } else {
         n = std::max(bits[0], bits[1]);
     }
-    // GDALFindDataType
+    // GDALFindDataType, which never chooses Float16 ("not supported everywhere")
     if (flt[0] || flt[1]) return n <= 32 ? SampleType::kF32 : SampleType::kF64;
     const bool isSigned = sign[0] || sign[1];
     if (n <= 8) return isSigned ? SampleType::kI8 : SampleType::kU8;

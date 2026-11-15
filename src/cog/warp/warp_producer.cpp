@@ -992,7 +992,10 @@ void ConvertSamples(const uint8_t* in, tiff::SampleType from, uint8_t* out, tiff
             for (size_t i = 0; i < count; ++i) {
                 F v;
                 std::memcpy(&v, in + i * sizeof(F), sizeof(F));
-                const T w = static_cast<T>(v);
+                // GDALCopyWords: C++'s conversion, a half through its value (GDAL's GFloat16)
+                T w;
+                if constexpr (std::is_same_v<F, util::Half> || std::is_same_v<T, util::Half>) w = FromDouble<T>(ToDouble(v));
+                else w = static_cast<T>(v);
                 std::memcpy(out + i * sizeof(T), &w, sizeof(T));
             }
         });

@@ -101,7 +101,7 @@ namespace {
 using cog::tiff::SampleType;
 constexpr SampleType kGdalTypes[] = {SampleType::kU8,  SampleType::kI8,  SampleType::kU16, SampleType::kI16,
                                      SampleType::kU32, SampleType::kI32, SampleType::kU64, SampleType::kI64,
-                                     SampleType::kF32, SampleType::kF64};
+                                     SampleType::kF16, SampleType::kF32, SampleType::kF64};
 
 }  // namespace
 
@@ -115,6 +115,7 @@ const char* GdalTypeName(SampleType t) noexcept {
         case SampleType::kI32: return "Int32";
         case SampleType::kU64: return "UInt64";
         case SampleType::kI64: return "Int64";
+        case SampleType::kF16: return "Float16";
         case SampleType::kF32: return "Float32";
         case SampleType::kF64: return "Float64";
         default: return "Unknown";

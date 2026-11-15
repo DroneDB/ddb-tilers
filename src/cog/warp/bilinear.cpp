@@ -22,8 +22,8 @@ constexpr double kBandDensityThreshold = 0.0000000001;
 
 template <typename T>
 T RoundNoMask(double v) {
-    if constexpr (std::is_floating_point_v<T>) {
-        return static_cast<T>(v);
+    if constexpr (kRealSample<T>) {
+        return FromDouble<T>(v);
     } else if constexpr (std::is_signed_v<T>) {
         return static_cast<T>(std::floor(v + 0.5));
     } else {
@@ -33,8 +33,8 @@ T RoundNoMask(double v) {
 
 template <typename T>
 T ClampRound(double v) {
-    if constexpr (std::is_floating_point_v<T>) {
-        return static_cast<T>(v);
+    if constexpr (kRealSample<T>) {
+        return FromDouble<T>(v);
     } else {
         if (v < static_cast<double>(std::numeric_limits<T>::lowest())) return std::numeric_limits<T>::lowest();
         if (v > static_cast<double>(std::numeric_limits<T>::max())) return std::numeric_limits<T>::max();
@@ -45,7 +45,10 @@ T ClampRound(double v) {
 
 template <typename T>
 T AvoidNodata(T v) {
-    if constexpr (std::is_integral_v<T>) {
+    if constexpr (std::is_same_v<T, util::Half>) {
+        // GDAL's nextafter of a GFloat16: down from its largest value, else up towards it
+        return util::Half{util::HalfNextAfter(v.bits, v.bits == util::kHalfMaxBits ? uint16_t{0} : util::kHalfMaxBits)};
+    } else if constexpr (std::is_integral_v<T>) {
         if (v == std::numeric_limits<T>::lowest()) return static_cast<T>(std::numeric_limits<T>::lowest() + 1);
         return static_cast<T>(v - 1);
     } else {
@@ -184,12 +187,12 @@ public:
             if (dens < 0.0001) return;
             T cur;
             std::memcpy(&cur, out + static_cast<size_t>(bi) * ss, ss);
-            const double dstReal = static_cast<double>(cur);
+            const double dstReal = ToDouble(cur);
             const double influence = (1.0 - dens) * p_.dstDensityInit;
             value = (value * dens + dstReal * influence) / (dens + influence);
         }
         T t = ClampRound<T>(value);
-        if (p_.avoidSingle && static_cast<double>(t) == dstNd_) t = AvoidNodata<T>(t);
+        if (p_.avoidSingle && ToDouble(t) == dstNd_) t = AvoidNodata<T>(t);
         std::memcpy(out + static_cast<size_t>(bi) * ss, &t, ss);
     }
 
@@ -236,8 +239,8 @@ public:
 
     // GWKClampValueT
     static T ClampValue(double v) {
-        if constexpr (std::is_floating_point_v<T>) {
-            return static_cast<T>(v);
+        if constexpr (kRealSample<T>) {
+            return FromDouble<T>(v);
         } else {
             if (v < static_cast<double>(std::numeric_limits<T>::min())) return std::numeric_limits<T>::min();
             if (v > static_cast<double>(std::numeric_limits<T>::max())) return std::numeric_limits<T>::max();
@@ -440,10 +443,9 @@ public:
                 T cur;
                 std::memcpy(&cur, out + static_cast<size_t>(bi) * ss, ss);
                 const double influence = (1.0 - density) * p_.dstDensityInit;
-                v = ClampRound<T>((static_cast<double>(v) * density + static_cast<double>(cur) * influence) /
-                                  (density + influence));
+                v = ClampRound<T>((ToDouble(v) * density + ToDouble(cur) * influence) / (density + influence));
             }
-            if (p_.avoidSingle && static_cast<double>(v) == dstNd_) v = AvoidNodata<T>(v);
+            if (p_.avoidSingle && ToDouble(v) == dstNd_) v = AvoidNodata<T>(v);
             std::memcpy(out + static_cast<size_t>(bi) * ss, &v, ss);
         }
         Finish(density, out, mask);
@@ -458,7 +460,7 @@ public:
             for (int bi = 0; bi < nOut_; ++bi) {
                 T t;
                 std::memcpy(&t, out + static_cast<size_t>(bi) * ss, ss);
-                if (static_cast<double>(t) == dstNd_) {
+                if (ToDouble(t) == dstNd_) {
                     t = AvoidNodata<T>(t);
                     std::memcpy(out + static_cast<size_t>(bi) * ss, &t, ss);
                 }
@@ -483,7 +485,7 @@ private:
             for (int bi = 0; bi < nOut_ && all; ++bi) {
                 T t;
                 std::memcpy(&t, out + static_cast<size_t>(bi) * ss, ss);
-                all = static_cast<double>(t) == dstNd_;
+                all = ToDouble(t) == dstNd_;
             }
             if (all) {
                 for (int bi = 0; bi < nOut_; ++bi) {
@@ -499,11 +501,11 @@ private:
         const float dd = 1.0f - (1.0f - static_cast<float>(centreDensity)) * (1.0f - 0.0f);
         if (p_.alphaOut == -1) {
             *mask = static_cast<uint8_t>(static_cast<int>(dd * 255.1f));
-        } else if constexpr (!std::is_floating_point_v<T>) {
+        } else if constexpr (!kRealSample<T>) {
             const T a = static_cast<T>(static_cast<int>(dd * (p_.dstAlphaMax + 0.1f)));
             std::memcpy(out + static_cast<size_t>(p_.alphaOut) * ss, &a, ss);
         } else {
-            const T a = static_cast<T>(dd * p_.dstAlphaMax);
+            const T a = FromDouble<T>(static_cast<double>(dd * p_.dstAlphaMax));
             std::memcpy(out + static_cast<size_t>(p_.alphaOut) * ss, &a, ss);
         }
     }

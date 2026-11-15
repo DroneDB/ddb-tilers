@@ -333,9 +333,8 @@ Expected<Plan> HostPlan(const HostRaster& r) {
         return Status(StatusCode::kInvalidArgument, "The block size must be a multiple of 16");
     if (r.codec == Codec::kJpeg) return Status(StatusCode::kInvalidArgument, "A host raster is written losslessly");
     if (!r.fill) return Status(StatusCode::kInvalidArgument, "A host raster needs a fill function");
-    const bool floating = r.type == tiff::SampleType::kF32 || r.type == tiff::SampleType::kF64;
-    if (tiff::SampleTypeSize(r.type) == 0 || r.type == tiff::SampleType::kF16)
-        return Status(StatusCode::kInvalidArgument, "Unsupported sample type");
+    const bool floating = IsFloatType(r.type);
+    if (tiff::SampleTypeSize(r.type) == 0) return Status(StatusCode::kInvalidArgument, "Unsupported sample type");
     if (r.type != tiff::SampleType::kU8 && !r.overviewFactors.empty())
         return Status(StatusCode::kInvalidArgument, "Overviews are written for 8-bit bands only");
     if (r.predictor < 1 || r.predictor > 3 || (r.predictor == 3 && !floating))

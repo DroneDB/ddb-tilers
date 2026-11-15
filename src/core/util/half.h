@@ -73,4 +73,21 @@ inline uint16_t DoubleToHalf(double value) noexcept {
 #endif
 }
 
+/// A half as a sample of the warp's templates (GDAL's GFloat16): its bits.
+struct Half {
+    uint16_t bits = 0;
+};
+
+inline constexpr uint16_t kHalfMaxBits = 0x7BFF;  // 65504, GDAL's NumericLimits<GFloat16>::max()
+
+/// GDAL's nextafter of two GFloat16: one step of the bits towards `toward`.
+inline uint16_t HalfNextAfter(uint16_t from, uint16_t toward) noexcept {
+    const float x = HalfToFloat(from), y = HalfToFloat(toward);
+    if (x != x) return from;    // NaN
+    if (y != y) return toward;  // NaN
+    if (x == y) return toward;
+    if (x != 0.0f) return static_cast<uint16_t>((x < y) == (x > 0.0f) ? from + 1 : from - 1);
+    return static_cast<uint16_t>(((toward >> 15) << 15) | 0x0001u);
+}
+
 }  // namespace ddbt::util

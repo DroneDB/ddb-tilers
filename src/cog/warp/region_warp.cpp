@@ -114,12 +114,12 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     settings.dstAlpha = request.dstAlpha;
     settings.dstNodata = request.dstNodata;
     settings.noSrcAlpha = request.noSrcAlpha;
-    if (request.outputType) {
-        // GDALWarpResolveWorkingDataType: the union of the source's type and the output's
-        const tiff::SampleType work = tiff::SampleTypeUnion(src->Type(), *request.outputType);
-        if (work == tiff::SampleType::kUnknown) return Status(StatusCode::kInvalidArgument, "Unsupported output type");
-        settings.workingType = work;
-    }
+    // The output is of the source's type without -ot. GDALWarpResolveWorkingDataType: the union of the
+    // source's type and the output's (Float32 for Float16, which GDAL never computes in)
+    const tiff::SampleType outputType = request.outputType.value_or(src->Type());
+    const tiff::SampleType work = tiff::SampleTypeUnion(src->Type(), outputType);
+    if (work == tiff::SampleType::kUnknown) return Status(StatusCode::kInvalidArgument, "Unsupported output type");
+    if (request.outputType || work != src->Type()) settings.workingType = work;
     for (const int b : request.bands) {
         if (b < 1 || b > src->Bands()) return Status(StatusCode::kInvalidArgument, "Invalid band " + std::to_string(b));
         settings.bands.push_back(b - 1);
@@ -196,13 +196,13 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     } catch (const std::exception& ex) {
         return Status(StatusCode::kInternal, ex.what());
     }
-    // A working type wider than -ot's: gdalwarp copies its buffer into the output's type
-    if (request.outputType && *request.outputType != out.type) {
+    // A working type wider than the output's: gdalwarp copies its buffer into the output's type
+    if (outputType != out.type) {
         const size_t n = static_cast<size_t>(out.width) * out.height * static_cast<size_t>(out.bands);
-        std::vector<uint8_t> converted(n * tiff::SampleTypeSize(*request.outputType));
-        ConvertSamples(out.pixels.data(), out.type, converted.data(), *request.outputType, n);
+        std::vector<uint8_t> converted(n * tiff::SampleTypeSize(outputType));
+        ConvertSamples(out.pixels.data(), out.type, converted.data(), outputType, n);
         out.pixels = std::move(converted);
-        out.type = *request.outputType;
+        out.type = outputType;
     }
     return out;
 }
