@@ -29,9 +29,6 @@ struct SidecarInput {
     std::vector<std::string> extraDimensions;
 };
 
-/// PDAL's dimension names of a LAS 1.4 point format 6-8 file with these extra dimensions.
-std::vector<std::string> PdalDimensions(int format, const std::vector<std::string>& extra);
-
 /// The sidecar JSON text.
 std::string SidecarJson(const SidecarInput& in);
 

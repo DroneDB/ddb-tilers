@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "copc/readers/las_reader.h"
 
+#include "copc/las/dimension_names.h"
+
 #include <lazperf/excepts.hpp>
 #include <lazperf/lazperf.hpp>
 #include <lazperf/layered.hpp>
@@ -109,6 +111,16 @@ std::string WktOf(const las::LasMetadata& meta) {
     }
     if (meta.wkt) return *meta.wkt;
     return {};
+}
+
+// The WKT or WKT2 record of the file as stored (without trailing NULs) when it is the CRS PDAL
+// chooses; empty otherwise
+std::string StatedWktOf(const las::LasMetadata& meta) {
+    auto def = las::FindCrsDefinition(meta);
+    if (!def.ok() || (def->source != las::CrsSource::kWkt && def->source != las::CrsSource::kWkt2)) return {};
+    std::string text = def->text;
+    while (!text.empty() && text.back() == '\0') text.pop_back();
+    return text;
 }
 
 }  // namespace
@@ -267,6 +279,9 @@ Expected<std::unique_ptr<LasReader>> LasReader::Open(std::shared_ptr<const io::B
         info.extraBytes = r->meta_.extraBytes;
     }
     info.wkt = WktOf(r->meta_);
+    info.statedWkt = StatedWktOf(r->meta_);
+    const std::vector<std::string> extraNames = las::PdalExtraDimensionNames(h.versionMinor, r->meta_.extraBytes);
+    info.dimensions = las::PdalDimensionNames(h.pointFormat, extraNames);
 
     if (h.compressed) {
         DDBT_ASSIGN_OR_RETURN(r->chunks_, ReadLazChunkTable(*r->source_, r->meta_));

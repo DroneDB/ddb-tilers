@@ -325,6 +325,52 @@ struct E57Reader::Scan {
     bool spherical = false;
 };
 
+namespace {
+
+// The dimensions PDAL's E57 reader names, in its order: each of its supported prototype fields
+// that a scan of the file defines (cartesianInvalidState and sphericalInvalidState are its Omit),
+// then X, Y and Z when the points are spherical
+std::vector<std::string> PdalE57Dimensions(const std::vector<E57Reader::Scan>& scans) {
+    static const std::pair<const char*, const char*> kFields[] = {
+        {"cartesianX", "X"},
+        {"cartesianY", "Y"},
+        {"cartesianZ", "Z"},
+        {"sphericalRange", "SphericalRange"},
+        {"sphericalAzimuth", "SphericalAzimuth"},
+        {"sphericalElevation", "SphericalElevation"},
+        {"nor:normalX", "NormalX"},
+        {"nor:normalY", "NormalY"},
+        {"nor:normalZ", "NormalZ"},
+        {"colorRed", "Red"},
+        {"colorGreen", "Green"},
+        {"colorBlue", "Blue"},
+        {"intensity", "Intensity"},
+        {"cartesianInvalidState", "Omit"},
+        {"sphericalInvalidState", "Omit"},
+        {"classification", "Classification"}};
+    std::vector<std::string> dims;
+    const auto has = [&dims](const std::string& name) { return std::find(dims.begin(), dims.end(), name) != dims.end(); };
+    const auto add = [&](const std::string& name) {
+        if (!has(name)) dims.push_back(name);
+    };
+    for (const auto& [field, name] : kFields) {
+        const std::string wanted = field;
+        const bool defined = std::any_of(scans.begin(), scans.end(), [&wanted](const E57Reader::Scan& s) {
+            return std::any_of(s.fields.begin(), s.fields.end(),
+                               [&wanted](const E57Reader::Scan::FieldDef& f) { return f.name == wanted; });
+        });
+        if (defined) add(name);
+    }
+    if (has("SphericalRange") && has("SphericalAzimuth") && has("SphericalElevation")) {
+        add("X");
+        add("Y");
+        add("Z");
+    }
+    return dims;
+}
+
+}  // namespace
+
 E57Reader::E57Reader() = default;
 E57Reader::~E57Reader() = default;
 size_t E57Reader::ScanCount() const noexcept { return scans_.size(); }
@@ -552,13 +598,7 @@ Expected<std::unique_ptr<E57Reader>> E57Reader::Open(const std::string& path, co
     info.countExact = true;
     info.boundsKnown = false;
     info.rgb16 = false;
-    info.dimensions = {"X", "Y", "Z"};
-    if (info.hasIntensity) info.dimensions.push_back("Intensity");
-    if (info.hasRgb) {
-        info.dimensions.push_back("Red");
-        info.dimensions.push_back("Green");
-        info.dimensions.push_back("Blue");
-    }
+    info.dimensions = PdalE57Dimensions(r->scans_);
     if (const XmlElement* cm = root.Child("coordinateMetadata"); cm != nullptr && !cm->text.empty()) info.wkt = cm->text;
     return r;
 }

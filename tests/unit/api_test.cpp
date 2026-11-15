@@ -632,6 +632,137 @@ TEST(HostApi, IsOptimizedCogIsTheRuleOfTheBuilder) {
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+// One descriptor of a LAS extra-bytes VLR (192 bytes): data type, name, and the rest zero.
+void PutExtraBytesDescriptor(std::vector<uint8_t>& vlr, uint8_t dataType, const std::string& name) {
+    std::vector<uint8_t> d(192, 0);
+    d[2] = dataType;
+    if (dataType == 0) d[3] = 2;  // an undocumented type: `options` is its size, 2 bytes
+    std::memcpy(d.data() + 4, name.data(), std::min<size_t>(name.size(), 32));
+    vlr.insert(vlr.end(), d.begin(), d.end());
+}
+
+// The summary of ddbtPointCloudInfo, parsed.
+ddbt::cog::tiler::json::Value PointCloudInfoOf(const std::string& path, bool readBounds = true) {
+    char* out = nullptr;
+    EXPECT_EQ(ddbtPointCloudInfo(path.c_str(), readBounds, &out), DDBT_ERR_NONE) << ddbtLastError();
+    if (out == nullptr) return {};
+    auto v = ddbt::cog::tiler::json::Parse(out);
+    ddbtFree(out);
+    return v ? *v : ddbt::cog::tiler::json::Value{};
+}
+
+std::vector<std::string> StringsOf(const ddbt::cog::tiler::json::Value* array) {
+    std::vector<std::string> out;
+    if (array != nullptr)
+        for (const auto& v : array->arr) out.push_back(v.str);
+    return out;
+}
+
+}  // namespace
+
+// ddbtPointCloudInfo reports what PDAL reports for DroneDB's index: the count and bounds of the
+// header of a LAS / LAZ file, its WKT record as stored, and PDAL's dimension names (the extra bytes
+// of a LAS 1.4 file only, an undocumented type left out, an array as name0, name1..., invalid
+// characters as '_', a name equal to a dimension of the format merged into it).
+TEST(HostApi, PointCloudInfoOfALasFileIsWhatPdalReports) {
+    namespace syn = ddbt::copc::testing;
+    const auto dir = ApiScratch("pcinfo-las");
+    std::vector<uint8_t> vlr;
+    PutExtraBytesDescriptor(vlr, 9, "Pulse width");   // f32
+    PutExtraBytesDescriptor(vlr, 0, "opaque");        // undocumented: no dimension
+    PutExtraBytesDescriptor(vlr, 13, "normal");       // deprecated 2-element u16 array
+    PutExtraBytesDescriptor(vlr, 1, "1st/value");     // invalid characters
+    PutExtraBytesDescriptor(vlr, 3, "intensity");     // the format's Intensity
+
+    for (const int minor : {2, 4}) {
+        SCOPED_TRACE(minor);
+        syn::SynthLas las;
+        las.minor = minor;
+        las.format = minor == 4 ? 8 : 3;
+        // Sizes: f32 4, the 2 undocumented bytes, u16[2] 4, u8 1, u16 2
+        las.extraBytes = 4 + 2 + 4 + 1 + 2;
+        las.extraBytesVlr = vlr;
+        const std::string wkt =
+            "GEOGCS[\"WGS 84\",DATUM[\"WGS_1984\",SPHEROID[\"WGS 84\",6378137,298.257223563]],"
+            "PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433]]";
+        las.wkt = minor == 4 ? wkt : std::string();
+        syn::FillRandom(las, 2000, 7);
+        const std::string path = (dir / ("v" + std::to_string(minor) + ".las")).string();
+        ASSERT_TRUE(syn::WriteBytes(path, syn::BuildLasBytes(las)));
+
+        const auto info = PointCloudInfoOf(path);
+        ASSERT_TRUE(info.IsObject());
+        EXPECT_EQ(info.Find("kind")->str, "las");
+        EXPECT_EQ(info.Find("pointCount")->u, 2000u);
+        ASSERT_NE(info.Find("bounds"), nullptr);
+        EXPECT_EQ(info.Find("bounds")->arr.size(), 6u);
+        std::vector<std::string> expected = {
+            "X",        "Y",        "Z",       "Intensity",     "ReturnNumber", "NumberOfReturns",
+            "ScanDirectionFlag",    "EdgeOfFlightLine",         "Classification",
+            "Synthetic", "KeyPoint", "Withheld", "Overlap",     "ScanAngleRank", "UserData",
+            "PointSourceId",        "GpsTime"};
+        if (minor == 4) {
+            expected.push_back("ScanChannel");
+            expected.insert(expected.end(), {"Red", "Green", "Blue", "Infrared"});
+            expected.insert(expected.end(), {"Pulse width", "normal0", "normal1", "_st_value"});
+            EXPECT_EQ(info.Find("wkt")->str, las.wkt) << "the WKT record as stored";
+        } else {
+            expected.insert(expected.end(), {"Red", "Green", "Blue"});
+            EXPECT_EQ(info.Find("wkt")->str, "");
+        }
+        EXPECT_EQ(StringsOf(info.Find("dimensions")), expected);
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// A PLY file: its vertex properties as the dimensions, and the exact count and bounds of a read of
+// its points; text files and errors
+TEST(HostApi, PointCloudInfoOfPlyAndTextFilesReadsTheirPoints) {
+    const auto dir = ApiScratch("pcinfo-ply");
+    const std::string ply = (dir / "cloud.ply").string(), xyz = (dir / "cloud.xyz").string();
+    {
+        std::ofstream out(ply);
+        out << "ply\nformat ascii 1.0\nelement vertex 3\n"
+               "property float x\nproperty float y\nproperty float z\n"
+               "property float nx\nproperty uchar diffuse_red\nproperty uchar views\nend_header\n"
+               "1 2 3 0 10 1\n-4 5 6 0 20 2\n7 -8 9.5 0 30 3\n";
+    }
+    {
+        std::ofstream out(xyz);
+        out << "1 2 3\n4 5 6\n-1 0 2\n10 11 -12\n";
+    }
+    const auto p = PointCloudInfoOf(ply);
+    EXPECT_EQ(p.Find("kind")->str, "ply");
+    EXPECT_EQ(p.Find("pointCount")->u, 3u);
+    EXPECT_EQ(StringsOf(p.Find("dimensions")),
+              (std::vector<std::string>{"x", "y", "z", "nx", "diffuse_red", "views"}));
+    std::vector<double> bounds;
+    for (const auto& v : p.Find("bounds")->arr) bounds.push_back(v.num);
+    EXPECT_EQ(bounds, (std::vector<double>{-4, -8, 3, 7, 5, 9.5}));
+
+    const auto t = PointCloudInfoOf(xyz);
+    EXPECT_EQ(t.Find("kind")->str, "xyz");
+    EXPECT_EQ(t.Find("pointCount")->u, 4u);
+    bounds.clear();
+    for (const auto& v : t.Find("bounds")->arr) bounds.push_back(v.num);
+    EXPECT_EQ(bounds, (std::vector<double>{-1, 0, -12, 10, 11, 6}));
+
+    char* out = nullptr;
+    EXPECT_EQ(ddbtPointCloudInfo((dir / "missing.las").string().c_str(), true, &out), DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(out, nullptr);
+    EXPECT_EQ(ddbtPointCloudInfo("", true, &out), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtPointCloudInfo(ply.c_str(), true, nullptr), DDBT_ERR_INVALIDARGS);
+
+    // Without readBounds, a PLY file (an exact count in its header) is not read: no bounds; a text
+    // file is read for its count, so its bounds come with it
+    EXPECT_EQ(PointCloudInfoOf(ply, false).Find("bounds"), nullptr);
+    EXPECT_EQ(PointCloudInfoOf(ply, false).Find("pointCount")->u, 3u);
+    EXPECT_NE(PointCloudInfoOf(xyz, false).Find("bounds"), nullptr);
+    std::filesystem::remove_all(dir);
+}
+
 TEST(HostApi, BuildCog2ReportsProgressToOne) {
     namespace syn = ddbt::cog::tiler::testing;
     const auto dir = ApiScratch("cog2");

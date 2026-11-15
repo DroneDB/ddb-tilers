@@ -6,6 +6,7 @@
 #include <fstream>
 
 #include "cog/tiler/json_lite.h"
+#include "copc/las/dimension_names.h"
 #include "copc/tiler/cloud.h"
 #include "core/crs/crs.h"
 #include "core/crs/transform.h"
@@ -13,20 +14,6 @@
 namespace ddbt::copc::build {
 
 namespace json = ddbt::cog::tiler::json;
-
-std::vector<std::string> PdalDimensions(int format, const std::vector<std::string>& extra) {
-    std::vector<std::string> d = {"X", "Y", "Z", "Intensity", "ReturnNumber", "NumberOfReturns", "ScanDirectionFlag",
-                                  "EdgeOfFlightLine", "Classification", "Synthetic", "KeyPoint", "Withheld",
-                                  "Overlap", "ScanAngleRank", "UserData", "PointSourceId", "GpsTime", "ScanChannel"};
-    if (format >= 7) {
-        d.push_back("Red");
-        d.push_back("Green");
-        d.push_back("Blue");
-    }
-    if (format == 8) d.push_back("Infrared");
-    d.insert(d.end(), extra.begin(), extra.end());
-    return d;
-}
 
 std::string SidecarJson(const SidecarInput& in) {
     json::Value j = json::Object();
@@ -39,7 +26,7 @@ std::string SidecarJson(const SidecarInput& in) {
     j.obj["projection"] = json::String(in.wkt);
     json::Value dims;
     dims.kind = json::Value::Kind::kArray;
-    for (const std::string& s : PdalDimensions(in.format, in.extraDimensions)) dims.arr.push_back(json::String(s));
+    for (const std::string& s : las::PdalDimensionNames(in.format, in.extraDimensions)) dims.arr.push_back(json::String(s));
     j.obj["dimensions"] = dims;
     j.obj["pointFormat"] = json::Unsigned(static_cast<uint64_t>(in.format));
     j.obj["color"] = json::Bool(in.color);

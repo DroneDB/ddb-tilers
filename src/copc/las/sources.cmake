@@ -3,4 +3,5 @@
 # COPC info VLRs, point formats 0-10, CRS from WKT / GeoTIFF keys. Paths relative to src/.
 list(APPEND DDBT_SOURCES
   copc/las/las_header.cpp
-  copc/las/las_crs.cpp)
+  copc/las/las_crs.cpp
+  copc/las/dimension_names.cpp)

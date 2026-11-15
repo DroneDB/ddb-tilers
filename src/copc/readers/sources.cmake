@@ -5,4 +5,5 @@ list(APPEND DDBT_SOURCES
   copc/readers/e57_reader.cpp
   copc/readers/ply_reader.cpp
   copc/readers/text_reader.cpp
-  copc/readers/open_reader.cpp)
+  copc/readers/open_reader.cpp
+  copc/readers/point_info.cpp)

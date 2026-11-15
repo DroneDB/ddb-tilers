@@ -238,8 +238,8 @@ Expected<std::unique_ptr<PlyReader>> PlyReader::Open(const std::string& path, co
     info.countExact = true;
     info.boundsKnown = false;
     info.rgb16 = r->colourScale_ == 1.0;
-    for (const Prop& p : r->props_)
-        if (p.field != Field::kNone) info.dimensions.push_back(FieldName(p.field));
+    // PDAL names the dimensions of a PLY file by its vertex properties
+    for (const Prop& p : r->props_) info.dimensions.push_back(p.name);
     return r;
 }
 

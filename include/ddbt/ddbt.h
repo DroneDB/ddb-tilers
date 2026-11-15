@@ -212,6 +212,18 @@ DDBT_API ddbtErr ddbtBuildCog2(const char *inputPath, const char *outputPath, co
  * @param outOptimized receives the answer (false on an error) */
 DDBT_API ddbtErr ddbtIsOptimizedCog(const char *inputPath, bool *outOptimized);
 
+/** The summary of a point cloud (LAS, LAZ and so COPC, PLY, E57, XYZ, PTS) as JSON: {"kind": "las" |
+ * "laz" | "ply" | "e57" | "xyz" | "pts", "pointCount", "bounds": [minX, minY, minZ, maxX, maxY, maxZ]
+ * (when known), "wkt" (the CRS as the file states it, "" when unknown), "dimensions" (the names
+ * PDAL gives them, in its order)}. LAS and LAZ answer from their header (count and bounds); the
+ * points of the other formats are read once, on the threads of the library, when the header has no
+ * exact count (XYZ, PTS) or `readBounds` asks for bounds the header does not give (PLY, E57, XYZ,
+ * PTS).
+ * Codes: DDBT_ERR_INVALIDARGS for a bad argument, DDBT_ERR_NOTFOUND, DDBT_ERR_EXCEPTION for a file
+ * that cannot be read (as ddbtBuildCopc).
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree */
+DDBT_API ddbtErr ddbtPointCloudInfo(const char *inputPath, bool readBounds, char **outJson);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

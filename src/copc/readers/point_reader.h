@@ -98,7 +98,10 @@ struct SourceInfo {
 
     /// CRS as WKT (WKT1 as PDAL writes it in a COPC), empty when unknown.
     std::string wkt;
-    /// Dimension names as PDAL calls them, in PDAL's order.
+    /// The CRS as the file states it, as PDAL reports it: the text of a WKT or WKT2 record as
+    /// stored; empty when the file states it otherwise (GeoTIFF keys: `wkt` is then PDAL's text).
+    std::string statedWkt;
+    /// Dimension names as PDAL calls them, in PDAL's order (a PLY file: its vertex properties).
     std::vector<std::string> dimensions;
 };
 
