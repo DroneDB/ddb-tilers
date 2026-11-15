@@ -60,6 +60,12 @@ public:
     /// nullopt when no corner transforms or the result is out of [-180, 180] x [-90, 90].
     static std::optional<LonLatBox> AreaOfInterestFor(const Crs& src, double minX, double minY, double maxX,
                                                       double maxY);
+    /// GDALComputeAreaOfInterest of a box (the one gdalwarp gives -te_srs): the four corners in the
+    /// source's geographic CRS in its own angular unit, min / max of the corners that transform;
+    /// west > east when the bottom corners cross the antimeridian; nullopt when none transforms or the
+    /// box is out of the ranges an area of interest takes.
+    static std::optional<LonLatBox> AreaOfInterestForBox(const Crs& src, double minX, double minY, double maxX,
+                                                         double maxY);
 
     ~Transform();
     Transform(const Transform&) = delete;

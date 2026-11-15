@@ -44,6 +44,12 @@ struct PjDeleter {
 };
 using PjPtr = std::unique_ptr<PJ, PjDeleter>;
 
+/// A CRS from its definition: a WKT as GDAL imports one (STRICT=NO,
+/// UNSET_IDENTIFIERS_IF_INCOMPATIBLE_DEF=NO: the datum and ellipsoid keep their identifiers when
+/// the values differ slightly from the authority's), anything else PROJ reads (proj_create).
+/// nullptr on failure (LastError tells why).
+PjPtr CreateCrs(PJ_CONTEXT* ctx, const std::string& definition, std::string* wktErrors = nullptr);
+
 /// The calling thread's copy of a shared object. `id` is unique per owner (never reused);
 /// `alive` expires when the owner is destroyed, which lets the thread drop its copies of dead
 /// owners. `make` builds the copy in the thread's context (called once per thread and id).

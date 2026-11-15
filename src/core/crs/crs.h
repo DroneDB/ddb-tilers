@@ -71,8 +71,9 @@ public:
 
     /// What PROJ is given to re-create this CRS: "AUTH:CODE" when the CRS has a top-level
     /// identifier and is equivalent to the authority's definition (GDAL's
-    /// OGR_CT_PREFER_OFFICIAL_SRS_DEF: the database definition keeps the area of use), PROJJSON
-    /// otherwise (lossless).
+    /// OGR_CT_PREFER_OFFICIAL_SRS_DEF: the database definition keeps the area of use), else the
+    /// WKT it was read from (re-imported as GDAL imports a WKT: PROJJSON would lose the
+    /// identifiers of a datum and an ellipsoid under a CRS that has one), else PROJJSON.
     const std::string& Definition() const;
     const std::string& Name() const;
     CrsType Type() const;
@@ -93,6 +94,19 @@ public:
     double HorizontalUnitFactor() const;
     /// The area of use of the CRS (from the definition or proj.db), if any.
     std::optional<LonLatBox> AreaOfUse() const;
+
+    /// GDAL's CloneGeogCS: the geographic CRS of the datum of a projected or geographic CRS (of
+    /// the horizontal part of a compound one). Throws CrsError when there is none.
+    Crs GeographicBase() const;
+
+    /// What GDAL reads of the projection of a projected CRS in its WKT1 (GetAttrValue("PROJECTION"),
+    /// GetNormProjParm): the method name, the central meridian and the latitude of origin in
+    /// degrees (0 when the method has none). nullopt for a CRS without projection.
+    struct ProjectionMethod {
+        std::string name;
+        double centralMeridian = 0, latitudeOfOrigin = 0;
+    };
+    std::optional<ProjectionMethod> Projection() const;
 
     std::string ToWkt(WktFlavor flavor = WktFlavor::Wkt2_2019) const;
     std::string ToProjJson() const;

@@ -117,7 +117,7 @@ TEST(Crs, OfficialDefinitionPreferred) {
 }
 
 TEST(Crs, WktOnlyLasCrs) {
-    // The LAS WKT VLR of the corpus: no identifier, kept as PROJJSON.
+    // The LAS WKT VLR of the corpus: no identifier, kept as the WKT it was read from.
     const CrsCase* las = nullptr;
     for (const auto& c : kCrsCases)
         if (std::string(c.name) == "wkt_oblique_stereographic_las") las = &c;
@@ -125,9 +125,9 @@ TEST(Crs, WktOnlyLasCrs) {
     const Crs c = Crs::FromWkt(las->src);
     EXPECT_EQ(c.Type(), CrsType::Projected);
     EXPECT_FALSE(c.Epsg().has_value());
-    EXPECT_EQ(c.Definition().front(), '{');
+    EXPECT_EQ(c.Definition(), std::string(las->src));
     EXPECT_EQ(c.Name(), "Oblique_Stereographic");
-    EXPECT_TRUE(Crs::FromProjJson(c.Definition()).Equivalent(c));
+    EXPECT_TRUE(Crs::FromProjJson(c.ToProjJson()).Equivalent(c));
 }
 
 TEST(Crs, ProjDataDirIsTheBuildOne) {

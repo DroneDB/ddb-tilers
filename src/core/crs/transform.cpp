@@ -2,11 +2,13 @@
 
 #include "core/crs/transform.h"
 
+#include <algorithm>
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <exception>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "core/crs/proj_context.h"
@@ -119,8 +121,8 @@ std::shared_ptr<const Transform> Transform::Create(const Crs& src, const Crs& ds
     auto impl = std::make_unique<Impl>();
     PJ_CONTEXT* ctx = detail::ThreadContext();
     detail::ClearLastError();
-    PjPtr s(proj_create(ctx, src.Definition().c_str()));
-    PjPtr d(proj_create(ctx, dst.Definition().c_str()));
+    PjPtr s = detail::CreateCrs(ctx, src.Definition());
+    PjPtr d = detail::CreateCrs(ctx, dst.Definition());
     if (!s || !d) throw CrsError("PROJ cannot create the CRSs: " + detail::LastError(ctx));
 
     PJ_AREA* area = nullptr;
@@ -212,30 +214,37 @@ std::string Transform::LastUsedOperation() const {
     return s != nullptr ? s : std::string();
 }
 
-std::optional<LonLatBox> Transform::AreaOfInterestFor(const Crs& src, double minX, double minY, double maxX,
-                                                      double maxY) {
+namespace {
+
+// GDALComputeAreaOfInterest, of a grid (the corners top-left, top-right, bottom-left, bottom-right;
+// the longitudes in degrees; west > east when the top corners cross the antimeridian; nothing out
+// of [-180, 180] x [-90, 90]) or of a box (the corners bottom-left, bottom-right, top-left,
+// top-right; in the units of the geographic CRS; west > east when the bottom corners cross it)
+std::optional<LonLatBox> AreaOfInterest(const Crs& src, double minX, double minY, double maxX, double maxY,
+                                        bool ofGrid) {
     PJ_CONTEXT* ctx = detail::ThreadContext();
-    PjPtr crs(proj_create(ctx, src.Definition().c_str()));
+    PjPtr crs = detail::CreateCrs(ctx, src.Definition());
     if (!crs) return std::nullopt;
     // StripVertical()
     if (proj_get_type(crs.get()) == PJ_TYPE_COMPOUND_CRS) crs.reset(proj_crs_get_sub_crs(ctx, crs.get(), 0));
     if (!crs) return std::nullopt;
-    // CloneGeogCS(), degrees, 2D
+    // CloneGeogCS(), 2D, in degrees for a grid
     PjPtr geog(proj_crs_get_geodetic_crs(ctx, crs.get()));
     if (!geog) return std::nullopt;
     const PJ_TYPE gt = proj_get_type(geog.get());
     if (gt != PJ_TYPE_GEOGRAPHIC_2D_CRS && gt != PJ_TYPE_GEOGRAPHIC_3D_CRS) return std::nullopt;
     if (gt == PJ_TYPE_GEOGRAPHIC_3D_CRS) geog.reset(proj_crs_demote_to_2D(ctx, nullptr, geog.get()));
-    if (geog) geog.reset(proj_crs_alter_cs_angular_unit(ctx, geog.get(), "degree", 0.0174532925199433, "EPSG", "9122"));
+    if (geog && ofGrid)
+        geog.reset(proj_crs_alter_cs_angular_unit(ctx, geog.get(), "degree", 0.0174532925199433, "EPSG", "9122"));
     if (!geog) return std::nullopt;
     PjPtr op(proj_create_crs_to_crs_from_pj(ctx, crs.get(), geog.get(), nullptr, nullptr));
     if (!op) return std::nullopt;
     PjPtr norm(proj_normalize_for_visualization(ctx, op.get()));
     if (!norm) return std::nullopt;
 
-    // Corners in GDAL's order: top-left, top-right, bottom-left, bottom-right.
     double x[4] = {minX, maxX, minX, maxX};
     double y[4] = {maxY, maxY, minY, minY};
+    if (!ofGrid) std::swap(y[0], y[2]), std::swap(y[1], y[3]);
     bool valid[4];
     for (int i = 0; i < 4; ++i) {
         const PJ_COORD c = proj_trans(norm.get(), PJ_FWD, proj_coord(x[i], y[i], 0, HUGE_VAL));
@@ -255,15 +264,29 @@ std::optional<LonLatBox> Transform::AreaOfInterestFor(const Crs& src, double min
         b.east = std::max(b.east, x[i]);
         b.north = std::max(b.north, y[i]);
     }
-    if (valid[0] && valid[1] && x[0] > x[1]) {
+    const bool crosses = ofGrid ? x[0] > x[1] : (minX - maxX) * (x[0] - x[1]) < 0;
+    if (valid[0] && valid[1] && crosses) {
         b.west = x[0];
         b.east = x[1];
     }
-    if (!any || std::fabs(b.west) > 180 || std::fabs(b.east) > 180 || std::fabs(b.south) > 90 ||
-        std::fabs(b.north) > 90) {
+    if (!any) return std::nullopt;
+    // Out of the ranges SetAreaOfInterest takes (a box of the source's units: no area at all)
+    if (std::fabs(b.west) > 180 || std::fabs(b.east) > 180 || std::fabs(b.south) > 90 || std::fabs(b.north) > 90 ||
+        (!ofGrid && b.south > b.north))
         return std::nullopt;
-    }
     return b;
+}
+
+}  // namespace
+
+std::optional<LonLatBox> Transform::AreaOfInterestFor(const Crs& src, double minX, double minY, double maxX,
+                                                      double maxY) {
+    return AreaOfInterest(src, minX, minY, maxX, maxY, true);
+}
+
+std::optional<LonLatBox> Transform::AreaOfInterestForBox(const Crs& src, double minX, double minY, double maxX,
+                                                         double maxY) {
+    return AreaOfInterest(src, minX, minY, maxX, maxY, false);
 }
 
 // ---- cache --------------------------------------------------------------------------------

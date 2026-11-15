@@ -5,6 +5,7 @@ list(APPEND DDBT_SOURCES
   core/crs/proj_context.cpp
   core/crs/crs.cpp
   core/crs/transform.cpp
+  core/crs/transform_bounds.cpp
   core/crs/web_mercator_analytic.cpp
   core/crs/grid_approx.cpp
   core/crs/grid_approx_kernels.cpp
@@ -25,11 +26,11 @@ else()
   message(WARNING "crs: proj.db not found next to PROJ's CMake config (${PROJ_DIR}); set DDBT_PROJ_DATA at run time")
 endif()
 
-# The analytic Web Mercator forms and the GCP transforms reproduce PROJ's / GDAL's bits, and the
-# GridApprox kernel the scalar code's explicit FMAs: no other contraction, and no LTO (with LTO
+# The analytic Web Mercator forms, the GCP transforms and the densified bounds reproduce PROJ's /
+# GDAL's bits, and the GridApprox kernel the scalar code's explicit FMAs: no other contraction, and no LTO (with LTO
 # the per-file flag is lost when the code is inlined at link time).
 if(NOT MSVC)
   set_source_files_properties(core/crs/web_mercator_analytic.cpp core/crs/grid_approx_kernels.cpp
-    core/crs/gcp_transform.cpp
+    core/crs/gcp_transform.cpp core/crs/transform_bounds.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-lto")
 endif()

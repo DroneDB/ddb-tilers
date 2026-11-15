@@ -11,6 +11,8 @@
 
 #include <proj.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -762,9 +764,19 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
         // GDAL passes the prime meridian (degrees) to OGRSpatialReference::SetGeogCS together with
         // the angular unit, then re-imports its WKT1 when that unit is not the degree (the
         // "test_tiff_grads" normalisation): the WKT1 value ends up as offset * unit-in-degrees.
+        // OGRSpatialReference::SetGeogCS builds them through PROJ: a prime meridian of a name only,
+        // the angular unit EPSG's degree or grad by its name, else a unit without identifier
+        const auto unitAuthority = [](const std::string& unit) {
+            const auto is = [&](std::string_view n) {
+                return unit.size() == n.size() && std::equal(unit.begin(), unit.end(), n.begin(), [](char a, char b) {
+                           return std::tolower(static_cast<unsigned char>(a)) == b;
+                       });
+            };
+            return is("degree") ? Authority(9122) : is("grad") ? Authority(9105) : std::string();
+        };
         w += Authority(d.datum) + "],PRIMEM[" + Quote(pmName.empty() ? "Greenwich" : pmName) + "," +
-             Num(pmLong * angInDeg) + Authority(d.pm) + "],UNIT[" + Quote(angularUnits) + "," + Num(angInDeg * kDegToRad) +
-             Authority(d.uomAngle == 9110 ? kUser : d.uomAngle) + "]";
+             Num(pmLong * angInDeg) + "],UNIT[" + Quote(angularUnits) + "," + Num(angInDeg * kDegToRad) +
+             unitAuthority(angularUnits) + "]";
         if (gcsValid) w += Authority(d.gcs);
         w += "]";
         geogWkt = w;
@@ -818,7 +830,7 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
         if (d.ctProjection == kUser && d.projCode != kUser) {
             // Projection from an EPSG conversion code (ProjectionGeoKey): combine PROJ objects.
             PjPtr conv = db.Create(d.projCode, PJ_CATEGORY_COORDINATE_OPERATION);
-            PjPtr geog(proj_create(db.ctx(), geogWkt.c_str()));
+            PjPtr geog = crs::detail::CreateCrs(db.ctx(), geogWkt);
             if (!conv || !geog) return Unsupported("projection EPSG:" + std::to_string(d.projCode));
             PjPtr cs(proj_create_cartesian_2D_cs(db.ctx(), PJ_CART2D_EASTING_NORTHING, unitName.c_str(), d.uomLengthInMeters));
             PjPtr base(proj_crs_get_geodetic_crs(db.ctx(), geog.get()));
@@ -864,7 +876,7 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
         PjPtr v = db.Create(vcs, PJ_CATEGORY_CRS);
         if (v && proj_get_type(v.get()) == PJ_TYPE_VERTICAL_CRS) {
             if (horizontalIsEpsg) return "EPSG:" + std::to_string(horizontalCode) + "+" + std::to_string(vcs);
-            PjPtr h(proj_create(db.ctx(), horizontal.c_str()));
+            PjPtr h = crs::detail::CreateCrs(db.ctx(), horizontal);
             if (!h) return horizontal;
             const std::string compName = Db::Name(h.get()) + " + " + Db::Name(v.get());
             PjPtr comp(proj_create_compound_crs(db.ctx(), compName.c_str(), h.get(), v.get()));
@@ -889,20 +901,20 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
     if (vertName.empty()) vertName = "unknown";
     std::string horizWkt1 = horizontal;
     if (horizontalIsEpsg) {
-        PjPtr h(proj_create(db.ctx(), horizontal.c_str()));
+        PjPtr h = crs::detail::CreateCrs(db.ctx(), horizontal);
         if (!h) return horizontal;
         horizWkt1 = WktOf(db, h.get(), PJ_WKT1_GDAL);
         if (horizWkt1.empty()) return horizontal;
     } else if (horizontal.rfind("PROJCS[", 0) != 0 && horizontal.rfind("GEOGCS[", 0) != 0 &&
                horizontal.rfind("LOCAL_CS[", 0) != 0) {
-        PjPtr h(proj_create(db.ctx(), horizontal.c_str()));
+        PjPtr h = crs::detail::CreateCrs(db.ctx(), horizontal);
         if (!h) return horizontal;
         horizWkt1 = WktOf(db, h.get(), PJ_WKT1_GDAL);
         if (horizWkt1.empty()) return horizontal;
     }
     std::string hname = "unnamed";
     {
-        PjPtr h(proj_create(db.ctx(), horizWkt1.c_str()));
+        PjPtr h = crs::detail::CreateCrs(db.ctx(), horizWkt1);
         if (h) hname = Db::Name(h.get());
     }
     const std::string compName = !gtCitation.empty() && gtCitation.find(" = ") == std::string::npos

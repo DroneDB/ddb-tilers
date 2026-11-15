@@ -119,6 +119,22 @@ PJ* ThreadCopy(uint64_t id, const std::weak_ptr<const void>& alive, const void* 
     return pj;
 }
 
+PjPtr CreateCrs(PJ_CONTEXT* ctx, const std::string& definition, std::string* wktErrors) {
+    const size_t first = definition.find_first_not_of(" \t\r\n");
+    const bool wkt = first != std::string::npos && definition[first] != '{' && definition.find('[') != std::string::npos;
+    if (!wkt) return PjPtr(proj_create(ctx, definition.c_str()));
+    const char* const options[] = {"STRICT=NO", "UNSET_IDENTIFIERS_IF_INCOMPATIBLE_DEF=NO", nullptr};
+    PROJ_STRING_LIST warnings = nullptr;
+    PROJ_STRING_LIST errors = nullptr;
+    PjPtr pj(proj_create_from_wkt(ctx, definition.c_str(), options, &warnings, &errors));
+    if (wktErrors != nullptr)
+        for (auto it = errors; it != nullptr && *it != nullptr; ++it)
+            *wktErrors += std::string(wktErrors->empty() ? "" : "; ") + *it;
+    proj_string_list_destroy(warnings);
+    proj_string_list_destroy(errors);
+    return pj;
+}
+
 uint64_t NextId() noexcept {
     static std::atomic<uint64_t> next{1};
     return next.fetch_add(1, std::memory_order_relaxed);

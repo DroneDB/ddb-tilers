@@ -2,7 +2,9 @@
 
 #include "core/crs/crs.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -91,7 +93,8 @@ bool NorthingFirst(PJ_CONTEXT* ctx, const PJ* cs, PJ_TYPE horizontalType) {
            startsWith(name0, "northing") && startsWith(name1, "easting");
 }
 
-Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj) {
+// wkt: the text the CRS was read from when it is a WKT ("" otherwise)
+Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj, const std::string& wkt) {
     Crs::Data d;
     // Canonical definition: AUTH:CODE when equivalent to the authority's definition.
     const char* auth = proj_get_id_auth_name(pj, 0);
@@ -108,6 +111,10 @@ Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj) {
     const PJ* use = official ? official.get() : pj;
     if (official) {
         d.definition = std::string(auth) + ":" + code;
+    } else if (!wkt.empty()) {
+        // The WKT itself: PROJJSON leaves out the identifiers of the datum and the ellipsoid
+        // under a CRS that has one, which GDAL's import keeps (and which choose the operations)
+        d.definition = wkt;
     } else {
         const char* json = proj_as_projjson(ctx, pj, nullptr);
         if (json == nullptr) throw CrsError("cannot export the CRS to PROJJSON: " + detail::LastError(ctx));
@@ -147,7 +154,7 @@ Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj) {
 }
 
 PjPtr Create(PJ_CONTEXT* ctx, const std::string& def) {
-    PjPtr pj(proj_create(ctx, def.c_str()));
+    PjPtr pj = detail::CreateCrs(ctx, def);
     if (!pj) throw CrsError("PROJ cannot create the CRS: " + detail::LastError(ctx));
     return pj;
 }
@@ -165,21 +172,15 @@ Crs Crs::FromText(std::string_view text, bool wkt) {
     const std::string s(text);
     PjPtr pj;
     if (wkt) {
-        const char* const options[] = {"STRICT=NO", "UNSET_IDENTIFIERS_IF_INCOMPATIBLE_DEF=NO", nullptr};
-        PROJ_STRING_LIST warnings = nullptr;
-        PROJ_STRING_LIST errors = nullptr;
-        pj.reset(proj_create_from_wkt(ctx, s.c_str(), options, &warnings, &errors));
         std::string err;
-        for (auto it = errors; it != nullptr && *it != nullptr; ++it) err += std::string(err.empty() ? "" : "; ") + *it;
-        proj_string_list_destroy(warnings);
-        proj_string_list_destroy(errors);
+        pj = detail::CreateCrs(ctx, s, &err);
         if (!pj) throw CrsError("invalid WKT: " + (err.empty() ? detail::LastError(ctx) : err));
     } else {
         pj.reset(proj_create(ctx, s.c_str()));
         if (!pj) throw CrsError("PROJ cannot parse '" + s.substr(0, 80) + "': " + detail::LastError(ctx));
     }
     if (!proj_is_crs(pj.get())) throw CrsError("not a CRS: '" + s.substr(0, 80) + "'");
-    return Crs(std::make_shared<const Data>(Describe(ctx, pj.get())));
+    return Crs(std::make_shared<const Data>(Describe(ctx, pj.get(), wkt ? s : std::string())));
 }
 
 Crs Crs::FromEpsg(int code) { return FromText("EPSG:" + std::to_string(code), false); }
@@ -217,6 +218,60 @@ bool GdalExportsWkt2(PJ_CONTEXT* ctx, PJ* pj) {
 }
 
 }  // namespace
+
+Crs Crs::GeographicBase() const {
+    PJ_CONTEXT* ctx = detail::ThreadContext();
+    const PjPtr pj = Create(ctx, Definition());
+    const PjPtr horizontal = HorizontalOf(ctx, pj.get());
+    const PjPtr geodetic(proj_crs_get_geodetic_crs(ctx, horizontal ? horizontal.get() : pj.get()));
+    if (!geodetic) throw CrsError("the CRS has no geographic CRS: " + detail::LastError(ctx));
+    const char* const options[] = {"MULTILINE=NO", nullptr};
+    const char* wkt = proj_as_wkt(ctx, geodetic.get(), PJ_WKT2_2019, options);
+    if (wkt == nullptr) throw CrsError("cannot export the geographic CRS: " + detail::LastError(ctx));
+    return FromWkt(wkt);
+}
+
+namespace {
+
+// The text of the first `key["` node of a WKT1 text ("" if none)
+std::string WktNodeText(const std::string& wkt, const std::string& key) {
+    const size_t at = wkt.find(key + "[\"");
+    if (at == std::string::npos) return {};
+    const size_t from = at + key.size() + 2, to = wkt.find('"', from);
+    return to == std::string::npos ? std::string() : wkt.substr(from, to - from);
+}
+
+// GetProjParm: the value of PARAMETER["name", value] (the name compared without case), else 0
+double WktParameter(const std::string& wkt, const std::string& name) {
+    for (size_t at = wkt.find("PARAMETER[\""); at != std::string::npos; at = wkt.find("PARAMETER[\"", at + 1)) {
+        const size_t from = at + 11, to = wkt.find('"', from);
+        if (to == std::string::npos) break;
+        const std::string key = wkt.substr(from, to - from);
+        if (key.size() == name.size() &&
+            std::equal(key.begin(), key.end(), name.begin(), [](char a, char b) {
+                return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+            }))
+            return std::strtod(wkt.c_str() + to + 2, nullptr);
+    }
+    return 0.0;
+}
+
+}  // namespace
+
+std::optional<Crs::ProjectionMethod> Crs::Projection() const {
+    const std::string wkt = ToWkt(WktFlavor::Wkt1Gdal);
+    ProjectionMethod m;
+    m.name = WktNodeText(wkt, "PROJECTION");
+    if (m.name.empty()) return std::nullopt;
+    // GetNormProjParm: the angular parameters in degrees, from the unit of the geographic CRS
+    constexpr double kDegree = 0.0174532925199433;
+    double toDegrees = GeographicBase().HorizontalUnitFactor() / kDegree;
+    if (std::fabs(toDegrees - 1.0) < 0.000000001) toDegrees = 1.0;
+    const auto norm = [&](double v) { return v * toDegrees; };
+    m.centralMeridian = norm(WktParameter(wkt, "central_meridian"));
+    m.latitudeOfOrigin = norm(WktParameter(wkt, "latitude_of_origin"));
+    return m;
+}
 
 std::string Crs::ToWkt(WktFlavor flavor) const {
     PJ_CONTEXT* ctx = detail::ThreadContext();
