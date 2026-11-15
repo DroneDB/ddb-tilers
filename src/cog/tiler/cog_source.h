@@ -106,7 +106,8 @@ public:
     /// TIFF the tiler cannot read (or with more than the maximum band count, or wider or taller
     /// than INT_MAX pixels).
     static std::shared_ptr<const CogSource> Get(const std::string& path, SourceUse use = SourceUse::kTile);
-    /// Opens without the registry (tests).
+    /// Opens without the registry: the source and its file are the caller's alone (a private
+    /// ddbtRasterOpenEx, tests).
     static std::shared_ptr<const CogSource> Open(const std::string& path, SourceUse use = SourceUse::kTile);
     /// Forgets every registered source (tests).
     static void ClearRegistry();

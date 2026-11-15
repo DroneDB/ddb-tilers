@@ -254,6 +254,16 @@ typedef enum ddbtSampleType
  * be read. Opening the same file version twice shares its parsed state.
  * @param out receives the handle; release it with ddbtRasterClose */
 DDBT_API ddbtErr ddbtRasterOpen(const char *path, ddbtRaster **out);
+
+/** ddbtRasterOpenEx flag: the file is opened for this handle alone, outside the shared state of the
+ * file, and closed by ddbtRasterClose (ddbtRasterOpen keeps the file open for the next call): for a
+ * file the host renames or deletes right after reading it, which Windows refuses while a process
+ * holds it open. */
+#define DDBT_RASTER_OPEN_PRIVATE 0x1u
+
+/** ddbtRasterOpen with flags (DDBT_RASTER_OPEN_*; 0 is ddbtRasterOpen). Codes as ddbtRasterOpen, and
+ * DDBT_ERR_INVALIDARGS for an unknown flag. */
+DDBT_API ddbtErr ddbtRasterOpenEx(const char *path, unsigned int flags, ddbtRaster **out);
 /** Releases a raster (NULL is accepted). */
 DDBT_API ddbtErr ddbtRasterClose(ddbtRaster *raster);
 

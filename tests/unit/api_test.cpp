@@ -889,6 +889,70 @@ TEST(HostApi, RasterInfoReportsTheFile) {
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+// The descriptors of this process open on `path` (Linux: /proc/self/fd; -1 where it cannot be told)
+int DescriptorsOn(const std::filesystem::path& path) {
+#if defined(__linux__)
+    std::error_code ec;
+    const auto target = std::filesystem::canonical(path, ec);
+    if (ec) return -1;
+    int n = 0;
+    for (const auto& fd : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+        std::error_code lec;
+        if (std::filesystem::read_symlink(fd.path(), lec) == target) ++n;
+    }
+    return ec ? -1 : n;
+#else
+    (void)path;
+    return -1;
+#endif
+}
+
+}  // namespace
+
+// A raster opened privately is closed with its handle, so the host can rename the file it checked
+// (Windows renames no file a process holds open); a shared open keeps the file for the next call
+TEST(HostApi, APrivateRasterClosesItsFileWithItsHandle) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-private");
+    const auto shared = dir / "shared.tif", checked = dir / "checked.tif";
+    syn::WriteSynth(shared.string(), syn::Spec(64, 1, 1));
+    syn::WriteSynth(checked.string(), syn::Spec(64, 1, 1));
+
+    ddbtRaster* raster = nullptr;
+    ASSERT_EQ(ddbtRasterOpenEx(checked.string().c_str(), DDBT_RASTER_OPEN_PRIVATE, &raster), DDBT_ERR_NONE)
+        << ddbtLastError();
+    char* json = nullptr;
+    ASSERT_EQ(ddbtRasterInfo(raster, &json), DDBT_ERR_NONE) << ddbtLastError();
+    ddbtFree(json);
+    if (DescriptorsOn(checked) >= 0) {
+        EXPECT_GT(DescriptorsOn(checked), 0) << "the open handle reads the file";
+    }
+    ddbtRasterClose(raster);
+    if (DescriptorsOn(checked) >= 0) {
+        EXPECT_EQ(DescriptorsOn(checked), 0);
+    }
+    std::error_code ec;
+    std::filesystem::rename(checked, dir / "published.tif", ec);
+    EXPECT_FALSE(ec) << ec.message();
+
+    // The shared open: the file stays open after the handle, until the sources are released
+    ASSERT_EQ(ddbtRasterOpenEx(shared.string().c_str(), 0, &raster), DDBT_ERR_NONE) << ddbtLastError();
+    ddbtRasterClose(raster);
+    if (DescriptorsOn(shared) >= 0) {
+        EXPECT_GT(DescriptorsOn(shared), 0);
+    }
+    ddbtReleaseSources();
+    if (DescriptorsOn(shared) >= 0) {
+        EXPECT_EQ(DescriptorsOn(shared), 0);
+    }
+
+    EXPECT_EQ(ddbtRasterOpenEx(shared.string().c_str(), 0x2u, &raster), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(raster, nullptr);
+    std::filesystem::remove_all(dir);
+}
+
 // ddbtRasterRead reads a window as GDAL's RasterIO with nearest resampling: every sample at full
 // resolution, and for a reduction the source pixel GDAL takes (2 i + 1 for a factor of 2)
 TEST(HostApi, RasterReadReadsAWindowAsGdal) {

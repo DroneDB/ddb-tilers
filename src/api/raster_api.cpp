@@ -93,12 +93,19 @@ void ConvertSamples(ddbt::cog::tiler::PixelType type, const uint8_t* in, size_t 
 
 }  // namespace
 
-ddbtErr ddbtRasterOpen(const char* path, ddbtRaster** out) {
+ddbtErr ddbtRasterOpen(const char* path, ddbtRaster** out) { return ddbtRasterOpenEx(path, 0, out); }
+
+ddbtErr ddbtRasterOpenEx(const char* path, unsigned int flags, ddbtRaster** out) {
     if (out == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid out: NULL");
     *out = nullptr;
     return ddbt::api::GuardedCall([&]() -> ddbtErr {
         if (ddbt::api::IsEmpty(path)) return Fail(DDBT_ERR_INVALIDARGS, "Invalid path: empty");
-        auto source = ddbt::cog::tiler::CogSource::Get(path, ddbt::cog::tiler::SourceUse::kRead);
+        if ((flags & ~DDBT_RASTER_OPEN_PRIVATE) != 0) return Fail(DDBT_ERR_INVALIDARGS, "Invalid flags");
+        using ddbt::cog::tiler::CogSource;
+        using ddbt::cog::tiler::SourceUse;
+        // A private source is this handle's alone: its file closes with the last reference to it
+        auto source = (flags & DDBT_RASTER_OPEN_PRIVATE) != 0 ? CogSource::Open(path, SourceUse::kRead)
+                                                              : CogSource::Get(path, SourceUse::kRead);
         *out = new ddbtRaster(std::move(source));
         return DDBT_ERR_NONE;
     });
