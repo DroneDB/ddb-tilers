@@ -256,14 +256,35 @@ std::string ImpliedColorInterp(const Plan& p, size_t b) {
     return "Undefined";
 }
 
-// GDAL_METADATA with the colour interpretations the photometric does not give (role "colorinterp", as
-// GTiff writes them): GDAL reads every band back as the host named it; "" when there is none
-std::string ColorInterpMetadata(const Plan& p, const std::vector<std::string>& interps) {
+// Text in an XML element of GDAL_METADATA
+std::string XmlEscaped(const std::string& text) {
+    std::string out;
+    for (const char c : text) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+
+// GDAL_METADATA of a host raster, as GTiff writes the band items (WriteMetadata): the description of each
+// band that has one (role "description"), and the colour interpretations the photometric does not give
+// (role "colorinterp"), so GDAL reads every band back as the host named it; "" when there is none
+std::string HostMetadata(const Plan& p, const HostRaster& r) {
     std::string items;
-    for (size_t b = 0; b < interps.size(); ++b)
-        if (interps[b] != ImpliedColorInterp(p, b))
-            items += "  <Item name=\"COLORINTERP\" sample=\"" + std::to_string(b) + "\" role=\"colorinterp\">" +
-                     interps[b] + "</Item>\n";
+    for (size_t b = 0; b < r.colorInterp.size(); ++b) {
+        const std::string sample = std::to_string(b);
+        if (b < r.descriptions.size() && !r.descriptions[b].empty())
+            items += "  <Item name=\"DESCRIPTION\" sample=\"" + sample + "\" role=\"description\">" +
+                     XmlEscaped(r.descriptions[b]) + "</Item>\n";
+        if (r.colorInterp[b] != ImpliedColorInterp(p, b))
+            items += "  <Item name=\"COLORINTERP\" sample=\"" + sample + "\" role=\"colorinterp\">" +
+                     r.colorInterp[b] + "</Item>\n";
+    }
     return items.empty() ? std::string() : "<GDALMetadata>\n" + items + "</GDALMetadata>\n";
 }
 
@@ -352,7 +373,7 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.level = r.level;
     p.resampling = OverviewResampling::kAverage;
     p.keepMaskedTiles = true;
-    p.gdalMetadata = ColorInterpMetadata(p, r.colorInterp);
+    p.gdalMetadata = HostMetadata(p, r);
     return p;
 }
 

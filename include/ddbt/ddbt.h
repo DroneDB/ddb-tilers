@@ -302,7 +302,8 @@ typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int hei
  * AVERAGE (each level from the one above; an alpha band masks every band, itself included, by GDAL's
  * rule for the last of 2 or 4 bands, a nodata value every band). The output appears whole (temporary + rename), nothing is left on a
  * failure. optionsJson: {"width", "height", "colorInterp" (GDAL's names, one per band: "Red",
- * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "blockSize" (256; a multiple of 16), "codec"
+ * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "descriptions" (the description of each band, "" for none),
+ * "blockSize" (256; a multiple of 16), "codec"
  * ("deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2; 2), "level" (DEFLATE / ZSTD level,
  * 0: GDAL's default), "nodata" (a number, or "nan": the GDAL_NODATA of the bands; a value Byte holds masks its pixels in the
  * overviews, any other masks nothing and is cast to 8 bits as GDAL's overviews cast it), "mask" (true: an internal 1-bit mask, which the host fills as one more sample after the

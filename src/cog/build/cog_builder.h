@@ -114,6 +114,8 @@ struct HostRaster {
     /// "Undefined"...): the photometric and ExtraSamples GTiff writes for them; an alpha band masks
     /// the others in the overviews by GDAL's rule (the last of 2 or 4 bands).
     std::vector<std::string> colorInterp;
+    /// The description of each band ("" for none; empty: none), in GDAL_METADATA as GTiff writes it
+    std::vector<std::string> descriptions;
     uint32_t blockSize = 256;  // square tiles, a multiple of 16
     encode::Codec codec = encode::Codec::kDeflate;
     int predictor = 2;

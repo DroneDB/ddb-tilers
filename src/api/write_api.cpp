@@ -47,6 +47,12 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
                 if (v.kind != json::Value::Kind::kString) return "Invalid optionsJson: colorInterp must be names";
                 r.colorInterp.push_back(v.str);
             }
+        } else if (key == "descriptions") {
+            if (val.kind != json::Value::Kind::kArray) return "Invalid optionsJson: descriptions";
+            for (const json::Value& v : val.arr) {
+                if (v.kind != json::Value::Kind::kString) return "Invalid optionsJson: descriptions must be texts";
+                r.descriptions.push_back(v.str);
+            }
         } else if (key == "blockSize") {
             if (!Unsigned(val, r.blockSize)) return "Invalid optionsJson: blockSize";
         } else if (key == "codec") {
