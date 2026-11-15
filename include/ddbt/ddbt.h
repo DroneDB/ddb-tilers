@@ -315,6 +315,18 @@ typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int hei
 DDBT_API ddbtErr ddbtWriteRaster(const char *outputPath, const char *optionsJson, ddbtFillCallback fill,
                                  void *fillUserData, ddbtProgressCallback progress, void *progressUserData);
 
+/** Warps a raster into memory on a grid the host gives, as gdalwarp -of MEM -t_srs -te [-te_srs] -ts -r
+ * [-b] [-dstalpha] [-dstnodata] makes it, from the overview gdalwarp picks (-ovr AUTO). optionsJson:
+ * {"targetCrs" (any text PROJ reads), "extent" ([min x, min y, max x, max y]), "extentCrs" (optional, any
+ * text PROJ reads: the extent is in it, bounded in the output's CRS as gdalwarp bounds it), "width", "height", "resampling" ("bilinear" | "nearest"), "bands"
+ * ([1-based], optional: every band but a last alpha band), "dstAlpha" (bool), "dstNodata" (number)}.
+ * outJson: {"width", "height", "bands", "type" (GDAL's name), "geoTransform", "wkt", "colorInterp" ([...]),
+ * "nodata" (of every band but the alpha band, when the output has one), "alphaBand" (1-based, 0 when none), "sourceLevel" (0: the raster, i: its
+ * overview i - 1)}; outPixels: the samples of every band, band after band, rows of width samples (release
+ * both with ddbtFree). */
+DDBT_API ddbtErr ddbtWarpRaster(const char *inputPath, const char *optionsJson, char **outJson, uint8_t **outPixels,
+                                size_t *outSize);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

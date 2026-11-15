@@ -9,6 +9,7 @@ list(APPEND DDBT_SOURCES
   cog/warp/row_approx.cpp
   cog/warp/warp_chunks.cpp
   cog/warp/bilinear.cpp
+  cog/warp/region_warp.cpp
   cog/warp/warp_kernels.cpp
   cog/warp/warp_producer.cpp)
 # The grid and the kernels must round as GDAL's (generic x86-64, no FMA): no contraction (GCC
@@ -17,5 +18,6 @@ list(APPEND DDBT_SOURCES
 if(NOT MSVC)
   set_source_files_properties(cog/warp/source_georef.cpp cog/warp/target_grid.cpp cog/warp/row_approx.cpp
     cog/warp/warp_chunks.cpp cog/warp/bilinear.cpp cog/warp/warp_kernels.cpp cog/warp/warp_producer.cpp
+    cog/warp/region_warp.cpp
     PROPERTIES COMPILE_OPTIONS "-ffp-contract=off;-fno-lto")
 endif()

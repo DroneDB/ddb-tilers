@@ -88,6 +88,19 @@ SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
     for (int b = 0; b < s.bands; ++b)
         if (b != s.alpha) s.warped.push_back(b);
     s.nodata = src.NoData();
+    if (settings.grid) {
+        // gdalwarp with an explicit grid: the bands asked for, the source nodata of every band and of the
+        // pixel (no -srcnodata: no UNIFIED_SRC_NODATA), the mask unless there is an alpha band or a nodata,
+        // -dstalpha (or a source alpha band), -dstnodata, else the source nodata as the output's
+        // (INIT_DEST=NO_DATA)
+        if (!settings.bands.empty()) s.warped = settings.bands;
+        s.mask = src.HasMask() && s.alpha < 0 && !s.nodata;
+        // A source alpha band gives the output one too, -dstalpha or not
+        s.dstAlpha = settings.dstAlpha || s.alpha >= 0;
+        if (settings.dstNodata) s.dstNodata = settings.dstNodata;
+        else if (s.nodata && !s.dstAlpha) s.dstNodata = s.nodata;
+        return s;
+    }
     if (settings.dstAlpha) {
         // gdalwarp -dstalpha: the source nodata of every band and of the pixel, the mask unless
         // there is an alpha band, and an output alpha.
@@ -170,10 +183,11 @@ public:
     Status Init() {
         W_ = static_cast<int>(src_.Width());
         H_ = static_cast<int>(src_.Height());
-        if (const auto& sgt = geo_.GeoTransform()) {
+        if (const auto& sgt = geo_.GeoTransform(); sgt && !settings_.grid) {
             const auto& g = *sgt;
             srcPixel_ = std::min(std::hypot(g[1], g[4]), std::hypot(g[2], g[5]));
         } else {
+            // GDAL's warper, chunk by chunk: a source georeferenced by GCPs, and any render of a region
             InitGdalChunks();
         }
         bw_ = static_cast<int>(src_.BlockWidth());
@@ -247,6 +261,11 @@ public:
                 need.x1 = std::max(need.x1, static_cast<int>(o.maxX) + 2);
                 need.y1 = std::max(need.y1, static_cast<int>(o.maxY) + 2);
             }
+            // The taps of a filter stretched by a downsampling reach further
+            need.x0 -= filterReach_;
+            need.y0 -= filterReach_;
+            need.x1 += filterReach_;
+            need.y1 += filterReach_;
             if (need.x1 > need.x0) {
                 need.x0 = std::max(need.x0, 0);
                 need.y0 = std::max(need.y0, 0);
@@ -271,6 +290,10 @@ public:
             Window& win = tlsWin;
             Gather(planned, need, win);
             for (uint32_t y = r0; y < r1; ++y) {
+                if (anyGeneral_) {
+                    WarpRowByChunk(win, sx, sy, x0, tw, strip, y);
+                    continue;
+                }
                 const size_t row = static_cast<size_t>(y) * tw;
                 WarpRow(params_, win, sx + row, sy + row, tw, strip.Pixel(x0, y),
                         params_.alphaOut == -1 ? strip.MaskAt(x0, y) : nullptr);
@@ -281,6 +304,22 @@ public:
     }
 
 private:
+    // Row y of the tile (x0, tw wide) chunk by chunk, each part with the filter of its chunk
+    void WarpRowByChunk(const Window& win, const double* sx, const double* sy, uint32_t x0, uint32_t tw, Strip& strip,
+                        uint32_t y) const {
+        const int ay = static_cast<int>(strip.y0 + y);
+        const int tx0 = static_cast<int>(x0), tx1 = static_cast<int>(x0 + tw);
+        for (size_t i = 0; i < chunks_.size(); ++i) {
+            const WarpChunk& c = chunks_[i];
+            if (ay < c.dy || ay >= c.dy + c.dh || c.dx >= tx1 || c.dx + c.dw <= tx0) continue;
+            const int cx0 = std::max(tx0, c.dx), cx1 = std::min(tx1, c.dx + c.dw);
+            const size_t at = static_cast<size_t>(y) * tw + static_cast<size_t>(cx0 - tx0);
+            const uint32_t ox = static_cast<uint32_t>(cx0);
+            WarpRow(params_, win, sx + at, sy + at, static_cast<size_t>(cx1 - cx0), strip.Pixel(ox, y),
+                    params_.alphaOut == -1 ? strip.MaskAt(ox, y) : nullptr, KernelPath::kSimd, &kernels_[i]);
+        }
+    }
+
     // Source pixels of the destination pixels (x0 .. x0 + tw - 1, y0 .. y0 + th - 1) of a source
     // with a geotransform: a GridApprox of the reprojection over the tile with a 0.125 source
     // pixel bound, then the inverse geotransform; NaN where there is no source pixel.
@@ -364,7 +403,11 @@ private:
         o.specialPointInOutput = PoleInOutput();
         o.memoryLimit = settings_.warpMemory;
         o.filterRadius = settings_.resampling == Resampling::kNearest ? 0 : 1;
-        if (settings_.target == Target::kSourceCrs) {
+        if (settings_.grid) {
+            // gdalwarp -of MEM: blocks of one row
+            o.dstBlockWidth = static_cast<int>(plan_.width);
+            o.dstBlockHeight = 1;
+        } else if (settings_.target == Target::kSourceCrs) {
             // gdalwarp's GeoTIFF: strips of the warped bands and the alpha band.
             const size_t gdalPixel = src_.SampleSize() * (spec_.warped.size() + (spec_.dstAlpha ? 1 : 0));
             o.dstBlockWidth = static_cast<int>(plan_.width);
@@ -378,12 +421,33 @@ private:
             o.sourceExtra = 5;
             if (!RestrictToRpcExtent(wx, wy, ww, wh)) return;
         }
-        chunks_ = CollectWarpChunks(wx, wy, ww, wh, W_, H_,
-                                    [this](bool dstToSrc, double* xs, double* ys, size_t n, char* ok) {
-                                        if (dstToSrc) ExactSourcePixels(xs, ys, n, ok);
-                                        else ExactDestinationPixels(xs, ys, n, ok);
-                                    },
-                                    o);
+        const PixelTransformer exact = [this](bool dstToSrc, double* xs, double* ys, size_t n, char* ok) {
+            if (dstToSrc) ExactSourcePixels(xs, ys, n, ok);
+            else ExactDestinationPixels(xs, ys, n, ok);
+        };
+        chunks_ = CollectWarpChunks(wx, wy, ww, wh, W_, H_, exact, o);
+        if (settings_.resampling == Resampling::kNearest) return;
+        // The bilinear filter of each chunk, stretched by the scale GDAL's kernel computes for it
+        // (through the exact transformer: its approximate one falls back to it for these points)
+        kernels_.reserve(chunks_.size());
+        for (const WarpChunk& c : chunks_) {
+            const ChunkScale scale = WarpChunkScale(c.dw, c.dh, exact);
+            ChunkKernel k;
+            k.xScale = scale.x;
+            k.yScale = scale.y;
+            k.fourSamples = scale.x > 0.5 && scale.y > 0.5;
+            k.xRadius = scale.x < 1.0 ? static_cast<int>(std::ceil(1.0 / scale.x)) : 1;
+            k.yRadius = scale.y < 1.0 ? static_cast<int>(std::ceil(1.0 / scale.y)) : 1;
+            k.srcX0 = c.sx;
+            k.srcY0 = c.sy;
+            k.srcW = c.sw;
+            k.srcH = c.sh;
+            if (!k.fourSamples) {
+                anyGeneral_ = true;
+                filterReach_ = std::max({filterReach_, k.xRadius, k.yRadius});
+            }
+            kernels_.push_back(k);
+        }
     }
 
     // GDALWarpOperation's special points, the poles (longitude 0, latitude +/-89.9999) in output
@@ -503,7 +567,7 @@ private:
         }
         Rect r;
         if (!any) return r;
-        constexpr double kMargin = 2.0;
+        const double kMargin = 2.0 + filterReach_;
         r.x0 = static_cast<int>(std::max(0.0, std::floor(mnx - kMargin)));
         r.y0 = static_cast<int>(std::max(0.0, std::floor(mny - kMargin)));
         r.x1 = static_cast<int>(std::min(static_cast<double>(W_), std::ceil(mxx + kMargin)));
@@ -677,7 +741,11 @@ private:
         for (int bi = 0; bi < nOut; ++bi)
             p.bandOffsets.push_back(static_cast<size_t>(spec_.warped[static_cast<size_t>(bi)]) * src_.SampleSize());
         p.outPixelBytes = plan_.PixelBytes();
-        p.noMasks = spec_.NoMasks();
+        // GDAL's kernels without masks are those of 8 and 16-bit integers and Float32; any other
+        // type goes through its real-valued kernel, which weighs densities and rounds as with masks
+        const tiff::SampleType t = p.type;
+        p.noMasks = spec_.NoMasks() && (t == tiff::SampleType::kU8 || t == tiff::SampleType::kI16 ||
+                                        t == tiff::SampleType::kU16 || t == tiff::SampleType::kF32);
         if (spec_.nodata && !spec_.unifiedOnly) p.perBandNodata = spec_.nodata;
         p.dstNodata = spec_.dstNodata;
         const bool hasDstNd = spec_.dstNodata.has_value();
@@ -701,6 +769,9 @@ private:
     // inverse of the output geotransform as GDAL computes it.
     std::optional<RowApproximator> rows_;
     std::vector<WarpChunk> chunks_;
+    std::vector<ChunkKernel> kernels_;  // the bilinear filter of each chunk (none for the nearest)
+    bool anyGeneral_ = false;           // a chunk downsamples by more than 2: its filter is stretched
+    int filterReach_ = 0;               // the largest radius of those filters
     std::array<double, 6> dstInverse_{};
     kernels::SourcePixelMapping mapping_;
     KernelParams params_;
@@ -727,6 +798,29 @@ Expected<SourceGrid> GridOf(const RasterSource& src, const WarpSettings& setting
         return Status(StatusCode::kInvalidArgument,
                       "Cannot build COG: " + std::string(geo.status().message()) + ": " + src.Path());
     const crs::Crs& crs = *src.Georef().crs;
+    if (settings.grid) {
+        // The host's grid; the transform as GDAL's general image transformer prepares it (the area of
+        // interest of the source extent, for a geotransform)
+        TargetGrid g;
+        g.geoTransform = settings.grid->geoTransform;
+        g.width = settings.grid->width;
+        g.height = settings.grid->height;
+        try {
+            if (const auto& sgt = geo->GeoTransform()) {
+                const auto& gt = *sgt;
+                const double W = src.Width(), H = src.Height();
+                const double ex[4] = {gt[0], gt[0] + W * gt[1] + H * gt[2], gt[3], gt[3] + W * gt[4] + H * gt[5]};
+                g.transform = crs::TransformCache::Global().GetForExtent(crs, settings.grid->crs, std::min(ex[0], ex[1]),
+                                                                        std::min(ex[2], ex[3]), std::max(ex[0], ex[1]),
+                                                                        std::max(ex[2], ex[3]));
+            } else {
+                g.transform = crs::TransformCache::Global().Get(crs, settings.grid->crs);
+            }
+        } catch (const std::exception& e) {
+            return Status(StatusCode::kInvalidArgument, std::string("Cannot transform to the CRS of the grid: ") + e.what());
+        }
+        return SourceGrid{std::move(*geo), std::move(g)};
+    }
     auto grid = settings.target == Target::kSourceCrs ? ComputeSourceCrsGrid(crs, *geo, src.Width(), src.Height())
                 : settings.target == Target::kWebMercatorThroughSourceCrs
                     ? ComputeTargetGridThroughSourceCrs(crs, *geo, src.Width(), src.Height(), settings.evenTileOrigin)
@@ -749,9 +843,9 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
     p.blockSize = 512;
     p.geoTransform = grid.geoTransform;
     p.zoom = grid.zoom;
-    p.overviews = pyramid::OverviewSizes(p.width, p.height, p.blockSize, true);
+    if (!settings.grid) p.overviews = pyramid::OverviewSizes(p.width, p.height, p.blockSize, true);
     p.type = src.Type();
-    const bool jpeg = !settings.noJpeg && JpegEligible(src, settings);
+    const bool jpeg = !settings.grid && !settings.noJpeg && JpegEligible(src, settings);
     std::vector<std::string> interps;
     for (int b : spec.warped) interps.push_back(src.ColorInterp(b));
     if (jpeg) {

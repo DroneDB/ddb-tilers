@@ -77,7 +77,9 @@ struct KernelParams {
     /// Per output band: the byte offset of its source sample in a window pixel.
     std::vector<size_t> bandOffsets;
     size_t outPixelBytes = 0;
-    bool noMasks = true;  ///< no alpha, mask or nodata: GWKBilinearResampleNoMasks4SampleT
+    /// No alpha, mask or nodata, and a type GDAL has kernels without masks for (8 and 16-bit
+    /// integers, Float32): GWKBilinearResampleNoMasks4SampleT
+    bool noMasks = true;
     /// Source nodata tested on every band (no UNIFIED_SRC_NODATA), on top of the unified validity.
     std::optional<double> perBandNodata;
     std::optional<double> dstNodata;
@@ -98,11 +100,25 @@ enum class KernelPath : uint8_t {
     kScalar,  ///< the scalar code for every pixel (the reference)
 };
 
+/// What GDAL's warp kernel resolves for one chunk of a warp (GDALWarpKernel::PerformWarp): its
+/// scale (destination pixels per source pixel, at most 1 for a downsampling), the radius of the
+/// bilinear filter stretched by it, whether the 2 x 2 formula applies (both scales above 0.5), and
+/// the chunk's source window, at whose edges GDAL clips the filter.
+struct ChunkKernel {
+    double xScale = 1.0, yScale = 1.0;
+    int xRadius = 1, yRadius = 1;
+    bool fourSamples = true;
+    int srcX0 = 0, srcY0 = 0, srcW = 0, srcH = 0;
+};
+
 /// Warps n destination pixels of a row. fx / fy: their source pixel positions (NaN: no source,
 /// not written); out: the first pixel (outPixelBytes apart, bands sample-size apart); mask: the
 /// first output mask byte (alphaOut == -1), else unused. The window covers every tap of the row.
+/// chunk: the chunk of GDAL's warp the pixels belong to; with a downsampling of more than 2 the
+/// bilinear filter is GDAL's general one (GWKResampleNoMasks_SSE2_T without masks, GWKResample
+/// with them), stretched by the chunk's scale.
 void WarpRow(const KernelParams& p, const Window& win, const double* fx, const double* fy, size_t n, uint8_t* out,
-             uint8_t* mask, KernelPath path = KernelPath::kSimd);
+             uint8_t* mask, KernelPath path = KernelPath::kSimd, const ChunkKernel* chunk = nullptr);
 
 /// Calls f.template operator()<T>() with T the C++ type of the samples of `type`, for the types the
 /// warper reads; throws std::runtime_error for the others.

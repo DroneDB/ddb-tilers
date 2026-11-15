@@ -8,6 +8,8 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "cog/build/source.h"
 #include "cog/tiff/geotiff.h"
@@ -18,19 +20,27 @@ namespace ddbt::cog::build {
 class TiffSource final : public RasterSource {
 public:
     static Expected<std::unique_ptr<TiffSource>> Open(const std::string& path);
+    /// Level `level` of the file as GDAL's overview dataset of it (GDALCreateOverviewDataset): 0 the main
+    /// image, i its overview i - 1 (largest first). The size, blocks, pixels and mask are the level's; the
+    /// bands, nodata, metadata and CRS the main image's; the geotransform rescaled by the size ratios
+    /// (GDALGeoTransform::Rescale). A source georeferenced by GCPs has no levels.
+    static Expected<std::unique_ptr<TiffSource>> OpenLevel(const std::string& path, int level);
+
+    /// The sizes of the main image and of its overviews (largest first)
+    std::vector<std::pair<int, int>> LevelSizes() const;
 
     const std::string& Path() const noexcept override { return path_; }
     const tiff::Georeferencing& Georef() const noexcept override { return georef_; }
 
-    uint32_t Width() const noexcept override { return Main().width; }
-    uint32_t Height() const noexcept override { return Main().height; }
+    uint32_t Width() const noexcept override { return Data().width; }
+    uint32_t Height() const noexcept override { return Data().height; }
     int Bands() const noexcept override { return Main().samplesPerPixel * static_cast<int>(Main().Components()); }
     bool Complex() const noexcept override { return Main().complex; }
     tiff::SampleType Type() const noexcept override {
         return Main().sampleType == tiff::SampleType::kBit1 ? tiff::SampleType::kU8 : Main().sampleType;
     }
-    uint32_t BlockWidth() const noexcept override { return Main().blockWidth; }
-    uint32_t BlockHeight() const noexcept override { return Main().blockHeight; }
+    uint32_t BlockWidth() const noexcept override { return Data().blockWidth; }
+    uint32_t BlockHeight() const noexcept override { return Data().blockHeight; }
 
     /// GDAL_NODATA of the main image.
     std::optional<double> NoData() const noexcept override { return Main().noData; }
@@ -65,11 +75,14 @@ public:
 private:
     TiffSource() = default;
     const tiff::IfdInfo& Main() const noexcept { return reader_->Ifd(reader_->MainImage()); }
+    // The IFD of the level read (the main image's by default)
+    const tiff::IfdInfo& Data() const noexcept { return reader_->Ifd(data_); }
 
     std::string path_;
     std::shared_ptr<const tiff::TiffReader> reader_;
     tiff::Georeferencing georef_;
     std::optional<uint32_t> maskIfd_;
+    uint32_t data_ = 0;
     int alphaBand_ = -1;
 };
 

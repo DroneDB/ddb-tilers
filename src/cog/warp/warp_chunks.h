@@ -48,6 +48,18 @@ struct WarpChunkOptions {
 /// dstToSrc, else source -> destination; n points in place, ok[i] = 0 where a point fails.
 using PixelTransformer = std::function<void(bool dstToSrc, double* xs, double* ys, size_t n, char* ok)>;
 
+/// The scale GDAL's warp kernel resolves for a chunk of dw x dh destination pixels
+/// (GDALWarpKernel::PerformWarp): unit squares at up to 10 x 10 points of the chunk's own pixel
+/// grid (from 0, without the chunk's offset, as the kernel sends them) sent to the source, the
+/// scale of each (the inverse of its sides, or of the root of its area when it is rotated or
+/// skewed), the ones under a tenth of the largest left out, the others averaged in the order of
+/// their product; 1 when there is none; a scale within 0.05 of the inverse of an integer rounded
+/// to it.
+struct ChunkScale {
+    double x = 1.0, y = 1.0;
+};
+ChunkScale WarpChunkScale(int dw, int dh, const PixelTransformer& t);
+
 /// The chunks of the destination window (x, y, w, h) of a warp from a srcW x srcH source, in
 /// GDAL's order (top to bottom, then left to right).
 std::vector<WarpChunk> CollectWarpChunks(int x, int y, int w, int h, int srcW, int srcH, const PixelTransformer& t,

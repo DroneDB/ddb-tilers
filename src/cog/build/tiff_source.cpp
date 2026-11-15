@@ -22,6 +22,7 @@ Expected<std::unique_ptr<TiffSource>> TiffSource::Open(const std::string& path) 
     std::unique_ptr<TiffSource> s(new TiffSource());
     s->path_ = path;
     s->reader_ = std::move(*reader);
+    s->data_ = s->reader_->MainImage();
     const tiff::IfdInfo& m = s->Main();
     DDBT_TRY(s->reader_->CheckDecodable(m.index));
     if (tiff::SampleTypeSize(s->Type()) == 0 || (m.sampleType == tiff::SampleType::kBit1 && m.samplesPerPixel != 1))
@@ -40,6 +41,41 @@ Expected<std::unique_ptr<TiffSource>> TiffSource::Open(const std::string& path) 
         }
     }
     return s;
+}
+
+Expected<std::unique_ptr<TiffSource>> TiffSource::OpenLevel(const std::string& path, int level) {
+    auto s = Open(path);
+    if (!s.ok() || level == 0) return s;
+    TiffSource& t = **s;
+    const std::vector<uint32_t> overviews = t.reader_->Overviews();
+    if (level < 0 || static_cast<size_t>(level) > overviews.size())
+        return Status(StatusCode::kInvalidArgument, "No overview level " + std::to_string(level) + " in " + path);
+    if (!t.georef_.geoTransform)
+        return Status(StatusCode::kUnsupported, "The overviews of a raster without a geotransform: " + path);
+    const tiff::IfdInfo& main = t.Main();
+    t.data_ = overviews[static_cast<size_t>(level - 1)];
+    DDBT_TRY(t.reader_->CheckDecodable(t.data_));
+    t.maskIfd_ = t.maskIfd_ ? t.reader_->MaskOf(t.data_) : std::nullopt;
+    const tiff::IfdInfo& data = t.Data();
+    const double rx = static_cast<double>(main.width) / data.width;
+    const double ry = static_cast<double>(main.height) / data.height;
+    auto& gt = *t.georef_.geoTransform;
+    gt[1] *= rx;
+    gt[2] *= ry;
+    gt[4] *= rx;
+    gt[5] *= ry;
+    return s;
+}
+
+std::vector<std::pair<int, int>> TiffSource::LevelSizes() const {
+    std::vector<std::pair<int, int>> sizes;
+    const tiff::IfdInfo& main = Main();
+    sizes.emplace_back(static_cast<int>(main.width), static_cast<int>(main.height));
+    for (const uint32_t ifd : reader_->Overviews()) {
+        const tiff::IfdInfo& o = reader_->Ifd(ifd);
+        sizes.emplace_back(static_cast<int>(o.width), static_cast<int>(o.height));
+    }
+    return sizes;
 }
 
 std::string TiffSource::ColorInterp(int b) const {
@@ -176,7 +212,7 @@ std::vector<writer::RawTag> TiffSource::MetadataTags() const {
 }
 
 Expected<uint32_t> TiffSource::ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const {
-    const tiff::IfdInfo& m = Main();
+    const tiff::IfdInfo& m = Data();
     const uint32_t ifd = m.index;
     if (m.sampleType == tiff::SampleType::kBit1) {
         // A 1-bit image: bytes 0 / 1
@@ -214,7 +250,7 @@ Expected<uint32_t> TiffSource::ReadBlock(uint32_t col, uint32_t row, uint8_t* ou
 
 Status TiffSource::ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const {
     if (!maskIfd_) return Status(StatusCode::kInvalidArgument, "no mask");
-    const tiff::IfdInfo& m = Main();
+    const tiff::IfdInfo& m = Data();
     const tiff::IfdInfo& k = reader_->Ifd(*maskIfd_);
     if (k.blockWidth != m.blockWidth || k.blockHeight != m.blockHeight || k.sampleType != tiff::SampleType::kBit1)
         return Status(StatusCode::kUnsupported, "Mask blocks differ from the image blocks in " + path_);

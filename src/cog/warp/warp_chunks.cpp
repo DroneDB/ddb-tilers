@@ -29,6 +29,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 #include <limits>
 #include <optional>
 
@@ -247,6 +249,85 @@ private:
 };
 
 }  // namespace
+
+ChunkScale WarpChunkScale(int dw, int dh, const PixelTransformer& t) {
+    const int nx = std::min(10, dw), ny = std::min(10, dh);
+    std::vector<double> xs, ys;
+    xs.reserve(static_cast<size_t>(4 * nx * ny));
+    ys.reserve(static_cast<size_t>(4 * nx * ny));
+    for (int iy = 0; iy < ny; ++iy) {
+        const double y = ((iy > 0 && iy == ny - 1) ? -1.0 : 0.0) +
+                         (ny == 1 ? 0.0 : static_cast<double>(iy) * dh / (ny - 1));
+        for (int ix = 0; ix < nx; ++ix) {
+            const double x = ((ix > 0 && ix == nx - 1) ? -1.0 : 0.0) +
+                             (nx == 1 ? 0.0 : static_cast<double>(ix) * dw / (nx - 1));
+            for (const auto [ox, oy] : {std::pair{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
+                xs.push_back(x + ox);
+                ys.push_back(y + oy);
+            }
+        }
+    }
+    std::vector<char> ok(xs.size(), 0);
+    t(true, xs.data(), ys.data(), xs.size(), ok.data());
+    std::vector<std::pair<double, double>> scales;
+    const auto sq = [](double v) { return v * v; };
+    for (size_t i = 0; i + 3 < xs.size(); i += 4) {
+        if (!ok[i] || !ok[i + 1] || !ok[i + 2] || !ok[i + 3]) continue;
+        const double vx01 = xs[i + 1] - xs[i], vy01 = ys[i + 1] - ys[i];
+        const double vx23 = xs[i + 3] - xs[i + 2], vy23 = ys[i + 3] - ys[i + 2];
+        const double vx02 = xs[i + 2] - xs[i], vy02 = ys[i + 2] - ys[i];
+        const double vx13 = xs[i + 3] - xs[i + 1], vy13 = ys[i + 3] - ys[i + 1];
+        const double l01 = sq(vx01) + sq(vy01), l23 = sq(vx23) + sq(vy23);
+        const double l02 = sq(vx02) + sq(vy02), l13 = sq(vx13) + sq(vy13);
+        constexpr double kTanModestAngle = 0.35, kLengthTolerance = 0.1, kEpsilon = 1e-10;
+        if (std::fabs(vy01) < kTanModestAngle * vx01 && std::fabs(vy23) < kTanModestAngle * vx23 &&
+            std::fabs(l01 - l23) < kLengthTolerance * std::fabs(l01) &&
+            std::fabs(l02 - l13) < kLengthTolerance * std::fabs(l02)) {
+            const double lx = std::sqrt(std::sqrt(l01 * l23)), ly = std::sqrt(std::sqrt(l02 * l13));
+            if (lx > kEpsilon && ly > kEpsilon) scales.emplace_back(1.0 / lx, 1.0 / ly);
+        } else {
+            // The area of the square (corners 0, 1, 3, 2), as GDAL's getArea sums it
+            const double px[4] = {xs[i], xs[i + 1], xs[i + 3], xs[i + 2]};
+            const double py[4] = {ys[i], ys[i + 1], ys[i + 3], ys[i + 2]};
+            double sum = px[0] * (py[1] - py[3]);
+            for (int k = 1; k < 3; ++k) sum += px[k] * (py[k + 1] - py[k - 1]);
+            sum += px[3] * (py[0] - py[2]);
+            const double factor = std::sqrt(0.5 * std::fabs(sum));
+            if (factor > kEpsilon) scales.emplace_back(1.0 / factor, 1.0 / factor);
+        }
+    }
+    ChunkScale out{0.0, 0.0};
+    if (!scales.empty()) {
+        std::sort(scales.begin(), scales.end(),
+                  [](const auto& a, const auto& b) { return a.first * a.second < b.first * b.second; });
+        double xMax = 0, yMax = 0;
+        for (const auto& [x, y] : scales) {
+            xMax = std::max(xMax, x);
+            yMax = std::max(yMax, y);
+        }
+        int n = 0;
+        for (const auto& [x, y] : scales) {
+            if (x > 0.1 * xMax && y > 0.1 * yMax) {
+                ++n;
+                const double dx = x - out.x, dy = y - out.y, inv = 1.0 / n;
+                out.x += dx * inv;
+                out.y += dy * inv;
+            }
+        }
+    }
+    const auto snap = [](double scale) {
+        if (scale <= 0) scale = 1.0;
+        if (scale < 1.0) {
+            const double r = 1.0 / scale;
+            const int n = static_cast<int>(r + 0.5);
+            if (std::fabs(r - n) < 0.05) scale = 1.0 / n;
+        }
+        return scale;
+    };
+    out.x = snap(out.x);
+    out.y = snap(out.y);
+    return out;
+}
 
 std::vector<WarpChunk> CollectWarpChunks(int x, int y, int w, int h, int srcW, int srcH, const PixelTransformer& t,
                                          const WarpChunkOptions& options) {

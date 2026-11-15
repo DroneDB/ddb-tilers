@@ -8,4 +8,5 @@ list(APPEND DDBT_SOURCES
   api/encode_api.cpp
   api/point_info_api.cpp
   api/raster_api.cpp
-  api/write_api.cpp)
+  api/write_api.cpp
+  api/warp_api.cpp)

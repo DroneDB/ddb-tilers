@@ -7,13 +7,16 @@
 // nearest neighbour warp kernel).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "cog/build/pipeline.h"
 #include "cog/build/source.h"
 #include "cog/warp/warp_chunks.h"
+#include "core/crs/crs.h"
 #include "core/util/status.h"
 
 namespace ddbt::cog::warp {
@@ -28,6 +31,12 @@ enum class Target : uint8_t {
 };
 
 enum class Resampling : uint8_t { kBilinear, kNearest };
+/// A grid the host gives (gdalwarp -t_srs -te -ts): its CRS, geotransform and size.
+struct ExplicitGrid {
+    crs::Crs crs;
+    std::array<double, 6> geoTransform{};
+    uint32_t width = 0, height = 0;
+};
 
 struct WarpSettings {
     encode::Codec losslessCodec = encode::Codec::kLzw;
@@ -46,6 +55,14 @@ struct WarpSettings {
     /// gdalwarp -wm (bytes): the warp memory that splits the chunks of a source georeferenced by
     /// GCPs (512 MB: libddb's COG builds; gdalwarp's own default is 64 MB).
     double warpMemory = 512.0 * 1024 * 1024;
+    /// A grid the host gives, warped with gdalwarp's own rules instead of the COG rules (a render of a
+    /// region): `bands` (0-based; empty: every band but a last alpha band), the source alpha (the last band
+    /// when it is alpha) and nodata as validity, the internal mask when there is neither, -dstalpha
+    /// (dstAlpha), -dstnodata (dstNodata), else the source nodata copied to the output; no JPEG, no
+    /// overviews.
+    std::optional<ExplicitGrid> grid;
+    std::vector<int> bands;
+    std::optional<double> dstNodata;
 };
 
 /// The plan of the warped COG of `source` (everything but the GDAL metadata).
