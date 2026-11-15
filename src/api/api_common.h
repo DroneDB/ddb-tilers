@@ -4,6 +4,7 @@
 // Helpers shared by the C API exports (src/api): the last-error report, argument checks, error
 // code mapping and the hand-over of strings to the caller.
 
+#include <array>
 #include <climits>
 #include <cstdint>
 #include <cstdlib>
@@ -12,8 +13,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "cog/tiff/tiff_reader.h"
+#include "cog/tiler/json_lite.h"
 #include "cog/tiler/tile_error.h"
 #include "core/encode/tile_encoder.h"
 #include "core/util/last_error.h"
@@ -51,6 +54,9 @@ encode::TileFormat ParseFormat(const char* outputFormat);
 const char* GdalTypeName(cog::tiff::SampleType t) noexcept;
 /// The sample type of a GDAL type name (the integer and floating-point types; nullopt otherwise).
 std::optional<cog::tiff::SampleType> SampleTypeOfGdalName(std::string_view name) noexcept;
+
+/// A colour table as the exports report it: [[r, g, b, a], ...]
+cog::tiler::json::Value ColorTableJson(const std::vector<std::array<uint8_t, 4>>& table);
 
 /// Throws TileError (kNotImplemented) for a remote path (http, https, s3, GDAL /vsi).
 void RequireLocal(const std::string& path);

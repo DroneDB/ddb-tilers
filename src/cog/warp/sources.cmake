@@ -9,6 +9,7 @@ list(APPEND DDBT_SOURCES
   cog/warp/row_approx.cpp
   cog/warp/warp_chunks.cpp
   cog/warp/bilinear.cpp
+  cog/warp/region_source.cpp
   cog/warp/region_warp.cpp
   cog/warp/warp_kernels.cpp
   cog/warp/warp_producer.cpp)

@@ -9,10 +9,12 @@
 #include "cog/build/pipeline.h"
 #include "cog/build/tiff_source.h"
 #include "cog/tiler/raster_io.h"
+#include "cog/warp/region_source.h"
 #include "cog/warp/source_georef.h"
 #include "core/crs/transform.h"
 #include "core/crs/transform_bounds.h"
 #include "core/exec/parallel_for.h"
+#include "core/mem/aligned.h"
 
 namespace ddbt::cog::warp {
 
@@ -83,7 +85,10 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     const std::array<double, 6> gt = {e[0], (e[2] - e[0]) / request.width, 0.0,
                                       e[3], 0.0, -(e[3] - e[1]) / request.height};
 
-    auto full = build::TiffSource::Open(path);
+    // A render allocates buffers of megabytes on many threads (windows, planes): mapped, so a pool
+    // thread does not keep them once freed
+    mem::MapLargeAllocations();
+    auto full = SharedTiffLevel(path, 0);
     if (!full.ok()) return full.status();
     int level = 0;
     try {
@@ -91,12 +96,15 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     } catch (const std::exception& ex) {
         return Status(StatusCode::kInvalidArgument, std::string("Cannot transform to the CRS of the grid: ") + ex.what());
     }
-    std::unique_ptr<build::TiffSource> src = std::move(*full);
+    std::vector<std::array<uint8_t, 4>> colorTable = (*full)->ColorTableRgba().value_or(std::vector<std::array<uint8_t, 4>>{});
+    std::shared_ptr<const build::TiffSource> levelSource = *full;
     if (level > 0) {
-        auto ovr = build::TiffSource::OpenLevel(path, level);
+        auto ovr = SharedTiffLevel(path, level);
         if (!ovr.ok()) return ovr.status();
-        src = std::move(*ovr);
+        levelSource = *ovr;
     }
+    // Its blocks come from the cache the renders share
+    const std::unique_ptr<build::RasterSource> src = WithCachedBlocks(levelSource, path, level);
 
     WarpSettings settings;
     settings.grid = ExplicitGrid{target, gt, request.width, request.height};
@@ -127,8 +135,11 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     out.nodata = plan->nodata;
     out.alphaBand = plan->alphaBand;
     out.sourceLevel = level;
+    out.colorTable = std::move(colorTable);
     // gdalwarp's MEM output: the warped bands undefined, the alpha band alpha
     for (int b = 0; b < out.bands; ++b) out.colorInterp.emplace_back(b == out.alphaBand ? "Alpha" : "Undefined");
+    // A MEM band with a colour table is a palette band
+    if (!out.colorTable.empty()) out.colorInterp[0] = "Palette";
     const size_t ss = plan->SampleSize(), pb = plan->PixelBytes();
     const size_t plane = static_cast<size_t>(out.width) * out.height * ss;
     out.pixels.resize(plane * static_cast<size_t>(out.bands));
@@ -147,7 +158,11 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
             strip.pixels = build::LargeBytes(static_cast<size_t>(strip.rows) * out.width * pb);
             if (plan->StripMask()) strip.mask = build::LargeBytes(static_cast<size_t>(strip.rows) * out.width);
             (*producer)->BeginRow(r);
-            exec::ParallelFor(0, cols, 1, [&](size_t c) { (*producer)->Produce(static_cast<uint32_t>(c), strip); });
+            // A render answers a request: it goes before the bulk work of the pool, as the tiles do
+            exec::ParallelFor(
+                exec::DefaultPool(), 0, cols, 1,
+                [&](size_t c) { (*producer)->Produce(static_cast<uint32_t>(c), strip); }, nullptr,
+                exec::Priority::kInteractive);
             (*producer)->EndRow(r);
             // Pixel-interleaved strip -> band planes
             for (uint32_t y = 0; y < strip.rows; ++y) {

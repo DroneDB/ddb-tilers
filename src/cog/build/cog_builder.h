@@ -131,6 +131,9 @@ struct HostRaster {
     /// with itself as its mask (255 wherever a pixel they cover is not 0), the bands' with it (a nodata
     /// value is kept too, and replaced where an average computes it).
     bool mask = false;
+    /// The colour table of band 1 (RGBA entries; the ColorMap keeps red, green and blue): a palette
+    /// image of 1 or 2 bands of 8 or 16-bit integers, without overviews.
+    std::vector<std::array<uint8_t, 4>> colorTable;
     /// GDALBuildOverviews factors (2, 4, 8...): level i is (width + f - 1) / f x (height + f - 1) / f.
     std::vector<uint32_t> overviewFactors;
     std::array<double, 6> geoTransform{};

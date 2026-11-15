@@ -2,6 +2,11 @@
 #include "core/mem/aligned.h"
 
 #include <cstdlib>
+#include <mutex>
+
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 #ifdef _WIN32
 #include <malloc.h>
@@ -113,5 +118,18 @@ void LargeFree(void* p, size_t size, bool hugePages) noexcept {
 }
 
 #endif
+
+void MapLargeAllocations() noexcept {
+#if defined(__GLIBC__)
+    static std::once_flag once;
+    std::call_once(once, [] { mallopt(M_MMAP_THRESHOLD, 1 << 20); });
+#endif
+}
+
+void TrimAllocator() noexcept {
+#if defined(__GLIBC__)
+    malloc_trim(0);
+#endif
+}
 
 }  // namespace ddbt::mem

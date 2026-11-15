@@ -92,13 +92,12 @@ extern "C" ddbtErr ddbtWarpRaster(const char* inputPath, const char* optionsJson
         o.obj["height"] = json::Unsigned(w.height);
         o.obj["bands"] = json::Unsigned(static_cast<uint64_t>(w.bands));
         o.obj["type"] = json::String(ddbt::api::GdalTypeName(w.type));
-        json::Value gt = json::Value{};
-        gt.kind = json::Value::Kind::kArray;
+        if (!w.colorTable.empty()) o.obj["colorTable"] = ddbt::api::ColorTableJson(w.colorTable);
+        json::Value gt = json::Array();
         for (const double v : w.geoTransform) gt.arr.push_back(json::Number(v));
         o.obj["geoTransform"] = std::move(gt);
         o.obj["wkt"] = json::String(w.wkt);
-        json::Value interps = json::Value{};
-        interps.kind = json::Value::Kind::kArray;
+        json::Value interps = json::Array();
         for (const auto& i : w.colorInterp) interps.arr.push_back(json::String(i));
         o.obj["colorInterp"] = std::move(interps);
         if (w.nodata) o.obj["nodata"] = json::Number(*w.nodata);

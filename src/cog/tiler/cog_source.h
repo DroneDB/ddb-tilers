@@ -42,6 +42,9 @@ struct FileIdentity {
     bool operator==(const FileIdentity&) const = default;
 };
 
+/// The version of the regular file at `path` (UTF-8); nullopt when it is not one.
+std::optional<FileIdentity> IdentifyFile(const std::string& path);
+
 /// GDAL's GDALColorInterp values the tiler needs.
 enum class ColorInterp : uint8_t {
     kUndefined,

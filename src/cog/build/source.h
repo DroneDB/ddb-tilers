@@ -116,6 +116,16 @@ public:
     /// Likewise for the mask's block.
     virtual const uint8_t* ResidentMaskBlock(uint32_t /*col*/, uint32_t /*row*/) const { return nullptr; }
 
+    /// A block a source shares with others (a cache's), read in place: its samples as ReadBlock writes
+    /// them, valid while `holder` lives; `data` null when the source has none to share.
+    struct SharedBlock {
+        std::shared_ptr<const void> holder;
+        const uint8_t* data = nullptr;
+    };
+    virtual SharedBlock SharedDataBlock(uint32_t /*col*/, uint32_t /*row*/) const { return {}; }
+    /// Likewise for the mask's block (bytes 0 / 255).
+    virtual SharedBlock SharedMaskBlock(uint32_t /*col*/, uint32_t /*row*/) const { return {}; }
+
 protected:
     RasterSource() = default;
 };

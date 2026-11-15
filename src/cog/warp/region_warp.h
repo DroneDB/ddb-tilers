@@ -40,6 +40,9 @@ struct WarpedRaster {
     std::optional<double> nodata;          // of every band but the alpha band (gdalwarp sets none on it)
     int alphaBand = -1;                    // 0-based, -1 when none
     int sourceLevel = 0;                   // 0: the raster, i: its overview i - 1
+    /// The colour table of the first band of the source, which gdalwarp gives the first band of its
+    /// output: RGBA entries as GDAL reads a TIFF ColorMap (the entry of the nodata value transparent)
+    std::vector<std::array<uint8_t, 4>> colorTable;
     std::vector<uint8_t> pixels;           // band after band, rows of width samples
 };
 

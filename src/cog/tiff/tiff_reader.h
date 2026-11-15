@@ -59,6 +59,7 @@ enum class SampleType : uint8_t {
 };
 
 std::string_view SampleTypeName(SampleType t) noexcept;
+
 /// Bytes per sample (0 for kBit1 / kUnknown).
 size_t SampleTypeSize(SampleType t) noexcept;
 
@@ -379,5 +380,11 @@ struct BitsSummary {
     bool any1 = false;
 };
 BitsSummary SummarizeBits(const uint8_t* in, size_t inRowStride, uint32_t width, uint32_t rows);
+
+/// The colour table GDAL gives band 1 of an image (GTiffDataset's): its ColorMap as
+/// TIFFColorMapTagToColorTable reads it (values in [0, 255] already 8-bit, all multiples of 256
+/// divided by 256, the others by 257; the entry of the nodata value transparent), the two colours
+/// of a bitmap, the grey ramp of an inverted (min-is-white) image; nullopt for none. RGBA entries.
+std::optional<std::vector<std::array<uint8_t, 4>>> GdalColorTable(const IfdInfo& ifd);
 
 }  // namespace ddbt::cog::tiff

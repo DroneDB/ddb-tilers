@@ -15,10 +15,6 @@
 #include <mutex>
 #include <optional>
 
-#if defined(__GLIBC__)
-#include <malloc.h>
-#endif
-
 #include "copc/build/bin_store.h"
 #include "copc/build/copc_writer.h"
 #include "copc/build/morton.h"
@@ -28,6 +24,7 @@
 #include "core/exec/parallel_for.h"
 #include "core/exec/task_group.h"
 #include "core/exec/thread_pool.h"
+#include "core/mem/aligned.h"
 #include "core/mem/system_memory.h"
 #include "core/util/endian.h"
 #include "core/util/timer.h"
@@ -70,19 +67,6 @@ double PartitionBytesPerPoint(size_t recordSize) { return 2.0 * static_cast<doub
 
 /// Bytes per point of the in-memory store: records plus the slack of the bins' last blocks.
 double StoreBytesPerPoint(size_t recordSize) { return 1.25 * static_cast<double>(recordSize); }
-
-void TuneAllocator() {
-#if defined(__GLIBC__)
-    static std::once_flag once;
-    std::call_once(once, [] { mallopt(M_MMAP_THRESHOLD, 1 << 20); });
-#endif
-}
-
-void TrimAllocator() {
-#if defined(__GLIBC__)
-    malloc_trim(0);
-#endif
-}
 
 struct TaskRef {
     uint32_t reader;
@@ -338,7 +322,7 @@ public:
         // The plan's tables are no longer needed; give the scatter's freed buffers back.
         std::vector<uint32_t>().swap(binOfCell_);
         std::vector<double>().swap(probeSample_);
-        if (o_.tuneAllocator) TrimAllocator();
+        if (o_.tuneAllocator) mem::TrimAllocator();
         lod_ = o_.lod;
         lod_.leafLevel = LeafLevel(stats_.points, lod_.leafMax);
         r_.leafLevel = lod_.leafLevel;
@@ -1140,7 +1124,7 @@ Status BuildCopc(const std::string& input, const std::string& output, const Copc
     inputs.insert(inputs.end(), options.extraInputs.begin(), options.extraInputs.end());
     for (const std::string& in : inputs)
         if (in == output) return InvalidArgument("the output is one of the inputs: " + output);
-    if (options.tuneAllocator) TuneAllocator();
+    if (options.tuneAllocator) mem::MapLargeAllocations();
     Builder b(options, r);
     DDBT_TRY(b.Prepare(output));
     return b.RunAll(inputs);

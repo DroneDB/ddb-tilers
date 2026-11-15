@@ -280,6 +280,12 @@ Value Object() {
     v.kind = Value::Kind::kObject;
     return v;
 }
+
+Value Array() {
+    Value v;
+    v.kind = Value::Kind::kArray;
+    return v;
+}
 Value Number(double d) {
     Value v;
     v.kind = Value::Kind::kNumber;

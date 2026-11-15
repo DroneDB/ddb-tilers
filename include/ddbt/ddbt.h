@@ -261,8 +261,9 @@ DDBT_API ddbtErr ddbtRasterClose(ddbtRaster *raster);
  * "pixelInterleaved", "tiled", "blockWidth", "blockHeight", "overviews" ([[width, height], ...],
  * largest first), "mask" ("allValid" | "perDataset" | "nodata" | "alpha": GDALGetMaskFlags of band 1),
  * "alphaBand" (1-based, 0 when none), "geoTransform" (6 numbers, when it has one), "wkt" (the CRS as
- * WKT1 GDAL, when it has one), "bands" ([{"colorInterp", "nodata", "scale", "offset", "unit",
- * "description", "metadata"}], each member only when set but "colorInterp" and "metadata"),
+ * WKT1 GDAL, when it has one), "bands" ([{"colorInterp", "nodata" (null for NaN), "scale", "offset", "unit",
+ * "description", "metadata", "colorTable" (band 1: [[r, g, b, a], ...] as GDAL gives it)}], each member only when
+ * set but "colorInterp" and "metadata"),
  * "metadata" (the "KEY=VALUE" items of the dataset and its bands)}.
  * @param outJson receives a NUL-terminated string; release it with ddbtFree */
 DDBT_API ddbtErr ddbtRasterInfo(const ddbtRaster *raster, char **outJson);
@@ -324,7 +325,8 @@ DDBT_API ddbtErr ddbtWriteRaster(const char *outputPath, const char *optionsJson
  * text PROJ reads: the extent is in it, bounded in the output's CRS as gdalwarp bounds it), "width", "height", "resampling" ("bilinear" | "nearest"), "bands"
  * ([1-based], optional: every band but a last alpha band), "dstAlpha" (bool), "dstNodata" (number)}.
  * outJson: {"width", "height", "bands", "type" (GDAL's name), "geoTransform", "wkt", "colorInterp" ([...]),
- * "nodata" (of every band but the alpha band, when the output has one), "alphaBand" (1-based, 0 when none), "sourceLevel" (0: the raster, i: its
+ * "nodata" (of every band but the alpha band, when the output has one; null for NaN), "alphaBand" (1-based, 0 when none),
+ * "colorTable" (the colour table of band 1 of the source, which band 1 of the output takes: [[r, g, b, a], ...]), "sourceLevel" (0: the raster, i: its
  * overview i - 1)}; outPixels: the samples of every band, band after band, rows of width samples (release
  * both with ddbtFree). */
 DDBT_API ddbtErr ddbtWarpRaster(const char *inputPath, const char *optionsJson, char **outJson, uint8_t **outPixels,

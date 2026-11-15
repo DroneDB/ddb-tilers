@@ -58,6 +58,20 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
             const auto t = val.kind == json::Value::Kind::kString ? ddbt::api::SampleTypeOfGdalName(val.str) : std::nullopt;
             if (!t) return "Invalid optionsJson: type must be a GDAL data type name (Byte, UInt16, Float32...)";
             r.type = *t;
+        } else if (key == "colorTable") {
+            if (val.kind != json::Value::Kind::kArray || val.arr.empty() || val.arr.size() > 65536)
+                return "Invalid optionsJson: colorTable";
+            for (const json::Value& e : val.arr) {
+                std::array<uint8_t, 4> c{0, 0, 0, 255};
+                if (e.kind != json::Value::Kind::kArray || e.arr.size() < 3 || e.arr.size() > 4)
+                    return "Invalid optionsJson: colorTable entries are [r, g, b] or [r, g, b, a]";
+                for (size_t i = 0; i < e.arr.size(); ++i) {
+                    uint32_t v = 0;
+                    if (!Unsigned(e.arr[i], v) || v > 255) return "Invalid optionsJson: colorTable values are 0 to 255";
+                    c[i] = static_cast<uint8_t>(v);
+                }
+                r.colorTable.push_back(c);
+            }
         } else if (key == "blockSize") {
             if (!Unsigned(val, r.blockSize)) return "Invalid optionsJson: blockSize";
         } else if (key == "codec") {

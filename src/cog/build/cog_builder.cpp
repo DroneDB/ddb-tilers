@@ -249,7 +249,7 @@ std::string ImpliedColorInterp(const Plan& p, size_t b) {
     const size_t colour = p.photometric == tiff::photometric::kRgb ? 3 : 1;
     if (b < colour) {
         static const char* const rgb[3] = {"Red", "Green", "Blue"};
-        return colour == 3 ? rgb[b] : "Gray";
+        return colour == 3 ? rgb[b] : p.photometric == tiff::photometric::kPalette ? "Palette" : "Gray";
     }
     const size_t extra = b - colour;
     if (extra < p.extraSamples.size() && (p.extraSamples[extra] == 1 || p.extraSamples[extra] == 2)) return "Alpha";
@@ -356,6 +356,18 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.bands = bands;
     p.type = r.type;
     SetPhotometric(p, r.colorInterp);
+    if (!r.colorTable.empty()) {
+        // GTiff's colour table: band 1 of 1 or 2 samples (the second one extra), 8 or 16 bits; the
+        // ColorMap holds no alpha
+        if (bands > 2 || tiff::SampleTypeSize(r.type) > 2 || IsFloatType(r.type) || !r.overviewFactors.empty())
+            return Status(StatusCode::kInvalidArgument,
+                          "A colour table is for 1 or 2 bands of 8 or 16-bit integers, without overviews");
+        const std::vector<uint16_t> extra = p.extraSamples;
+        std::vector<std::array<uint8_t, 3>> rgb;
+        for (const auto& c : r.colorTable) rgb.push_back({c[0], c[1], c[2]});
+        SetPalette(p, rgb);
+        p.extraSamples = extra;
+    }
     const auto alpha = std::find(r.colorInterp.begin(), r.colorInterp.end(), "Alpha");
     if (r.mask && alpha != r.colorInterp.end())
         return Status(StatusCode::kInvalidArgument, "A raster with a mask has no alpha band");
@@ -1098,6 +1110,7 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     spec.type = plan.type;
     spec.photometric = plan.photometric;
     spec.extraSamples = plan.extraSamples;
+    spec.colorMap = plan.colorMap;
     spec.codec = plan.codec;
     spec.predictor = plan.predictor;
     spec.hasMask = plan.MaskOut();

@@ -49,4 +49,13 @@ bool AdviseHugePages(void* p, size_t size) noexcept;
 /// are known to be far below SIZE_MAX.
 constexpr size_t AlignUp(size_t v, size_t alignment) noexcept { return (v + alignment - 1) & ~(alignment - 1); }
 
+/// glibc: buffers of 1 MiB or more are mapped and given back to the system when freed (mallopt
+/// M_MMAP_THRESHOLD, process-wide, set once). Otherwise glibc raises its threshold as large buffers
+/// are freed and keeps the next ones in per-thread arenas, resident after use: the work that
+/// allocates large transient buffers on many threads (COPC builds, decoded blocks of the raster
+/// tiler, region warps) calls it before it starts. Nothing elsewhere.
+void MapLargeAllocations() noexcept;
+/// glibc: gives the free memory of the arenas back to the system (malloc_trim). Nothing elsewhere.
+void TrimAllocator() noexcept;
+
 }  // namespace ddbt::mem

@@ -101,43 +101,16 @@ std::string TiffSource::ColorInterp(int b) const {
 }
 
 std::optional<std::vector<std::array<uint8_t, 3>>> TiffSource::ColorTable() const {
-    const tiff::IfdInfo& m = Main();
-    if (m.samplesPerPixel != 1 || m.bitsPerSample > 16) return std::nullopt;
+    const auto rgba = tiff::GdalColorTable(Main());
+    if (!rgba) return std::nullopt;
     std::vector<std::array<uint8_t, 3>> table;
-    if (!m.colorMap.empty()) {
-        // TIFFColorMapTagToColorTable: values in [0, 255] are 8-bit already, multiples of 256 (and
-        // not all of 257) are divided by 256, the others by 257
-        const size_t n = m.colorMap.size() / 3;
-        uint16_t maxColor = 0;
-        bool any = false, all256 = true;
-        for (const uint16_t v : m.colorMap) {
-            maxColor = std::max(maxColor, v);
-            any = any || v > 0;
-            all256 = all256 && v % 256 == 0;
-        }
-        const unsigned divisor = maxColor > 0 && maxColor < 256 ? 1u : (any && all256 ? 256u : 257u);
-        table.resize(n);
-        for (size_t i = 0; i < n; ++i)
-            for (size_t c = 0; c < 3; ++c) table[i][c] = static_cast<uint8_t>(m.colorMap[c * n + i] / divisor);
-        return table;
-    }
-    if (m.sampleType == tiff::SampleType::kBit1) {
-        // GTiffBitmapBand
-        const bool white0 = m.photometric == tiff::photometric::kMinIsWhite;
-        table = {white0 ? std::array<uint8_t, 3>{255, 255, 255} : std::array<uint8_t, 3>{0, 0, 0},
-                 white0 ? std::array<uint8_t, 3>{0, 0, 0} : std::array<uint8_t, 3>{255, 255, 255}};
-        return table;
-    }
-    if (m.photometric == tiff::photometric::kMinIsWhite) {
-        const unsigned n = 1u << m.bitsPerSample;
-        table.resize(n);
-        for (unsigned i = 0; i < n; ++i) {
-            const auto v = static_cast<uint8_t>((255u * (n - 1 - i)) / (n - 1));
-            table[i] = {v, v, v};
-        }
-        return table;
-    }
-    return std::nullopt;
+    table.reserve(rgba->size());
+    for (const auto& c : *rgba) table.push_back({c[0], c[1], c[2]});
+    return table;
+}
+
+std::optional<std::vector<std::array<uint8_t, 4>>> TiffSource::ColorTableRgba() const {
+    return tiff::GdalColorTable(Main());
 }
 
 std::optional<int> TiffSource::Nbits(int b) const {

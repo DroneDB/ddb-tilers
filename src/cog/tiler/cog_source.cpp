@@ -303,6 +303,12 @@ std::optional<double> GdalNodataOf(std::optional<double> nodata, PixelType type)
 
 }  // namespace
 
+std::optional<FileIdentity> IdentifyFile(const std::string& path) {
+    const FileState st = StatFile(path);
+    if (!st.exists || !st.regular) return std::nullopt;
+    return st.id;
+}
+
 const char* ColorInterpName(ColorInterp ci) noexcept {
     switch (ci) {
         case ColorInterp::kUndefined: return "Undefined";

@@ -10,6 +10,7 @@
 #include "cog/tiler/cog_source.h"
 #include "cog/tiler/tile_error.h"
 #include "core/cache/sharded_lru.h"
+#include "core/mem/aligned.h"
 #include "core/mem/system_memory.h"
 
 namespace ddbt::cog::tiler {
@@ -47,7 +48,8 @@ size_t DefaultBudget() {
 }
 
 Cache& TheCache() {
-    static Cache cache(DefaultBudget(), 64);
+    // Decoded blocks (whole strips of megabytes) come and go on every thread
+    static Cache cache = (mem::MapLargeAllocations(), Cache(DefaultBudget(), 64));
     return cache;
 }
 

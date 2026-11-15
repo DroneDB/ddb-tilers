@@ -31,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -232,8 +233,11 @@ public:
         // Source pixel of every destination pixel centre, row by row (a row stays in the cache
         // through the transform, the source pixel step and its tap bounds): a point the
         // approximation put just outside the source is transformed again exactly.
-        thread_local std::vector<double> tlsX, tlsY;
-        thread_local std::vector<kernels::TapOrigins> tlsTaps;
+        const ScratchLease lease(*this);
+        Scratch& scratch = lease.Get();
+        std::vector<double>& tlsX = scratch.x;
+        std::vector<double>& tlsY = scratch.y;
+        std::vector<kernels::TapOrigins>& tlsTaps = scratch.taps;
         const size_t n = static_cast<size_t>(tw) * th;
         tlsX.resize(n);
         tlsY.resize(n);
@@ -241,9 +245,9 @@ public:
         double* const sx = tlsX.data();
         double* const sy = tlsY.data();
         if (rows_) {
-            GcpSourcePixels(x0, tw, strip.y0, th, sx, sy);
+            GcpSourcePixels(scratch, x0, tw, strip.y0, th, sx, sy);
         } else {
-            GeoTransformSourcePixels(x0, tw, strip.y0, th, sx, sy);
+            GeoTransformSourcePixels(scratch, x0, tw, strip.y0, th, sx, sy);
         }
         for (uint32_t y = 0; y < th; ++y) {
             const size_t row = static_cast<size_t>(y) * tw;
@@ -286,9 +290,8 @@ public:
             const uint32_t r1 = std::min(th, r0 + chunkRows);
             const Rect need = chunkRows == th ? whole : needOf(r0, r1);
             if (need.x1 <= need.x0 || need.y1 <= need.y0) continue;
-            thread_local Window tlsWin;
-            Window& win = tlsWin;
-            Gather(planned, need, win);
+            Window& win = scratch.window;
+            Gather(scratch, planned, need, win);
             for (uint32_t y = r0; y < r1; ++y) {
                 if (anyGeneral_) {
                     WarpRowByChunk(win, sx, sy, x0, tw, strip, y);
@@ -298,12 +301,50 @@ public:
                 WarpRow(params_, win, sx + row, sy + row, tw, strip.Pixel(x0, y),
                         params_.alphaOut == -1 ? strip.MaskAt(x0, y) : nullptr);
             }
-            if (win.px.capacity() > (size_t{32} << 20)) win = Window();  // do not keep a huge buffer per thread
+            if (win.px.capacity() > (size_t{32} << 20)) win = Window();  // do not keep a huge buffer between tiles
         }
         Release(planned);
     }
 
 private:
+    // The working buffers of a Produce call: the source position of each pixel, the tap bounds of
+    // each row, the source window, the blocks decoded outside the plan. They belong to the
+    // producer, not to a thread: a call leases a set (one per call running at once, reused by the
+    // next ones) and the producer frees them with itself, so a pool thread keeps nothing of a warp
+    // once it is done.
+    struct Scratch {
+        std::vector<double> x, y, columns;
+        std::vector<kernels::TapOrigins> taps;
+        std::vector<uint32_t> outside;
+        std::vector<char> ok;
+        std::vector<const WarpChunk*> chunks;
+        Window window;
+        build::LargeBytes data, mask;
+    };
+
+    class ScratchLease {
+    public:
+        explicit ScratchLease(const WarpProducer& p) : p_(p) {
+            std::lock_guard lock(p_.scratchMutex_);
+            if (!p_.freeScratch_.empty()) {
+                s_ = std::move(p_.freeScratch_.back());
+                p_.freeScratch_.pop_back();
+            }
+            if (!s_) s_ = std::make_unique<Scratch>();
+        }
+        ~ScratchLease() {
+            std::lock_guard lock(p_.scratchMutex_);
+            p_.freeScratch_.push_back(std::move(s_));
+        }
+        ScratchLease(const ScratchLease&) = delete;
+        ScratchLease& operator=(const ScratchLease&) = delete;
+        Scratch& Get() const noexcept { return *s_; }
+
+    private:
+        const WarpProducer& p_;
+        std::unique_ptr<Scratch> s_;
+    };
+
     // Row y of the tile (x0, tw wide) chunk by chunk, each part with the filter of its chunk
     void WarpRowByChunk(const Window& win, const double* sx, const double* sy, uint32_t x0, uint32_t tw, Strip& strip,
                         uint32_t y) const {
@@ -323,9 +364,10 @@ private:
     // Source pixels of the destination pixels (x0 .. x0 + tw - 1, y0 .. y0 + th - 1) of a source
     // with a geotransform: a GridApprox of the reprojection over the tile with a 0.125 source
     // pixel bound, then the inverse geotransform; NaN where there is no source pixel.
-    void GeoTransformSourcePixels(uint32_t x0, uint32_t tw, uint32_t y0, uint32_t th, double* sx, double* sy) const {
-        thread_local std::vector<double> tlsColumns;
-        thread_local std::vector<uint32_t> tlsOutside;
+    void GeoTransformSourcePixels(Scratch& scratch, uint32_t x0, uint32_t tw, uint32_t y0, uint32_t th, double* sx,
+                                  double* sy) const {
+        std::vector<double>& tlsColumns = scratch.columns;
+        std::vector<uint32_t>& tlsOutside = scratch.outside;
         tlsColumns.resize(tw);
         tlsOutside.resize(tw);
         const auto& gt = plan_.geoTransform;
@@ -358,9 +400,10 @@ private:
     // its chunks (WarpChunk), each row through its approximate transformer (RowApproximator, 0.125
     // source pixels), a position outside the chunk's source window not written (after an exact
     // try when it is within a pixel of it), nor a pixel of no chunk; NaN where there is none.
-    void GcpSourcePixels(uint32_t x0, uint32_t tw, uint32_t y0, uint32_t th, double* sx, double* sy) const {
-        thread_local std::vector<char> tlsOk;
-        thread_local std::vector<const WarpChunk*> tlsChunks;
+    void GcpSourcePixels(Scratch& scratch, uint32_t x0, uint32_t tw, uint32_t y0, uint32_t th, double* sx,
+                         double* sy) const {
+        std::vector<char>& tlsOk = scratch.ok;
+        std::vector<const WarpChunk*>& tlsChunks = scratch.chunks;
         tlsOk.resize(tw);
         std::fill(sx, sx + static_cast<size_t>(tw) * th, std::numeric_limits<double>::quiet_NaN());
         std::fill(sy, sy + static_cast<size_t>(tw) * th, std::numeric_limits<double>::quiet_NaN());
@@ -626,7 +669,7 @@ private:
 
     // Copies the source pixels of `need` into the window (blocks of the planned window through
     // the cache, others decoded here), and computes the unified validity and the density.
-    void Gather(const Rect& planned, const Rect& need, Window& win) {
+    void Gather(Scratch& scratch, const Rect& planned, const Rect& need, Window& win) {
         win.x0 = need.x0;
         win.y0 = need.y0;
         win.w = need.x1 - need.x0;
@@ -635,17 +678,28 @@ private:
         const size_t np = static_cast<size_t>(win.w) * static_cast<size_t>(win.h);
         win.px.resize(np * win.pb + kWindowPadding);
         if (spec_.mask) win.mask.resize(np);
-        thread_local build::LargeBytes tmpData, tmpMask;
+        build::LargeBytes& tmpData = scratch.data;
+        build::LargeBytes& tmpMask = scratch.mask;
         for (int by = need.y0 / bh_; by <= (need.y1 - 1) / bh_; ++by) {
             for (int bx = need.x0 / bw_; bx <= (need.x1 - 1) / bw_; ++bx) {
                 const size_t b = static_cast<size_t>(by) * static_cast<size_t>(across_) + static_cast<size_t>(bx);
                 const bool inPlan = !planned.Empty() && bx >= planned.x0 / bw_ && bx <= (planned.x1 - 1) / bw_ &&
                                     by >= planned.y0 / bh_ && by <= (planned.y1 - 1) / bh_;
-                const uint8_t* data = src_.ResidentBlock(static_cast<uint32_t>(bx), static_cast<uint32_t>(by));
-                const uint8_t* mask =
-                    spec_.mask ? src_.ResidentMaskBlock(static_cast<uint32_t>(bx), static_cast<uint32_t>(by)) : nullptr;
+                const auto col = static_cast<uint32_t>(bx), row = static_cast<uint32_t>(by);
+                const uint8_t* data = src_.ResidentBlock(col, row);
+                const uint8_t* mask = spec_.mask ? src_.ResidentMaskBlock(col, row) : nullptr;
+                // A block a cache shares: held until it is copied
+                build::RasterSource::SharedBlock sharedData, sharedMask;
+                if (data == nullptr) {
+                    sharedData = src_.SharedDataBlock(col, row);
+                    data = sharedData.data;
+                }
+                if (spec_.mask && mask == nullptr) {
+                    sharedMask = src_.SharedMaskBlock(col, row);
+                    mask = sharedMask.data;
+                }
                 if (data != nullptr && (!spec_.mask || mask != nullptr)) {
-                    // A source that keeps its image in memory: no copy of the block.
+                    // A source that keeps its image in memory, or a shared block: no copy of the block.
                 } else if (inPlan) {
                     BlockCache::Entry& e = Acquire(b);
                     data = e.data.get();
@@ -768,6 +822,8 @@ private:
     // Sources without a geotransform: GDAL's approximate transformer, its chunks, and the
     // inverse of the output geotransform as GDAL computes it.
     std::optional<RowApproximator> rows_;
+    mutable std::mutex scratchMutex_;
+    mutable std::vector<std::unique_ptr<Scratch>> freeScratch_;
     std::vector<WarpChunk> chunks_;
     std::vector<ChunkKernel> kernels_;  // the bilinear filter of each chunk (none for the nearest)
     bool anyGeneral_ = false;           // a chunk downsamples by more than 2: its filter is stretched

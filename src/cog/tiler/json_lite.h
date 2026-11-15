@@ -39,6 +39,7 @@ std::optional<Value> Parse(std::string_view text);
 std::string Dump(const Value& v, int indent = 2);
 
 Value Object();
+Value Array();
 Value Number(double v);
 Value Unsigned(uint64_t v);
 Value Bool(bool v);

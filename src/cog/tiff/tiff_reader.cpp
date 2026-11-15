@@ -866,4 +866,45 @@ std::optional<uint32_t> TiffReader::MaskOf(uint32_t ifd) const {
     return std::nullopt;
 }
 
+std::optional<std::vector<std::array<uint8_t, 4>>> GdalColorTable(const IfdInfo& m) {
+    if (m.samplesPerPixel != 1 || m.bitsPerSample > 16) return std::nullopt;
+    std::vector<std::array<uint8_t, 4>> table;
+    if (!m.colorMap.empty()) {
+        const size_t n = m.colorMap.size() / 3;
+        uint16_t maxColor = 0;
+        bool any = false, all256 = true;
+        for (const uint16_t v : m.colorMap) {
+            maxColor = std::max(maxColor, v);
+            any = any || v > 0;
+            all256 = all256 && v % 256 == 0;
+        }
+        const unsigned divisor = maxColor > 0 && maxColor < 256 ? 1u : (any && all256 ? 256u : 257u);
+        const std::optional<double>& nd = m.noData;
+        const long transparent = nd && std::isfinite(*nd) && std::fabs(*nd) < 2147483648.0 ? static_cast<int>(*nd) : -1;
+        table.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            for (size_t c = 0; c < 3; ++c) table[i][c] = static_cast<uint8_t>(m.colorMap[c * n + i] / divisor);
+            table[i][3] = static_cast<long>(i) == transparent ? 0 : 255;
+        }
+        return table;
+    }
+    if (m.sampleType == SampleType::kBit1) {
+        // GTiffBitmapBand
+        const bool white0 = m.photometric == photometric::kMinIsWhite;
+        const uint8_t a = white0 ? 255 : 0, b = white0 ? 0 : 255;
+        table = {{a, a, a, 255}, {b, b, b, 255}};
+        return table;
+    }
+    if (m.photometric == photometric::kMinIsWhite) {
+        const unsigned n = 1u << m.bitsPerSample;
+        table.resize(n);
+        for (unsigned i = 0; i < n; ++i) {
+            const auto v = static_cast<uint8_t>((255u * (n - 1 - i)) / (n - 1));
+            table[i] = {v, v, v, 255};
+        }
+        return table;
+    }
+    return std::nullopt;
+}
+
 }  // namespace ddbt::cog::tiff

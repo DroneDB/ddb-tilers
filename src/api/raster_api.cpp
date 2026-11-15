@@ -41,14 +41,8 @@ const char* MaskKindName(ddbt::cog::tiler::MaskKind kind) noexcept {
     }
 }
 
-json::Value Array() {
-    json::Value v;
-    v.kind = json::Value::Kind::kArray;
-    return v;
-}
-
 json::Value Strings(const std::vector<std::string>& items) {
-    json::Value v = Array();
+    json::Value v = json::Array();
     for (const auto& s : items) v.arr.push_back(json::String(s));
     return v;
 }
@@ -120,9 +114,9 @@ ddbtErr ddbtRasterInfo(const ddbtRaster* raster, char** outJson) {
         o.obj["tiled"] = json::Bool(main.tiled);
         o.obj["blockWidth"] = json::Unsigned(main.blockWidth);
         o.obj["blockHeight"] = json::Unsigned(main.blockHeight);
-        json::Value overviews = Array();
+        json::Value overviews = json::Array();
         for (size_t i = 1; i < s.Levels().size(); ++i) {
-            json::Value wh = Array();
+            json::Value wh = json::Array();
             wh.arr.push_back(json::Unsigned(s.Levels()[i].width));
             wh.arr.push_back(json::Unsigned(s.Levels()[i].height));
             overviews.arr.push_back(std::move(wh));
@@ -131,18 +125,21 @@ ddbtErr ddbtRasterInfo(const ddbtRaster* raster, char** outJson) {
         o.obj["mask"] = json::String(MaskKindName(s.Mask()));
         o.obj["alphaBand"] = json::Unsigned(static_cast<uint64_t>(s.AlphaBand()));
         if (s.HasGeoTransform()) {
-            json::Value gt = Array();
+            json::Value gt = json::Array();
             for (const double v : s.GeoTransform()) gt.arr.push_back(json::Number(v));
             o.obj["geoTransform"] = std::move(gt);
         }
         if (s.Georef().crs)
             o.obj["wkt"] = json::String(s.Georef().crs->ToWkt(ddbt::crs::WktFlavor::GdalDefault));
-        json::Value bands = Array();
+        json::Value bands = json::Array();
         for (int b = 1; b <= s.BandCount(); ++b) {
             const tl::BandMeta& m = s.Band(b);
             json::Value band = json::Object();
             band.obj["colorInterp"] = json::String(tl::ColorInterpName(m.interp));
             if (m.nodata) band.obj["nodata"] = json::Number(*m.nodata);
+            // The colour table of band 1, as GDAL gives it
+            if (b == 1)
+                if (const auto table = ddbt::cog::tiff::GdalColorTable(main)) band.obj["colorTable"] = ddbt::api::ColorTableJson(*table);
             if (m.hasScale) band.obj["scale"] = json::Number(m.scale);
             if (m.hasOffset) band.obj["offset"] = json::Number(m.offset);
             if (!m.unitType.empty()) band.obj["unit"] = json::String(m.unitType);

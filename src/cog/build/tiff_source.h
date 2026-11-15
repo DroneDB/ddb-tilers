@@ -54,6 +54,8 @@ public:
     /// bits as GDAL scales it), else black and white for a 1-bit image, an inverted grey ramp for
     /// min-is-white. None otherwise.
     std::optional<std::vector<std::array<uint8_t, 3>>> ColorTable() const override;
+    /// The colour table of band 1 as GDAL gives it, with its alpha (tiff::GdalColorTable)
+    std::optional<std::vector<std::array<uint8_t, 4>>> ColorTableRgba() const;
     /// BitsPerSample when it is not 8, 16, 32 or 64.
     std::optional<int> Nbits(int b) const override;
 
@@ -71,6 +73,12 @@ public:
     Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const override;
     /// The mask's blocks are those of the image (GDAL writes them so); Unsupported otherwise.
     Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const override;
+
+    /// The IFD of the level read and the IFD of its mask, in the file: what the tiler's block cache
+    /// keys its blocks by
+    const tiff::IfdInfo& LevelIfd() const noexcept { return Data(); }
+    uint32_t LevelIfdIndex() const noexcept { return data_; }
+    std::optional<uint32_t> MaskIfdIndex() const noexcept { return maskIfd_; }
 
 private:
     TiffSource() = default;

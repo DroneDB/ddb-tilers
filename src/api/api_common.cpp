@@ -127,4 +127,15 @@ std::optional<SampleType> SampleTypeOfGdalName(std::string_view name) noexcept {
     return std::nullopt;
 }
 
+cog::tiler::json::Value ColorTableJson(const std::vector<std::array<uint8_t, 4>>& table) {
+    namespace json = cog::tiler::json;
+    json::Value t = json::Array();
+    for (const auto& c : table) {
+        json::Value entry = json::Array();
+        for (const uint8_t v : c) entry.arr.push_back(json::Unsigned(v));
+        t.arr.push_back(std::move(entry));
+    }
+    return t;
+}
+
 }  // namespace ddbt::api

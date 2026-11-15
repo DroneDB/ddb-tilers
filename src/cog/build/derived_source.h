@@ -27,7 +27,7 @@ namespace ddbt::cog::build {
 /// change.
 class ForwardingSource : public RasterSource {
 public:
-    explicit ForwardingSource(std::unique_ptr<RasterSource> inner) : inner_(std::move(inner)) {}
+    explicit ForwardingSource(std::shared_ptr<const RasterSource> inner) : inner_(std::move(inner)) {}
 
     const std::string& Path() const noexcept override { return inner_->Path(); }
     const tiff::Georeferencing& Georef() const noexcept override { return inner_->Georef(); }
@@ -61,12 +61,14 @@ public:
     const uint8_t* ResidentMaskBlock(uint32_t col, uint32_t row) const override {
         return inner_->ResidentMaskBlock(col, row);
     }
+    SharedBlock SharedDataBlock(uint32_t col, uint32_t row) const override { return inner_->SharedDataBlock(col, row); }
+    SharedBlock SharedMaskBlock(uint32_t col, uint32_t row) const override { return inner_->SharedMaskBlock(col, row); }
 
 protected:
     const RasterSource& Inner() const noexcept { return *inner_; }
 
 private:
-    std::unique_ptr<RasterSource> inner_;
+    std::shared_ptr<const RasterSource> inner_;
 };
 
 /// `source` georeferenced by `gcps` (pixel and line in its pixel coordinates; x, y in `gcpCrs`).
