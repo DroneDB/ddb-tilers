@@ -61,6 +61,9 @@ struct Plan {
     std::vector<uint16_t> colorMap;  // the ColorMap of a palette output (TIFF's R, G, B values)
     bool complex = false;            // complex samples: `bands` counts both components of each
     OverviewResampling resampling = OverviewResampling::kCubic;
+    /// A tile whose mask is all 0 is written whole (GTiff without SPARSE_OK keeps the pixels under a
+    /// mask), else left sparse (the COG driver's)
+    bool keepMaskedTiles = false;
     std::string gdalMetadata;
 
     bool MaskOut() const noexcept { return transparency == Transparency::kMask; }

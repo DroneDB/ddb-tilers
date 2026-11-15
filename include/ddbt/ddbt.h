@@ -303,7 +303,9 @@ typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int hei
  * failure. optionsJson: {"width", "height", "colorInterp" (GDAL's names, one per band: "Red",
  * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "blockSize" (256; a multiple of 16), "codec"
  * ("deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2; 2), "level" (DEFLATE / ZSTD level,
- * 0: GDAL's default), "nodata" (0..255), "overviewFactors" ([2, 4, ...]: level i is
+ * 0: GDAL's default), "nodata" (0..255), "mask" (true: an internal 1-bit mask, which the host fills as one more sample after the
+ * bands of each pixel, 0 where it is transparent; the bands' overviews honour it, and its own are 255 wherever a
+ * pixel they cover is not 0), "overviewFactors" ([2, 4, ...]: level i is
  * ceil(width / f) x ceil(height / f)), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose
  * CRS, its GeoKeys as they are, the output takes), "memoryMb" (pipeline budget, 2048)}.
  * progress: phases "overviews", "compressing". */

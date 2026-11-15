@@ -66,6 +66,9 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
             uint32_t n = 0;
             if (!Unsigned(val, n) || n > 255) return "Invalid optionsJson: nodata must be 0..255";
             r.nodata = static_cast<uint8_t>(n);
+        } else if (key == "mask") {
+            if (val.kind != json::Value::Kind::kBool) return "Invalid optionsJson: mask must be a boolean";
+            r.mask = val.b;
         } else if (key == "overviewFactors") {
             if (val.kind != json::Value::Kind::kArray) return "Invalid optionsJson: overviewFactors";
             for (const json::Value& v : val.arr) {

@@ -243,7 +243,23 @@ public:
         const uint32_t vw = std::min(raster_.blockSize, s.width - x0);
         // The host fills one window at a time
         std::lock_guard<std::mutex> lock(mutex_);
-        raster_.fill(x0, s.y0, vw, s.rows, s.Pixel(x0, 0), s.Stride());
+        if (!raster_.mask) {
+            raster_.fill(x0, s.y0, vw, s.rows, s.Pixel(x0, 0), s.Stride());
+        } else {
+            // The bands and the mask of each pixel, split into the strip's pixels and its mask
+            const size_t pb = s.pixelBytes;
+            window_.resize(static_cast<size_t>(vw) * s.rows * (pb + 1));
+            raster_.fill(x0, s.y0, vw, s.rows, window_.data(), static_cast<size_t>(vw) * (pb + 1));
+            for (uint32_t y = 0; y < s.rows; ++y) {
+                const uint8_t* in = window_.data() + static_cast<size_t>(y) * vw * (pb + 1);
+                uint8_t* px = s.Pixel(x0, y);
+                uint8_t* mk = s.MaskAt(x0, y);
+                for (uint32_t x = 0; x < vw; ++x, in += pb + 1) {
+                    std::memcpy(px + static_cast<size_t>(x) * pb, in, pb);
+                    mk[x] = in[pb];
+                }
+            }
+        }
         filled_.fetch_add(1, std::memory_order_relaxed);
     }
     uint64_t BlocksDecoded() const override { return filled_.load(); }
@@ -251,6 +267,7 @@ public:
 private:
     const HostRaster& raster_;
     std::mutex mutex_;
+    std::vector<uint8_t> window_;
     std::atomic<uint64_t> filled_{0};
 };
 
@@ -279,7 +296,11 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.type = tiff::SampleType::kU8;
     SetPhotometric(p, r.colorInterp);
     const auto alpha = std::find(r.colorInterp.begin(), r.colorInterp.end(), "Alpha");
-    if (r.nodata) {
+    if (r.mask && (r.nodata || alpha != r.colorInterp.end()))
+        return Status(StatusCode::kInvalidArgument, "A raster with a mask has neither a nodata value nor an alpha band");
+    if (r.mask) {
+        p.transparency = Transparency::kMask;
+    } else if (r.nodata) {
         p.transparency = Transparency::kNoData;
         p.nodata = *r.nodata;
         p.nodataText = std::to_string(*r.nodata);
@@ -292,6 +313,7 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.predictor = r.predictor;
     p.level = r.level;
     p.resampling = OverviewResampling::kAverage;
+    p.keepMaskedTiles = true;
     p.gdalMetadata = OutputMetadata(std::string(), p, false);
     return p;
 }
@@ -461,7 +483,7 @@ private:
         const uint32_t x0 = col * B;
         const uint32_t vw = std::min(B, s.width - x0);
         ByteBuffer image, maskBytes;
-        const bool sparse = maskOut ? maskAllZero : allFill;
+        const bool sparse = maskOut ? maskAllZero && !plan_.keepMaskedTiles : allFill;
         if (!sparse) {
             encode::BlockFormat f;
             f.width = f.height = B;
@@ -668,13 +690,13 @@ private:
     }
 
     // Rows [d0, d1) of tile `col` of level k + 1 by GDAL's AVERAGE (8-bit) of a GTiff: every band
-    // with the alpha as its mask (the alpha band too), or with its nodata, or unmasked; the mask of
-    // the strip is the alpha of the level (AlphaToMask, at the end of the strip).
+    // with the alpha as its mask (the alpha band too; the mask of the strip is the alpha of the
+    // level, AlphaToMask at the end of the strip), with the internal mask (and the mask's next level),
+    // with its nodata, or unmasked.
     void AverageTile(const Level& P, Strip& child, uint32_t col, const pyramid::AverageTaps& rowTaps, int d0, int d1) {
         const uint32_t B = plan_.blockSize;
         const int x0 = static_cast<int>(col * B);
         const int x1 = static_cast<int>(std::min((col + 1) * B, child.width));
-        if (plan_.MaskOut()) throw std::logic_error("AVERAGE overviews of a 1-bit mask output are not supported");
         const pyramid::AverageTaps colTaps =
             pyramid::AverageAxis(static_cast<int>(P.width), static_cast<int>(child.width), x0, x1);
         const int cb = colTaps.SrcBegin(), ce = colTaps.SrcEnd();
@@ -694,6 +716,18 @@ private:
             spec.mask = pyramid::MaskMode::kNoData;
             pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, nullptr, colTaps, rowTaps, dw, dh,
                              dst, child.Stride());
+        } else if (plan_.MaskOut()) {
+            // A per-dataset mask: the bands with it, and its own next level, the AVERAGE of the mask with
+            // itself as its mask (GTiff regenerates the mask overviews so, before the bands')
+            spec.mask = pyramid::MaskMode::kExternal;
+            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, wmask.data(), colTaps, rowTaps, dw,
+                             dh, dst, child.Stride());
+            pyramid::DownsampleSpec maskSpec = spec;
+            maskSpec.bands = 1;
+            pyramid::Average(maskSpec, wmask.data(), static_cast<size_t>(ce - cb), cb, rb, ce - cb, re - rb,
+                             wmask.data(), colTaps, rowTaps, dw, dh,
+                             child.MaskAt(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0),
+                             child.width);
         } else if (plan_.transparency == Transparency::kAlpha && plan_.StripMask()) {
             // Every band with the alpha as its mask, the alpha band too: the mask band of a GTiff alpha
             // band is the alpha band itself, so its overview is 255 wherever a pixel it covers is not 0
@@ -999,6 +1033,7 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     spec.extraSamples = plan.extraSamples;
     spec.codec = plan.codec;
     spec.predictor = plan.predictor;
+    spec.hasMask = plan.MaskOut();
     spec.noDataText = plan.nodataText;
     spec.gdalMetadata = plan.gdalMetadata;
     spec.geoTransform = plan.geoTransform;

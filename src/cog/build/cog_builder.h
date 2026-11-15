@@ -119,13 +119,18 @@ struct HostRaster {
     int predictor = 2;
     int level = 0;  // DEFLATE / ZSTD level (0: GDAL's default)
     std::optional<uint8_t> nodata;
+    /// An internal 1-bit mask (GDAL's per-dataset mask band): the host fills it as one more sample
+    /// after the bands of each pixel (0: transparent); its overviews are GDAL's AVERAGE of the mask
+    /// with itself as its mask (255 wherever a pixel they cover is not 0), the bands' with it.
+    bool mask = false;
     /// GDALBuildOverviews factors (2, 4, 8...): level i is (width + f - 1) / f x (height + f - 1) / f.
     std::vector<uint32_t> overviewFactors;
     std::array<double, 6> geoTransform{};
     bool georeferenced = false;
     writer::GeoKeys geoKeys;
-    /// Writes the window (x, y, w, h) of every band, pixel-interleaved, rows `stride` bytes apart
-    /// into `out`. Called one at a time, in no particular order; throws to stop the write.
+    /// Writes the window (x, y, w, h) of every band (and the mask, with `mask`), pixel-interleaved,
+    /// rows `stride` bytes apart into `out`. Called one at a time, in no particular order; throws to
+    /// stop the write.
     std::function<void(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t* out, size_t stride)> fill;
 };
 
