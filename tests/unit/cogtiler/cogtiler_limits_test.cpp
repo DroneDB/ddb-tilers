@@ -440,7 +440,7 @@ TEST(CogTilerLimits, Utf8Paths) {
 
 // ---------------------------------------------------------------------------------------- sidecar
 
-TEST(CogTilerLimits, ConcurrentSidecarWritesLeaveValidJsonAndNoTemporaries) {
+TEST(CogTilerLimits, ConcurrentSidecarWritesKeepEveryEntryAndNoTemporaries) {
     TempDir dir;
     const fs::path build = dir.path() / ".ddb" / "build" /
                            "159b8f07cdc8e83b8098466a497cfe4d4e9d4d79983259f25e705b5a30d55285" / "cog";
@@ -453,11 +453,9 @@ TEST(CogTilerLimits, ConcurrentSidecarWritesLeaveValidJsonAndNoTemporaries) {
     for (int k = 0; k < 8; ++k)
         threads.emplace_back([&, k] { GetBandStatistics(*CogSource::Open(raster.string()), 1, 100.0 + k); });
     for (auto& t : threads) t.join();
-    // Every write left a parsable sidecar (the last one wins; lost entries are computed again).
-    int found = 0;
+    // The threads of one process take turns: the sidecar keeps the entry of every one of them.
     for (int k = 0; k < 8; ++k)
-        if (ReadStatsSidecar(raster.string(), 1, 100.0 + k)) found++;
-    EXPECT_GE(found, 1);
+        EXPECT_TRUE(ReadStatsSidecar(raster.string(), 1, 100.0 + k)) << "nodata " << 100.0 + k;
     for (const auto& e : fs::directory_iterator(build))
         EXPECT_NE(e.path().extension(), ".tmp") << "temporary left: " << e.path();
     ClearStatsCache();

@@ -5,6 +5,7 @@
 #include "cog/tiler/block_cache.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -108,8 +109,19 @@ fs::path U8Path(const std::string& s) { return fs::path(std::u8string(s.begin(),
 
 fs::path SidecarOf(const std::string& raster) { return U8Path(raster + ".stats.json"); }
 
-// readFreshSidecar: exists, not older than the raster, parses, "exact": true.
-std::optional<json::Value> ReadFreshSidecar(const std::string& raster) {
+// The threads of this process read and replace the sidecar of a raster one at a time: a writer
+// reads the entries, adds its own and renames its file over the sidecar under this lock, so no entry
+// of another thread is lost, and no thread holds the sidecar open while one renames over it (on
+// Windows that rename fails and the write is lost). Locks are shared by the rasters whose paths
+// hash to the same stripe; another spelling of the same path takes another lock and is only as safe
+// as two processes (see WriteSidecar).
+std::mutex& SidecarMutex(const std::string& raster) {
+    static std::array<std::mutex, 64> stripes;
+    return stripes[std::hash<std::string>{}(raster) % stripes.size()];
+}
+
+// ReadFreshSidecar with the SidecarMutex of the raster held by the caller.
+std::optional<json::Value> ReadFreshSidecarLocked(const std::string& raster) {
     std::error_code ec;
     const fs::path sidecar = SidecarOf(raster);
     const auto st = fs::last_write_time(sidecar, ec);
@@ -125,6 +137,12 @@ std::optional<json::Value> ReadFreshSidecar(const std::string& raster) {
     const json::Value* exact = v->Find("exact");
     if (exact == nullptr || exact->kind != json::Value::Kind::kBool || !exact->b) return std::nullopt;
     return v;
+}
+
+// The sidecar of the raster if it exists, is not older than the raster, parses and has "exact": true.
+std::optional<json::Value> ReadFreshSidecar(const std::string& raster) {
+    std::lock_guard lock(SidecarMutex(raster));
+    return ReadFreshSidecarLocked(raster);
 }
 
 std::optional<BandStatistics> FromSidecar(const json::Value& j, int band, const std::optional<double>& nodata) {
@@ -163,7 +181,8 @@ json::Value StatsToJson(const BandStatistics& s) {
 
 void WriteSidecar(const std::string& raster, int band, const BandStatistics& s, const std::optional<double>& nodata) {
     try {
-        json::Value j = ReadFreshSidecar(raster).value_or(json::Object());
+        std::lock_guard lock(SidecarMutex(raster));
+        json::Value j = ReadFreshSidecarLocked(raster).value_or(json::Object());
         if (!nodata) {
             json::Value& b = j.obj["bands"];
             b.kind = json::Value::Kind::kObject;
@@ -188,9 +207,10 @@ void WriteSidecar(const std::string& raster, int band, const BandStatistics& s, 
         std::strftime(stamp, sizeof(stamp), "%FT%TZ", &tm);
         j.obj["computedAt"] = json::String(stamp);
         // Written to a temporary of this process and thread (pid + random suffix), renamed over the
-        // sidecar: readers see the old or the new file, never a partial one. Not locked across
-        // writers: two processes adding entries at once may drop one of them (the last rename
-        // wins); a dropped entry is computed again by the next request that misses it.
+        // sidecar: readers see the old or the new file, never a partial one. The threads of this
+        // process take turns (SidecarMutex); two processes adding entries at once may drop one of
+        // them (the last rename wins, or on Windows a rename over a sidecar the other process has
+        // open fails); a dropped entry is computed again by the next request that misses it.
         const fs::path target = SidecarOf(raster);
         thread_local std::mt19937_64 rng([] {
             std::random_device rd;
