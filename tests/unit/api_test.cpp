@@ -470,6 +470,33 @@ TEST(HostApi, TileInfoRefusesBadArguments) {
     std::filesystem::remove_all(dir);
 }
 
+// The phase of every report is the one DroneDB's cogPhaseOfFraction gives its fraction (with a warp:
+// warping < 0.1875 <= overviews < 0.25 <= compressing < 0.5 <= statistics), so a host that names the
+// phase from the fraction names the same one. The 14 rows of blocks of the warped raster report
+// fractions on both sides of every boundary.
+TEST(HostApi, BuildCog2NamesThePhaseOfTheFractionItReports) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("cog2-phases");
+    const std::string in = (dir / "in.tif").string(), out = (dir / "out.tif").string();
+    syn::SynthSpec spec = syn::Spec(4096, 1, 1);
+    spec.tile = 256;
+    syn::WriteSynth(in, spec);
+    ProgressLog log;
+    ASSERT_EQ(ddbtBuildCog2(in.c_str(), out.c_str(), nullptr, &ProgressLog::Record, &log), DDBT_ERR_NONE)
+        << ddbtLastError();
+    ASSERT_GE(log.calls.size(), 8u);
+    // The raster is warped: its first reports are "warping"
+    ASSERT_EQ(log.calls.front().second, "warping");
+    for (const auto& [f, phase] : log.calls) {
+        const char* expected = f < 0.1875 ? "warping"
+                               : f < 0.25 ? "overviews"
+                               : f < 0.5  ? "compressing"
+                                          : "statistics";
+        EXPECT_EQ(phase, expected) << "fraction " << f;
+    }
+    std::filesystem::remove_all(dir);
+}
+
 TEST(HostApi, BuildCog2ReportsProgressToOne) {
     namespace syn = ddbt::cog::tiler::testing;
     const auto dir = ApiScratch("cog2");

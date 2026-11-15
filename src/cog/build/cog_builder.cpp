@@ -687,15 +687,16 @@ private:
 
     void Report(double f) {
         if (!options_.progress) return;
-        // DroneDB's phase names over the fraction of the single pass (cogPhaseOfFraction with a
-        // warp; without one there is no "warping" phase).
-        const double x = f * 0.5;
+        // DroneDB's phase names (cogPhaseOfFraction) of the fraction reported, so that a host that
+        // names the phase from the fraction alone names the same one; without a warp there is no
+        // "warping" phase.
+        const double x = f * 0.95;
         const char* phase;
         if (!plan_.ownGrid && x < 0.5 * 3.0 / 8.0) phase = "warping";
         else if (x < (plan_.ownGrid ? 0.1 : 0.25)) phase = "overviews";
         else if (x < 0.5) phase = "compressing";
         else phase = "statistics";
-        options_.progress(f * 0.95, phase);
+        options_.progress(x, phase);
     }
 
     void RunImpl() {
