@@ -224,6 +224,18 @@ DDBT_API ddbtErr ddbtIsOptimizedCog(const char *inputPath, bool *outOptimized);
  * @param outJson receives a NUL-terminated string; release it with ddbtFree */
 DDBT_API ddbtErr ddbtPointCloudInfo(const char *inputPath, bool readBounds, char **outJson);
 
+/** A batch of points for ddbtReadPoints: `count` points, their coordinates (x, y, z interleaved, in
+ * the CRS of the cloud) and, when the cloud has colours, their red, green and blue (16-bit: LAS as
+ * stored, 8-bit formats scaled by 257), NULL otherwise. The arrays are valid during the call only.
+ * Return 0 to go on, anything else to stop the reading. */
+typedef int (*ddbtPointBatchCallback)(uint64_t count, const double *xyz, const uint16_t *rgb, void *userData);
+
+/** Reads every point of a point cloud (LAS, LAZ and so COPC, PLY, E57, XYZ, PTS) in the order of the
+ * file, on the threads of the library, and hands them to `batch` one batch at a time, on the calling
+ * thread. Codes: DDBT_ERR_INVALIDARGS for a bad argument, DDBT_ERR_NOTFOUND, DDBT_ERR_CANCELED when
+ * `batch` stopped the reading, DDBT_ERR_EXCEPTION for a file that cannot be read. */
+DDBT_API ddbtErr ddbtReadPoints(const char *inputPath, ddbtPointBatchCallback batch, void *userData);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

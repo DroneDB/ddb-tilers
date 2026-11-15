@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
-// ddbtPointCloudInfo: the summary of a point cloud (copc/readers/point_info.h) as JSON.
+// The point cloud exports for a host that reads point clouds itself: ddbtPointCloudInfo (the summary of
+// copc/readers/point_info.h as JSON) and ddbtReadPoints (the points in file order,
+// copc/readers/point_stream.h).
 #include <string>
 
 #include "api/api_common.h"
 #include "cog/tiler/json_lite.h"
 #include "copc/readers/point_info.h"
+#include "copc/readers/point_stream.h"
 #include "core/exec/thread_pool.h"
 #include "ddbt/ddbt.h"
 
@@ -37,5 +40,21 @@ ddbtErr ddbtPointCloudInfo(const char* inputPath, bool readBounds, char** outJso
             out.obj["bounds"] = std::move(bounds);
         }
         return ddbt::api::CopyOut(json::Dump(out, 0), outJson);
+    });
+}
+
+ddbtErr ddbtReadPoints(const char* inputPath, ddbtPointBatchCallback batch, void* userData) {
+    using ddbt::api::Fail;
+    if (batch == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid batch callback: NULL");
+    return ddbt::api::GuardedCall([&]() -> ddbtErr {
+        if (ddbt::api::IsEmpty(inputPath)) return Fail(DDBT_ERR_INVALIDARGS, "Invalid inputPath: empty");
+        const std::string in(inputPath);
+        if (!ddbt::api::PathExists(in)) return Fail(DDBT_ERR_NOTFOUND, in + " does not exist");
+        const ddbt::Status s = ddbt::copc::readers::ForEachPoint(
+            in, ddbt::exec::DefaultPool(), [&](size_t count, const double* xyz, const uint16_t* rgb) {
+                return batch(static_cast<uint64_t>(count), xyz, rgb, userData) == 0;
+            });
+        if (!s.ok()) return Fail(ddbt::api::CodeOf(s), std::string(s.message()));
+        return DDBT_ERR_NONE;
     });
 }

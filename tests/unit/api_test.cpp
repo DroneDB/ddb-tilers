@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdint>
+#include <climits>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -760,6 +761,83 @@ TEST(HostApi, PointCloudInfoOfPlyAndTextFilesReadsTheirPoints) {
     EXPECT_EQ(PointCloudInfoOf(ply, false).Find("bounds"), nullptr);
     EXPECT_EQ(PointCloudInfoOf(ply, false).Find("pointCount")->u, 3u);
     EXPECT_NE(PointCloudInfoOf(xyz, false).Find("bounds"), nullptr);
+    std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+// The points ddbtReadPoints hands over
+struct ReadPoints {
+    std::vector<double> xyz;
+    std::vector<uint16_t> rgb;
+    bool sawNoColour = false;
+    uint64_t stopAfter = UINT64_MAX;
+    static int Record(uint64_t count, const double* xyz, const uint16_t* rgb, void* user) {
+        auto& self = *static_cast<ReadPoints*>(user);
+        self.xyz.insert(self.xyz.end(), xyz, xyz + 3 * count);
+        if (rgb != nullptr) self.rgb.insert(self.rgb.end(), rgb, rgb + 3 * count);
+        else self.sawNoColour = true;
+        return self.xyz.size() / 3 >= self.stopAfter ? 1 : 0;
+    }
+};
+
+}  // namespace
+
+// ddbtReadPoints hands over every point in file order: the coordinates of a LAS file as its records
+// and scale and offset give them, its 16-bit colours as stored, the 8-bit colours of a PLY file
+// scaled by 257, no colours for a file without; a callback that stops it makes the call CANCELED
+TEST(HostApi, ReadPointsGivesEveryPointInFileOrder) {
+    namespace syn = ddbt::copc::testing;
+    const auto dir = ApiScratch("read-points");
+    syn::SynthLas las;
+    las.format = 3;
+    syn::FillRandom(las, 700000, 11);  // several tasks of the reader
+    const std::string lasPath = (dir / "cloud.las").string();
+    ASSERT_TRUE(syn::WriteBytes(lasPath, syn::BuildLasBytes(las)));
+
+    ReadPoints got;
+    ASSERT_EQ(ddbtReadPoints(lasPath.c_str(), &ReadPoints::Record, &got), DDBT_ERR_NONE) << ddbtLastError();
+    ASSERT_EQ(got.xyz.size(), 3 * las.count);
+    ASSERT_EQ(got.rgb.size(), 3 * las.count);
+    EXPECT_FALSE(got.sawNoColour);
+    const auto layout = ddbt::copc::las::LayoutOf(las.format);
+    for (uint64_t i = 0; i < las.count; ++i) {
+        const uint8_t* r = las.records.data() + i * las.RecordSize();
+        for (size_t a = 0; a < 3; ++a) {
+            int32_t v;
+            std::memcpy(&v, r + 4 * a, 4);
+            ASSERT_EQ(got.xyz[3 * i + a], v * las.scale[a] + las.offset[a]) << "point " << i;
+            uint16_t c;
+            std::memcpy(&c, r + layout.rgb + 2 * a, 2);
+            ASSERT_EQ(got.rgb[3 * i + a], c) << "point " << i;
+        }
+    }
+
+    const std::string ply = (dir / "cloud.ply").string(), xyz = (dir / "cloud.xyz").string();
+    {
+        std::ofstream out(ply);
+        out << "ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\n"
+               "property float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\n"
+               "end_header\n1 2 3 10 20 255\n-4 5 6 0 1 2\n";
+    }
+    std::ofstream(xyz) << "1 2 3\n4 5 6\n";
+    ReadPoints p;
+    ASSERT_EQ(ddbtReadPoints(ply.c_str(), &ReadPoints::Record, &p), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_EQ(p.xyz, (std::vector<double>{1, 2, 3, -4, 5, 6}));
+    EXPECT_EQ(p.rgb, (std::vector<uint16_t>{10 * 257, 20 * 257, 255 * 257, 0, 1 * 257, 2 * 257}));
+    ReadPoints t;
+    ASSERT_EQ(ddbtReadPoints(xyz.c_str(), &ReadPoints::Record, &t), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_EQ(t.xyz, (std::vector<double>{1, 2, 3, 4, 5, 6}));
+    EXPECT_TRUE(t.sawNoColour);
+    EXPECT_TRUE(t.rgb.empty());
+
+    ReadPoints stopped;
+    stopped.stopAfter = 1;
+    EXPECT_EQ(ddbtReadPoints(lasPath.c_str(), &ReadPoints::Record, &stopped), DDBT_ERR_CANCELED);
+    EXPECT_LT(stopped.xyz.size() / 3, las.count);
+    EXPECT_EQ(ddbtReadPoints((dir / "missing.las").string().c_str(), &ReadPoints::Record, &stopped),
+              DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(ddbtReadPoints(lasPath.c_str(), nullptr, nullptr), DDBT_ERR_INVALIDARGS);
     std::filesystem::remove_all(dir);
 }
 

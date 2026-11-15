@@ -144,7 +144,8 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report` |
 | `ddbtBuildCog2(...)`, `ddbtBuildCopc2(...)` | The same builds with a progress callback (fraction and phase) |
 | `ddbtIsOptimizedCog(input, outOptimized)` | Whether a raster is an optimized COG (EPSG:3857, 256 or 512 px tiles, overviews), which a COG build encodes again without a warp |
-| `ddbtPointCloudInfo(input, outJson)` | Point count, bounds, CRS (as the file states it) and PDAL's dimension names of a LAS, LAZ, COPC, PLY, E57, XYZ or PTS point cloud |
+| `ddbtPointCloudInfo(input, readBounds, outJson)` | Point count, bounds, CRS (as the file states it) and PDAL's dimension names of a LAS, LAZ, COPC, PLY, E57, XYZ or PTS point cloud |
+| `ddbtReadPoints(input, batch, userData)` | Every point of a point cloud (coordinates and colours) in file order, in batches |
 | `ddbtMemoryTileFmt(...)` | A tile of a COG or COPC file in PNG, JPEG or WebP |
 | `ddbtMemoryTileEx2(...)`, `ddbtMemoryTileEx3(...)` | A raster tile with visualisation parameters, in PNG (Ex2) or a chosen format (Ex3) |
 | `ddbtTileInfo(input, tileSize, outJson)` | Bounds (EPSG:3857) and zoom range of a COG or COPC file |
