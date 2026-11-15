@@ -88,6 +88,20 @@ TEST(Crs, NorthingFirstFollowsTheAxisOrder) {
     EXPECT_FALSE(Crs::FromUserInput("+proj=longlat +datum=WGS84 +type=crs").NorthingFirst());
 }
 
+// The WKT GDAL reports of a dataset: WKT1 GDAL with the axes, also of a geographic CRS (which
+// PROJ's WKT1 GDAL leaves without them); WKT2 for a 3D geographic CRS
+TEST(Crs, GdalDefaultWktIsGdalsExport) {
+    using ddbt::crs::WktFlavor;
+    const std::string wgs84 = Crs::FromEpsg(4326).ToWkt(WktFlavor::GdalDefault);
+    EXPECT_EQ(wgs84.rfind("GEOGCS[\"WGS 84\"", 0), 0u) << wgs84;
+    EXPECT_NE(wgs84.find("AXIS[\"Latitude\",NORTH],AXIS[\"Longitude\",EAST]"), std::string::npos) << wgs84;
+    EXPECT_EQ(Crs::FromEpsg(4326).ToWkt(WktFlavor::Wkt1Gdal).find("AXIS["), std::string::npos);
+    const std::string mercator = Crs::FromEpsg(3857).ToWkt(WktFlavor::GdalDefault);
+    EXPECT_NE(mercator.find("AXIS[\"Easting\",EAST],AXIS[\"Northing\",NORTH]"), std::string::npos) << mercator;
+    const std::string geographic3d = Crs::FromEpsg(4979).ToWkt(WktFlavor::GdalDefault);
+    EXPECT_EQ(geographic3d.rfind("GEOGCRS[", 0), 0u) << geographic3d;
+}
+
 TEST(Crs, OfficialDefinitionPreferred) {
     // A WKT1 with AUTHORITY["EPSG","3857"] equivalent to the database: the definition becomes the
     // code (GDAL's OGR_CT_PREFER_OFFICIAL_SRS_DEF), so the analytic path and the area of use apply.

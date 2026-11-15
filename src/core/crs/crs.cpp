@@ -196,14 +196,39 @@ bool Crs::IsHorizontallyGeographic() const { return Need(d_).horizontalGeographi
 bool Crs::NorthingFirst() const { return Need(d_).northingFirst; }
 std::optional<LonLatBox> Crs::AreaOfUse() const { return Need(d_).area; }
 
+namespace {
+
+// OGRSpatialReference::exportToWkt's choice of WKT2 when no format is asked for: a derived
+// geographic CRS, and a geographic or projected CRS of 3 axes that is not compound
+bool GdalExportsWkt2(PJ_CONTEXT* ctx, PJ* pj) {
+    // A bound CRS is judged by its source CRS, as GDAL does
+    PjPtr source;
+    PJ* crs = pj;
+    if (proj_get_type(pj) == PJ_TYPE_BOUND_CRS) {
+        source.reset(proj_get_source_crs(ctx, pj));
+        if (source) crs = source.get();
+    }
+    const PJ_TYPE type = proj_get_type(crs);
+    const bool geographic = type == PJ_TYPE_GEOGRAPHIC_2D_CRS || type == PJ_TYPE_GEOGRAPHIC_3D_CRS;
+    if (geographic && proj_is_derived_crs(ctx, crs)) return true;
+    if (!geographic && type != PJ_TYPE_PROJECTED_CRS) return false;
+    const PjPtr cs(proj_crs_get_coordinate_system(ctx, crs));
+    return cs && proj_cs_get_axis_count(ctx, cs.get()) == 3;
+}
+
+}  // namespace
+
 std::string Crs::ToWkt(WktFlavor flavor) const {
     PJ_CONTEXT* ctx = detail::ThreadContext();
     const PjPtr pj = Create(ctx, Definition());
-    const PJ_WKT_TYPE t = flavor == WktFlavor::Wkt2_2019  ? PJ_WKT2_2019
-                          : flavor == WktFlavor::Wkt1Gdal ? PJ_WKT1_GDAL
-                                                          : PJ_WKT1_ESRI;
-    const char* const options[] = {"MULTILINE=NO", nullptr};
-    const char* wkt = proj_as_wkt(ctx, pj.get(), t, options);
+    PJ_WKT_TYPE t = flavor == WktFlavor::Wkt2_2019 ? PJ_WKT2_2019
+                    : flavor == WktFlavor::Wkt1Esri ? PJ_WKT1_ESRI
+                                                    : PJ_WKT1_GDAL;
+    if (flavor == WktFlavor::GdalDefault && GdalExportsWkt2(ctx, pj.get())) t = PJ_WKT2_2019;
+    const char* const plain[] = {"MULTILINE=NO", nullptr};
+    // GDAL writes the axes but in ESRI's WKT (OUTPUT_AXIS=YES)
+    const char* const withAxes[] = {"MULTILINE=NO", "OUTPUT_AXIS=YES", nullptr};
+    const char* wkt = proj_as_wkt(ctx, pj.get(), t, flavor == WktFlavor::GdalDefault ? withAxes : plain);
     if (wkt == nullptr) throw CrsError("cannot export the CRS to WKT: " + detail::LastError(ctx));
     return wkt;
 }

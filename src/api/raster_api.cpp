@@ -136,7 +136,7 @@ ddbtErr ddbtRasterInfo(const ddbtRaster* raster, char** outJson) {
             o.obj["geoTransform"] = std::move(gt);
         }
         if (s.Georef().crs)
-            o.obj["wkt"] = json::String(s.Georef().crs->ToWkt(ddbt::crs::WktFlavor::Wkt1Gdal));
+            o.obj["wkt"] = json::String(s.Georef().crs->ToWkt(ddbt::crs::WktFlavor::GdalDefault));
         json::Value bands = Array();
         for (int b = 1; b <= s.BandCount(); ++b) {
             const tl::BandMeta& m = s.Band(b);

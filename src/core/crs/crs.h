@@ -45,7 +45,10 @@ struct LonLatBox {
     friend bool operator==(const LonLatBox&, const LonLatBox&) = default;
 };
 
-enum class WktFlavor { Wkt2_2019, Wkt1Gdal, Wkt1Esri };
+/// Wkt1Gdal is PROJ's WKT1 GDAL; GdalDefault the WKT GDAL reports of a dataset (GetProjectionRef:
+/// OGRSpatialReference::exportToWkt without options), WKT1 GDAL with the axes, or WKT2 2019 for a
+/// derived geographic CRS and a 3D geographic or projected CRS that is not compound.
+enum class WktFlavor { Wkt2_2019, Wkt1Gdal, Wkt1Esri, GdalDefault };
 
 class Crs {
 public:
