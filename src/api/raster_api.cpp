@@ -4,6 +4,8 @@
 // and ddbtRasterRead (a window at a resolution, as GDAL's RasterIO reads it with nearest resampling).
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <type_traits>
 #include <memory>
 #include <span>
 #include <string>
@@ -49,6 +51,39 @@ json::Value Strings(const std::vector<std::string>& items) {
     json::Value v = Array();
     for (const auto& s : items) v.arr.push_back(json::String(s));
     return v;
+}
+
+// The samples of `type` converted as GDALCopyWords converts them: integers exactly, a double to the
+// nearest float (beyond the float range, an infinity of its sign)
+template <typename T, typename Out>
+void ConvertAs(const uint8_t* in, size_t count, Out* out) {
+    for (size_t i = 0; i < count; ++i) {
+        T v;
+        std::memcpy(&v, in + i * sizeof(T), sizeof(T));
+        if constexpr (std::is_same_v<T, double> && std::is_same_v<Out, float>) {
+            constexpr double kMax = std::numeric_limits<float>::max();
+            out[i] = v > kMax    ? std::numeric_limits<float>::infinity()
+                     : v < -kMax ? -std::numeric_limits<float>::infinity()
+                                 : static_cast<float>(v);
+        } else {
+            out[i] = static_cast<Out>(v);
+        }
+    }
+}
+
+template <typename Out>
+void ConvertSamples(ddbt::cog::tiler::PixelType type, const uint8_t* in, size_t count, Out* out) {
+    using ddbt::cog::tiler::PixelType;
+    switch (type) {
+        case PixelType::kU8: ConvertAs<uint8_t>(in, count, out); break;
+        case PixelType::kI8: ConvertAs<int8_t>(in, count, out); break;
+        case PixelType::kU16: ConvertAs<uint16_t>(in, count, out); break;
+        case PixelType::kI16: ConvertAs<int16_t>(in, count, out); break;
+        case PixelType::kU32: ConvertAs<uint32_t>(in, count, out); break;
+        case PixelType::kI32: ConvertAs<int32_t>(in, count, out); break;
+        case PixelType::kF32: ConvertAs<float>(in, count, out); break;
+        case PixelType::kF64: ConvertAs<double>(in, count, out); break;
+    }
 }
 
 }  // namespace
@@ -145,21 +180,21 @@ ddbtErr ddbtRasterRead(const ddbtRaster* raster, int x, int y, int width, int he
         const size_t pixels = static_cast<size_t>(bufWidth) * static_cast<size_t>(bufHeight);
         const size_t native = tl::PixelTypeSize(view.Type());
         const std::span<const int> bandList(bands, static_cast<size_t>(bandCount));
-        if (type == DDBT_SAMPLE_NATIVE) {
+        const tl::PixelType nativeType = view.Type();
+        const bool asStored = type == DDBT_SAMPLE_NATIVE ||
+                              (type == DDBT_SAMPLE_FLOAT32 && nativeType == tl::PixelType::kF32) ||
+                              (type == DDBT_SAMPLE_FLOAT64 && nativeType == tl::PixelType::kF64);
+        if (asStored) {
+            // The samples go where they belong, with no copy
             tl::GatherBands(view, plan, bandList, static_cast<uint8_t*>(out), pixels * native);
         } else {
             std::vector<uint8_t> samples(pixels * native * static_cast<size_t>(bandCount));
             tl::GatherBands(view, plan, bandList, samples.data(), pixels * native);
             const size_t count = pixels * static_cast<size_t>(bandCount);
-            if (type == DDBT_SAMPLE_FLOAT32) {
-                float* f = static_cast<float*>(out);
-                for (size_t i = 0; i < count; ++i)
-                    f[i] = static_cast<float>(tl::SampleToDouble(view.Type(), samples.data() + i * native));
-            } else {
-                double* d = static_cast<double*>(out);
-                for (size_t i = 0; i < count; ++i)
-                    d[i] = tl::SampleToDouble(view.Type(), samples.data() + i * native);
-            }
+            if (type == DDBT_SAMPLE_FLOAT32)
+                ConvertSamples(nativeType, samples.data(), count, static_cast<float*>(out));
+            else
+                ConvertSamples(nativeType, samples.data(), count, static_cast<double*>(out));
         }
         if (mask != nullptr) {
             if (view.HasDatasetMask()) tl::GatherDatasetMask(view, plan, mask);
