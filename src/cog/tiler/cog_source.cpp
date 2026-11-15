@@ -3,12 +3,14 @@
 
 #include <algorithm>
 #include <climits>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -286,6 +288,18 @@ std::shared_ptr<const CogSource> ShareCanonical(const std::string& canon, const 
 }
 
 std::atomic<uint64_t> g_useClock{0};
+
+// The NoData value GDAL's GTiff driver reports for the GDAL_NODATA of a band of `type`: the value of a
+// 32-bit float band is snapped to the float maximum when it is within 1e-10 of it
+// (GDALAdjustNoDataCloseToFloatMax), then rounded to a float
+std::optional<double> GdalNodataOf(std::optional<double> nodata, PixelType type) {
+    if (!nodata || type != PixelType::kF32) return nodata;
+    constexpr double kMaxFloat = std::numeric_limits<float>::max();
+    double v = *nodata;
+    if (std::fabs(v - -kMaxFloat) < 1e-10 * kMaxFloat) v = -kMaxFloat;
+    else if (std::fabs(v - kMaxFloat) < 1e-10 * kMaxFloat) v = kMaxFloat;
+    return static_cast<double>(static_cast<float>(v));
+}
 
 }  // namespace
 
@@ -584,7 +598,7 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
             }
         }
         bands_[static_cast<size_t>(b - 1)].interp = ci;
-        bands_[static_cast<size_t>(b - 1)].nodata = main.noData;
+        bands_[static_cast<size_t>(b - 1)].nodata = GdalNodataOf(main.noData, type_);
     }
 
     // GDAL_METADATA: band roles (scale, offset, unit type, description, colour interpretation),
