@@ -547,6 +547,30 @@ const GeoKeys& WebMercatorGeoKeys() {
     return keys;
 }
 
+Expected<GeoKeys> GeoKeysOfFile(const std::string& path) {
+    auto reader = tiff::TiffReader::Open(path);
+    if (!reader.ok()) return reader.status();
+    const tiff::TiffReader& r = **reader;
+    const tiff::IfdInfo& ifd = r.Ifd(r.MainImage());
+    GeoKeys keys;
+    if (const tiff::TagEntry* dir = ifd.FindTag(tiff::tag::kGeoKeyDirectory)) {
+        auto values = r.ReadTagUInts(*dir, 65536 * 4 + 4);
+        if (!values.ok()) return values.status();
+        for (const uint64_t v : *values) keys.directory.push_back(static_cast<uint16_t>(v));
+    }
+    if (const tiff::TagEntry* doubles = ifd.FindTag(tiff::tag::kGeoDoubleParams)) {
+        auto values = r.ReadTagDoubles(*doubles, 65536);
+        if (!values.ok()) return values.status();
+        keys.doubles = std::move(*values);
+    }
+    if (const tiff::TagEntry* ascii = ifd.FindTag(tiff::tag::kGeoAsciiParams)) {
+        auto text = r.ReadTagString(*ascii, 1 << 20);
+        if (!text.ok()) return text.status();
+        keys.ascii = std::move(*text);
+    }
+    return keys;
+}
+
 Expected<GeoKeys> GeoKeysOf(const crs::Crs& c) {
     std::optional<int> code;
     try {

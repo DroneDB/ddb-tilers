@@ -150,6 +150,7 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | `ddbtRasterInfo(raster, outJson)` | Size, type, blocks, overviews, mask kind, georeferencing and band metadata, as GDAL reports them |
 | `ddbtRasterRead(raster, window, buffer size, bands, type, out, mask)` | A window at a resolution, as GDAL's RasterIO reads it with nearest resampling, with the dataset mask |
 | `ddbtRasterReadLevel(raster, level, window, bands, type, out, mask)` | A window of one level (full resolution or an overview), pixel for pixel, with its mask |
+| `ddbtWriteRaster(output, options, fill, ...)` | A tiled GeoTIFF of 8-bit bands the host computes, with average overviews |
 | `ddbtMemoryTileFmt(...)` | A tile of a COG or COPC file in PNG, JPEG or WebP |
 | `ddbtMemoryTileEx2(...)`, `ddbtMemoryTileEx3(...)` | A raster tile with visualisation parameters, in PNG (Ex2) or a chosen format (Ex3) |
 | `ddbtTileInfo(input, tileSize, outJson)` | Bounds (EPSG:3857) and zoom range of a COG or COPC file |

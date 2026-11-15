@@ -28,6 +28,14 @@ enum class Transparency : uint8_t {
 
 const char* TransparencyName(Transparency t) noexcept;
 
+/// How the overviews are resampled from the level above them (GDAL's resampling names).
+enum class OverviewResampling : uint8_t {
+    kCubic,    // the COG driver's default
+    kNearest,  // the COG driver's for palette and complex data
+    kAverage,  // GDALBuildOverviews AVERAGE, 8-bit samples (pyramid/average.h)
+};
+const char* OverviewResamplingName(OverviewResampling r) noexcept;
+
 struct Plan {
     bool ownGrid = false;
     uint32_t width = 0, height = 0;
@@ -52,7 +60,7 @@ struct Plan {
     std::vector<uint16_t> extraSamples;
     std::vector<uint16_t> colorMap;  // the ColorMap of a palette output (TIFF's R, G, B values)
     bool complex = false;            // complex samples: `bands` counts both components of each
-    bool nearestOverviews = false;   // the COG driver's NEAREST (palette), else CUBIC
+    OverviewResampling resampling = OverviewResampling::kCubic;
     std::string gdalMetadata;
 
     bool MaskOut() const noexcept { return transparency == Transparency::kMask; }

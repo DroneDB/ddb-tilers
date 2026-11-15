@@ -63,6 +63,10 @@ const GeoKeys& WebMercatorGeoKeys();
 /// or projected CRS (GeographicTypeGeoKey, ProjectedCSTypeGeoKey); Unsupported without a code.
 Expected<GeoKeys> GeoKeysOf(const crs::Crs& crs);
 
+/// The GeoKeys of the main image of a GeoTIFF as they are (none when it has no GeoKeyDirectory):
+/// an output in the CRS of that file.
+Expected<GeoKeys> GeoKeysOfFile(const std::string& path);
+
 struct ImageSpec {
     uint32_t width = 0, height = 0;  // full resolution
     uint32_t blockSize = 512;        // square tiles

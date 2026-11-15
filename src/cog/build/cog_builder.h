@@ -24,6 +24,7 @@
 // rows they read exist.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -103,6 +104,34 @@ struct BuildReport {
     uint64_t sourceBlocksDecoded = 0;
     uint64_t peakSourceCacheBytes = 0;
 };
+
+/// A raster whose 8-bit pixels a host computes, written as GDAL's GTiff driver writes a raster
+/// created band by band and given its overviews by GDALBuildOverviews AVERAGE (libddb's exports):
+/// its own grid and CRS, tiled, the overviews each from the level above.
+struct HostRaster {
+    uint32_t width = 0, height = 0;
+    /// GDAL's colour interpretation of each band ("Red", "Green", "Blue", "Gray", "Alpha",
+    /// "Undefined"...): the photometric and ExtraSamples GTiff writes for them; an alpha band masks
+    /// the others in the overviews by GDAL's rule (the last of 2 or 4 bands).
+    std::vector<std::string> colorInterp;
+    uint32_t blockSize = 256;  // square tiles, a multiple of 16
+    encode::Codec codec = encode::Codec::kDeflate;
+    int predictor = 2;
+    int level = 0;  // DEFLATE / ZSTD level (0: GDAL's default)
+    std::optional<uint8_t> nodata;
+    /// GDALBuildOverviews factors (2, 4, 8...): level i is (width + f - 1) / f x (height + f - 1) / f.
+    std::vector<uint32_t> overviewFactors;
+    std::array<double, 6> geoTransform{};
+    bool georeferenced = false;
+    writer::GeoKeys geoKeys;
+    /// Writes the window (x, y, w, h) of every band, pixel-interleaved, rows `stride` bytes apart
+    /// into `out`. Called one at a time, in no particular order; throws to stop the write.
+    std::function<void(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t* out, size_t stride)> fill;
+};
+
+/// Writes `output` (atomically, nothing left behind on failure) from `raster`. options: progress,
+/// memoryBudget and writer; no statistics sidecar is written.
+Status WriteHostRaster(const HostRaster& raster, const std::string& output, const BuildOptions& options);
 
 /// The source a build reads: `input` as OpenRasterSource opens it, georeferenced as options.photo
 /// says.

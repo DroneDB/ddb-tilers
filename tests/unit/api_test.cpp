@@ -977,6 +977,89 @@ TEST(HostApi, RasterReadLevelReadsTheLevelPixelForPixel) {
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+// The RGBA of pixel (x, y) the test writes: the alpha 0 on a diagonal band
+uint8_t WrittenSample(int band, int x, int y) {
+    if (band == 3) return (x + y) % 7 == 0 ? 0 : 255;
+    return static_cast<uint8_t>((x * 3 + y * 5 + band * 40) % 256);
+}
+
+int FillRgba(void*, int x, int y, int w, int h, uint8_t* out, size_t stride) {
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+            for (int b = 0; b < 4; ++b) out[static_cast<size_t>(r) * stride + static_cast<size_t>(c) * 4 + b] =
+                WrittenSample(b, x + c, y + r);
+    return 0;
+}
+
+int FillFails(void*, int, int, int, int, uint8_t*, size_t) { return 1; }
+
+}  // namespace
+
+// ddbtWriteRaster writes the pixels the host fills, an RGB + alpha GeoTIFF with the overviews of
+// GDALBuildOverviews AVERAGE (the alpha masks the colours), in the CRS of another file
+TEST(HostApi, WriteRasterWritesTheHostsPixelsAndTheirAverageOverviews) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("write-raster");
+    const std::string crsFile = (dir / "crs.tif").string();
+    syn::WriteSynth(crsFile, syn::Spec(64, 1, 1));
+    const std::string out = (dir / "out.tif").string();
+    const std::string options = R"({"width": 300, "height": 201, "colorInterp": ["Red", "Green", "Blue", "Alpha"],
+        "blockSize": 64, "overviewFactors": [2, 4], "geoTransform": [1000, 2, 0, 5000, 0, -2],
+        "geoKeysFrom": ")" + crsFile + R"("})";
+    ASSERT_EQ(ddbtWriteRaster(out.c_str(), options.c_str(), FillRgba, nullptr, nullptr, nullptr), DDBT_ERR_NONE)
+        << ddbtLastError();
+
+    OpenRaster r(out);
+    ASSERT_NE(r.raster, nullptr);
+    const auto info = r.Info();
+    EXPECT_EQ(info.Find("mask")->str, "alpha");
+    ASSERT_EQ(info.Find("overviews")->arr.size(), 2u);
+    EXPECT_EQ(info.Find("overviews")->arr[0].arr[0].u, 150u);
+    EXPECT_EQ(info.Find("overviews")->arr[0].arr[1].u, 101u);  // ceil(201 / 2)
+    EXPECT_EQ(info.Find("overviews")->arr[1].arr[1].u, 51u);
+    EXPECT_EQ(info.Find("geoTransform")->arr[0].num, 1000.0);
+    EXPECT_NE(info.Find("wkt")->str.find("Pseudo-Mercator"), std::string::npos);
+
+    const int bands[4] = {1, 2, 3, 4};
+    std::vector<uint8_t> full(300 * 201 * 4);
+    ASSERT_EQ(ddbtRasterRead(r.raster, 0, 0, 300, 201, 300, 201, bands, 4, DDBT_SAMPLE_NATIVE, full.data(), nullptr),
+              DDBT_ERR_NONE);
+    for (int b = 0; b < 4; ++b)
+        for (int y = 0; y < 201; ++y)
+            for (int x = 0; x < 300; ++x)
+                ASSERT_EQ(full[static_cast<size_t>(b) * 300 * 201 + static_cast<size_t>(y) * 300 + x],
+                          WrittenSample(b, x, y)) << b << " " << x << "," << y;
+
+    // Pixel (3, 4) of the first overview: the source 2 x 2 at (6, 8), whose (6, 8) is transparent:
+    // the samples of the other three averaged, the alpha's too (255, since one of them is not 0)
+    std::vector<uint8_t> level(150 * 101 * 4);
+    ASSERT_EQ(ddbtRasterReadLevel(r.raster, 1, 0, 0, 150, 101, bands, 4, DDBT_SAMPLE_NATIVE, level.data(), nullptr),
+              DDBT_ERR_NONE) << ddbtLastError();
+    const auto at = [&](int b, int x, int y) { return level[static_cast<size_t>(b) * 150 * 101 + static_cast<size_t>(y) * 150 + x]; };
+    for (int b = 0; b < 4; ++b) {
+        double total = 0;
+        int counted = 0;
+        for (int y = 8; y < 10; ++y)
+            for (int x = 6; x < 8; ++x)
+                if (WrittenSample(3, x, y) != 0) {
+                    total += WrittenSample(b, x, y);
+                    ++counted;
+                }
+        ASSERT_EQ(counted, 3);
+        EXPECT_EQ(at(b, 3, 4), static_cast<uint8_t>(total / counted + 0.5)) << "band " << b + 1;
+    }
+    EXPECT_EQ(at(3, 3, 4), 255);
+
+    EXPECT_EQ(ddbtWriteRaster((dir / "failed.tif").string().c_str(), options.c_str(), FillFails, nullptr, nullptr, nullptr),
+              DDBT_ERR_EXCEPTION);
+    EXPECT_FALSE(std::filesystem::exists(dir / "failed.tif")) << "nothing is left of a write the host stopped";
+    EXPECT_EQ(ddbtWriteRaster((dir / "bad.tif").string().c_str(), R"({"width": 10})", FillRgba, nullptr, nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
 // A raster without georeferencing is opened for reading (a host reads the pixels of a photo copied to
 // a GeoTIFF), and the tiler still refuses it
 TEST(HostApi, RasterWithoutGeoreferencingIsReadNotTiled) {

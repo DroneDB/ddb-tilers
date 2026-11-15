@@ -288,6 +288,28 @@ DDBT_API ddbtErr ddbtRasterReadLevel(const ddbtRaster *raster, int level, int x,
                                      const int *bands, int bandCount, ddbtSampleType type, void *out,
                                      uint8_t *mask);
 
+/** Fills a window of the raster ddbtWriteRaster writes: the 8-bit samples of every band of the
+ * `width` x `height` pixels at (x, y), interleaved, each row `stride` bytes after the one before.
+ * Called one window at a time. Returns 0 to go on, anything else to stop the write (which then
+ * fails with DDBT_ERR_EXCEPTION). */
+typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int height, uint8_t *out,
+                                size_t stride);
+
+/** Writes `outputPath`, a tiled GeoTIFF (the COG layout) of 8-bit bands whose pixels the host
+ * computes, as GDAL's GTiff driver writes a raster created band by band (the photometric and
+ * ExtraSamples of the colour interpretations) and given its overviews by GDALBuildOverviews
+ * AVERAGE (each level from the one above; an alpha band masks every band, itself included, by GDAL's
+ * rule for the last of 2 or 4 bands, a nodata value every band). The output appears whole (temporary + rename), nothing is left on a
+ * failure. optionsJson: {"width", "height", "colorInterp" (GDAL's names, one per band: "Red",
+ * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "blockSize" (256; a multiple of 16), "codec"
+ * ("deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2; 2), "level" (DEFLATE / ZSTD level,
+ * 0: GDAL's default), "nodata" (0..255), "overviewFactors" ([2, 4, ...]: level i is
+ * ceil(width / f) x ceil(height / f)), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose
+ * CRS, its GeoKeys as they are, the output takes), "memoryMb" (pipeline budget, 2048)}.
+ * progress: phases "overviews", "compressing". */
+DDBT_API ddbtErr ddbtWriteRaster(const char *outputPath, const char *optionsJson, ddbtFillCallback fill,
+                                 void *fillUserData, ddbtProgressCallback progress, void *progressUserData);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

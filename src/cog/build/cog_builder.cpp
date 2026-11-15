@@ -18,12 +18,24 @@
 #include "cog/build/source.h"
 #include "cog/build/stats.h"
 #include "cog/codecs/jpeg.h"
+#include "cog/pyramid/average.h"
 #include "cog/pyramid/overview.h"
 #include "cog/warp/warp_producer.h"
 #include "core/exec/parallel_for.h"
 #include "core/exec/task_group.h"
 
 namespace ddbt::cog::build {
+
+const char* OverviewResamplingName(OverviewResampling r) noexcept {
+    switch (r) {
+        case OverviewResampling::kNearest:
+            return "NEAREST";
+        case OverviewResampling::kAverage:
+            return "AVERAGE";
+        default:
+            return "CUBIC";
+    }
+}
 
 const char* TransparencyName(Transparency t) noexcept {
     switch (t) {
@@ -66,7 +78,7 @@ void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table) {
     p.colorMap.assign(3 * n, 0);
     for (size_t i = 0; i < std::min(n, table.size()); ++i)
         for (size_t c = 0; c < 3; ++c) p.colorMap[c * n + i] = static_cast<uint16_t>(table[i][c] * 257u);
-    p.nearestOverviews = true;
+    p.resampling = OverviewResampling::kNearest;
 }
 
 void SetComplex(Plan& p, const std::vector<std::string>& interps) {
@@ -75,7 +87,7 @@ void SetComplex(Plan& p, const std::vector<std::string>& interps) {
     SetPhotometric(p, interps);
     p.bands = values;
     p.complex = true;
-    p.nearestOverviews = true;
+    p.resampling = OverviewResampling::kNearest;
     p.predictor = IsFloatType(p.type) ? 1 : 2;
 }
 
@@ -106,7 +118,7 @@ std::string OutputMetadata(const std::string& src, const Plan& plan, bool dropSt
     }
     if (!plan.overviews.empty())
         items += std::string("  <Item name=\"OVERVIEW_RESAMPLING\" domain=\"IMAGE_STRUCTURE\">") +
-                 (plan.nearestOverviews ? "NEAREST" : "CUBIC") + "</Item>\n";
+                 OverviewResamplingName(plan.resampling) + "</Item>\n";
     return items.empty() ? std::string() : "<GDALMetadata>\n" + items + "</GDALMetadata>\n";
 }
 
@@ -218,6 +230,71 @@ private:
     const Plan& plan_;
     std::atomic<uint64_t> decoded_{0};
 };
+
+// ---------------------------------------------------------------------------------------------
+// A raster a host computes: tile (col, row) is the window the host fills.
+
+class HostProducer final : public TileProducer {
+public:
+    explicit HostProducer(const HostRaster& raster) : raster_(raster) {}
+
+    void Produce(uint32_t col, Strip& s) override {
+        const uint32_t x0 = col * raster_.blockSize;
+        const uint32_t vw = std::min(raster_.blockSize, s.width - x0);
+        // The host fills one window at a time
+        std::lock_guard<std::mutex> lock(mutex_);
+        raster_.fill(x0, s.y0, vw, s.rows, s.Pixel(x0, 0), s.Stride());
+        filled_.fetch_add(1, std::memory_order_relaxed);
+    }
+    uint64_t BlocksDecoded() const override { return filled_.load(); }
+
+private:
+    const HostRaster& raster_;
+    std::mutex mutex_;
+    std::atomic<uint64_t> filled_{0};
+};
+
+Expected<Plan> HostPlan(const HostRaster& r) {
+    const int bands = static_cast<int>(r.colorInterp.size());
+    if (r.width == 0 || r.height == 0 || bands == 0)
+        return Status(StatusCode::kInvalidArgument, "A raster needs a size and bands");
+    if (r.blockSize < 16 || r.blockSize % 16 != 0)
+        return Status(StatusCode::kInvalidArgument, "The block size must be a multiple of 16");
+    if (r.codec == Codec::kJpeg) return Status(StatusCode::kInvalidArgument, "A host raster is written losslessly");
+    if (!r.fill) return Status(StatusCode::kInvalidArgument, "A host raster needs a fill function");
+    Plan p;
+    p.ownGrid = true;
+    p.width = r.width;
+    p.height = r.height;
+    p.blockSize = r.blockSize;
+    p.geoTransform = r.geoTransform;
+    uint32_t previous = 1;
+    for (const uint32_t f : r.overviewFactors) {
+        if (f <= previous) return Status(StatusCode::kInvalidArgument, "The overview factors must grow from 2");
+        previous = f;
+        // GDALBuildOverviews of a GTiff: DIV_ROUND_UP of the full size
+        p.overviews.emplace_back((r.width + f - 1) / f, (r.height + f - 1) / f);
+    }
+    p.bands = bands;
+    p.type = tiff::SampleType::kU8;
+    SetPhotometric(p, r.colorInterp);
+    const auto alpha = std::find(r.colorInterp.begin(), r.colorInterp.end(), "Alpha");
+    if (r.nodata) {
+        p.transparency = Transparency::kNoData;
+        p.nodata = *r.nodata;
+        p.nodataText = std::to_string(*r.nodata);
+    } else if (alpha != r.colorInterp.end()) {
+        p.transparency = Transparency::kAlpha;
+        p.alphaBand = static_cast<int>(alpha - r.colorInterp.begin());
+        p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
+    }
+    p.codec = r.codec;
+    p.predictor = r.predictor;
+    p.level = r.level;
+    p.resampling = OverviewResampling::kAverage;
+    p.gdalMetadata = OutputMetadata(std::string(), p, false);
+    return p;
+}
 
 // ---------------------------------------------------------------------------------------------
 // The pipeline
@@ -444,8 +521,13 @@ private:
 
     // Source rows [first, end) destination rows [d0, d1) read (the cubic taps, or the nearest row).
     std::pair<int, int> TapRange(uint32_t srcSize, uint32_t dstSize, int d0, int d1) const {
-        if (plan_.nearestOverviews)
+        if (plan_.resampling == OverviewResampling::kNearest)
             return {NearestSource(srcSize, dstSize, d0), NearestSource(srcSize, dstSize, d1 - 1) + 1};
+        if (plan_.resampling == OverviewResampling::kAverage) {
+            const pyramid::AverageTaps t =
+                pyramid::AverageAxis(static_cast<int>(srcSize), static_cast<int>(dstSize), d0, d1);
+            return {t.SrcBegin(), t.SrcEnd()};
+        }
         const pyramid::Taps t = pyramid::CubicTaps(static_cast<int>(srcSize), static_cast<int>(dstSize), d0, d1);
         return {t.SrcBegin(), t.SrcEnd()};
     }
@@ -475,9 +557,14 @@ private:
             Strip& child = *P.child;
             const uint32_t chunkEnd = std::min(yEnd, child.y0 + child.rows);
             const int d0 = static_cast<int>(P.childNextY), d1 = static_cast<int>(chunkEnd);
-            if (plan_.nearestOverviews) {
+            if (plan_.resampling == OverviewResampling::kNearest) {
                 exec::ParallelFor(0, C.blocksAcross, 1,
                                   [&](size_t c) { NearestTile(P, child, static_cast<uint32_t>(c), d0, d1); });
+            } else if (plan_.resampling == OverviewResampling::kAverage) {
+                const pyramid::AverageTaps rowTaps =
+                    pyramid::AverageAxis(static_cast<int>(P.height), static_cast<int>(C.height), d0, d1);
+                exec::ParallelFor(0, C.blocksAcross, 1,
+                                  [&](size_t c) { AverageTile(P, child, static_cast<uint32_t>(c), rowTaps, d0, d1); });
             } else {
                 const pyramid::Taps rowTaps =
                     pyramid::CubicTaps(static_cast<int>(P.height), static_cast<int>(C.height), d0, d1);
@@ -563,6 +650,63 @@ private:
         }
     }
 
+    // The window [cb, ce) x [rb, re) of level k (its pixels, and its mask when the strips have one)
+    void CopyWindow(const Level& P, int cb, int ce, int rb, int re, std::vector<uint8_t>& win,
+                    std::vector<uint8_t>& wmask) const {
+        const size_t sww = static_cast<size_t>(ce - cb), swh = static_cast<size_t>(re - rb);
+        const size_t pb = plan_.PixelBytes();
+        const bool hasMask = plan_.StripMask();
+        win.resize(sww * swh * pb);
+        if (hasMask) wmask.resize(sww * swh);
+        for (int y = rb; y < re; ++y) {
+            std::memcpy(win.data() + static_cast<size_t>(y - rb) * sww * pb,
+                        RowOf(P, static_cast<uint32_t>(y)) + static_cast<size_t>(cb) * pb, sww * pb);
+            if (hasMask)
+                std::memcpy(wmask.data() + static_cast<size_t>(y - rb) * sww, MaskRowOf(P, static_cast<uint32_t>(y)) + cb,
+                            sww);
+        }
+    }
+
+    // Rows [d0, d1) of tile `col` of level k + 1 by GDAL's AVERAGE (8-bit) of a GTiff: every band
+    // with the alpha as its mask (the alpha band too), or with its nodata, or unmasked; the mask of
+    // the strip is the alpha of the level (AlphaToMask, at the end of the strip).
+    void AverageTile(const Level& P, Strip& child, uint32_t col, const pyramid::AverageTaps& rowTaps, int d0, int d1) {
+        const uint32_t B = plan_.blockSize;
+        const int x0 = static_cast<int>(col * B);
+        const int x1 = static_cast<int>(std::min((col + 1) * B, child.width));
+        if (plan_.MaskOut()) throw std::logic_error("AVERAGE overviews of a 1-bit mask output are not supported");
+        const pyramid::AverageTaps colTaps =
+            pyramid::AverageAxis(static_cast<int>(P.width), static_cast<int>(child.width), x0, x1);
+        const int cb = colTaps.SrcBegin(), ce = colTaps.SrcEnd();
+        const int rb = rowTaps.SrcBegin(), re = rowTaps.SrcEnd();
+        thread_local std::vector<uint8_t> win, wmask;
+        CopyWindow(P, cb, ce, rb, re, win, wmask);
+        const size_t pb = plan_.PixelBytes();
+        const int dw = x1 - x0, dh = d1 - d0;
+        uint8_t* dst = child.Pixel(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0);
+        pyramid::DownsampleSpec spec;
+        spec.type = plan_.type;
+        spec.bands = plan_.bands;
+        spec.hasNoData = plan_.nodata.has_value();
+        spec.noData = plan_.nodata.value_or(0);
+        const size_t srcStride = static_cast<size_t>(ce - cb) * pb;
+        if (plan_.transparency == Transparency::kNoData) {
+            spec.mask = pyramid::MaskMode::kNoData;
+            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, nullptr, colTaps, rowTaps, dw, dh,
+                             dst, child.Stride());
+        } else if (plan_.transparency == Transparency::kAlpha && plan_.StripMask()) {
+            // Every band with the alpha as its mask, the alpha band too: the mask band of a GTiff alpha
+            // band is the alpha band itself, so its overview is 255 wherever a pixel it covers is not 0
+            spec.mask = pyramid::MaskMode::kExternal;
+            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, wmask.data(), colTaps, rowTaps, dw,
+                             dh, dst, child.Stride());
+        } else {
+            spec.mask = pyramid::MaskMode::kNone;
+            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, nullptr, colTaps, rowTaps, dw, dh,
+                             dst, child.Stride());
+        }
+    }
+
     // Rows [d0, d1) of tile `col` of level k + 1 from the window of level k.
     void DownsampleTile(const Level& P, Strip& child, uint32_t col, const pyramid::Taps& rowTaps, int d0, int d1) {
         const uint32_t B = plan_.blockSize;
@@ -584,16 +728,8 @@ private:
         const size_t sww = static_cast<size_t>(ww), swh = static_cast<size_t>(wh);
         const size_t pb = plan_.PixelBytes();
         thread_local std::vector<uint8_t> win, wmask, ones;
-        win.resize(sww * swh * pb);
         const bool hasMask = plan_.StripMask();
-        if (hasMask) wmask.resize(sww * swh);
-        for (int y = rb; y < re; ++y) {
-            std::memcpy(win.data() + static_cast<size_t>(y - rb) * sww * pb,
-                        RowOf(P, static_cast<uint32_t>(y)) + static_cast<size_t>(cb) * pb, sww * pb);
-            if (hasMask)
-                std::memcpy(wmask.data() + static_cast<size_t>(y - rb) * sww, MaskRowOf(P, static_cast<uint32_t>(y)) + cb,
-                            sww);
-        }
+        CopyWindow(P, cb, ce, rb, re, win, wmask);
         const int dw = x1 - x0, dh = d1 - d0;
         uint8_t* dst = child.Pixel(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0);
         uint8_t* dstMask = hasMask ? child.MaskAt(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0) : nullptr;
@@ -844,6 +980,46 @@ warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
         }
     }
     return ws;
+}
+
+Status WriteHostRaster(const HostRaster& raster, const std::string& output, const BuildOptions& options) {
+    auto p = HostPlan(raster);
+    if (!p.ok()) return p.status();
+    const Plan plan = std::move(*p);
+    BuildOptions o = options;
+    o.statistics = false;
+
+    writer::ImageSpec spec;
+    spec.width = plan.width;
+    spec.height = plan.height;
+    spec.blockSize = plan.blockSize;
+    spec.samples = static_cast<uint16_t>(plan.bands);
+    spec.type = plan.type;
+    spec.photometric = plan.photometric;
+    spec.extraSamples = plan.extraSamples;
+    spec.codec = plan.codec;
+    spec.predictor = plan.predictor;
+    spec.noDataText = plan.nodataText;
+    spec.gdalMetadata = plan.gdalMetadata;
+    spec.geoTransform = plan.geoTransform;
+    spec.georeferenced = raster.georeferenced;
+    spec.geoKeys = raster.geoKeys;
+    spec.overviews = plan.overviews;
+    auto w = writer::CogWriter::Create(output, spec, o.writer);
+    if (!w.ok()) return w.status();
+    writer::CogWriter& cw = **w;
+
+    HostProducer producer(raster);
+    Pipeline pipe(plan, producer, cw, o);
+    Status s = pipe.Run();
+    if (!s.ok()) {
+        cw.Abort();
+        return s;
+    }
+    s = cw.Finish();
+    if (!s.ok()) return s;
+    if (o.progress) o.progress(1.0, "compressing");
+    return Status::Ok();
 }
 
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options, BuildReport* report) {
