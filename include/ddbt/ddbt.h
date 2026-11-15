@@ -204,6 +204,14 @@ DDBT_API ddbtErr ddbtBuildCog(const char *inputPath, const char *outputPath, con
 DDBT_API ddbtErr ddbtBuildCog2(const char *inputPath, const char *outputPath, const char *optionsJson,
                                ddbtProgressCallback progress, void *userData);
 
+/** Whether a raster is already an optimized COG, which a COG build encodes again on its own grid
+ * without a warp: in EPSG:3857, tiled in square blocks of 256 or 512 pixels, with overviews. A
+ * raster georeferenced by ground control points, a JPEG 2000 file or a photo is not.
+ * Codes: DDBT_ERR_INVALIDARGS for a bad argument, DDBT_ERR_NOTFOUND, DDBT_ERR_EXCEPTION for a file
+ * that cannot be read (as ddbtBuildCog: one that no reader recognises, a damaged one).
+ * @param outOptimized receives the answer (false on an error) */
+DDBT_API ddbtErr ddbtIsOptimizedCog(const char *inputPath, bool *outOptimized);
+
 /** Build a Cloud Optimized Point Cloud (COPC).
  * @param inputPath source point cloud
  * @param outputPath destination file

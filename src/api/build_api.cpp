@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MPL-2.0
-// The COG build exports of the C API: ddbtBuildCog and ddbtBuildCog2 (with progress), DroneDB's
-// buildCog contract (cog.cpp).
+// The COG build exports of the C API: ddbtBuildCog, ddbtBuildCog2 (with progress) and ddbtIsOptimizedCog,
+// DroneDB's buildCog contract (cog.cpp).
 //
 // optionsJson (all optional): {"codec": "lzw" | "deflate" | "zstd" (non-JPEG outputs),
 // "level": n (DEFLATE / ZSTD level), "jpegQuality": 1..100 (warped JPEG outputs; default
@@ -21,6 +21,7 @@
 #include <string>
 
 #include "cog/build/cog_builder.h"
+#include "cog/build/source.h"
 #include "cog/tiler/json_lite.h"
 #include "api/api_common.h"
 #include "api/build_progress.h"
@@ -164,4 +165,19 @@ extern "C" ddbtErr ddbtBuildCog2(const char* inputPath, const char* outputPath, 
 
 extern "C" ddbtErr ddbtBuildCog(const char* inputPath, const char* outputPath, const char* optionsJson) {
     return ddbtBuildCog2(inputPath, outputPath, optionsJson, nullptr, nullptr);
+}
+
+extern "C" ddbtErr ddbtIsOptimizedCog(const char* inputPath, bool* outOptimized) {
+    if (outOptimized == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid outOptimized: NULL");
+    return ddbt::api::GuardedCall([&]() -> ddbtErr {
+        *outOptimized = false;
+        if (IsEmpty(inputPath)) return Fail(DDBT_ERR_INVALIDARGS, "Invalid inputPath: empty");
+        const std::string in(inputPath);
+        if (!ddbt::api::PathExists(in)) return Fail(DDBT_ERR_NOTFOUND, in + " does not exist");
+        auto source = ddbt::cog::build::OpenRasterSource(in);
+        if (!source.ok())
+            return Fail(ddbt::api::CodeOf(source.status()), std::string(source.status().message()));
+        *outOptimized = (*source)->IsOptimizedCog();
+        return DDBT_ERR_NONE;
+    });
 }

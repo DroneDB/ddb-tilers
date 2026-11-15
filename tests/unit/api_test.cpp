@@ -599,6 +599,39 @@ TEST(HostApi, BuildCog2NamesThePhaseOfTheFractionItReports) {
     std::filesystem::remove_all(dir);
 }
 
+// ddbtIsOptimizedCog: a COG the builder wrote (EPSG:3857, 256 px tiles, overviews) is optimized and is
+// encoded again on its own grid; the same raster without overviews, or in strips, is not.
+TEST(HostApi, IsOptimizedCogIsTheRuleOfTheBuilder) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("is-optimized-cog");
+    const std::string tiled = (dir / "tiled.tif").string(), stripped = (dir / "stripped.tif").string();
+    const std::string cog = (dir / "cog.tif").string(), text = (dir / "text.tif").string();
+    syn::SynthSpec spec = syn::Spec(1024, 3, 1);
+    spec.tile = 256;
+    syn::WriteSynth(tiled, spec);
+    spec.tile = 0;
+    syn::WriteSynth(stripped, spec);
+    ASSERT_EQ(ddbtBuildCog(tiled.c_str(), cog.c_str(), nullptr), DDBT_ERR_NONE) << ddbtLastError();
+    std::ofstream(text) << "not a raster";
+
+    bool optimized = true;
+    ASSERT_EQ(ddbtIsOptimizedCog(cog.c_str(), &optimized), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_TRUE(optimized);
+    ASSERT_EQ(ddbtIsOptimizedCog(tiled.c_str(), &optimized), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_FALSE(optimized) << "no overviews";
+    ASSERT_EQ(ddbtIsOptimizedCog(stripped.c_str(), &optimized), DDBT_ERR_NONE) << ddbtLastError();
+    EXPECT_FALSE(optimized) << "in strips";
+
+    optimized = true;
+    EXPECT_EQ(ddbtIsOptimizedCog(text.c_str(), &optimized), DDBT_ERR_EXCEPTION) << ddbtLastError();
+    EXPECT_FALSE(optimized);
+    EXPECT_EQ(ddbtIsOptimizedCog((dir / "missing.tif").string().c_str(), &optimized), DDBT_ERR_NOTFOUND);
+    EXPECT_EQ(ddbtIsOptimizedCog("", &optimized), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtIsOptimizedCog(nullptr, &optimized), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtIsOptimizedCog(cog.c_str(), nullptr), DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
 TEST(HostApi, BuildCog2ReportsProgressToOne) {
     namespace syn = ddbt::cog::tiler::testing;
     const auto dir = ApiScratch("cog2");
