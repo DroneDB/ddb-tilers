@@ -59,6 +59,10 @@ enum class SampleType : uint8_t {
 };
 
 std::string_view SampleTypeName(SampleType t) noexcept;
+/// GDALDataTypeUnion of two integer or floating-point types: a type that holds the values of both (a
+/// float with an integer: max(its bits, twice the integer's); a signed with an unsigned: twice the
+/// unsigned's bits unless the signed one is wider), the smallest of its kind (kUnknown otherwise).
+SampleType SampleTypeUnion(SampleType a, SampleType b) noexcept;
 
 /// Bytes per sample (0 for kBit1 / kUnknown).
 size_t SampleTypeSize(SampleType t) noexcept;

@@ -62,6 +62,16 @@ std::string ParseRequest(const char* optionsJson, RegionRequest& r) {
         } else if (key == "dstNodata") {
             if (!val.IsNumber()) return "Invalid optionsJson: dstNodata";
             r.dstNodata = val.num;
+        } else if (key == "outputType") {
+            const auto t = val.kind == json::Value::Kind::kString ? ddbt::api::SampleTypeOfGdalName(val.str) : std::nullopt;
+            if (!t) return "Invalid optionsJson: outputType must be a GDAL data type name";
+            r.outputType = *t;
+        } else if (key == "noSrcAlpha") {
+            if (val.kind != json::Value::Kind::kBool) return "Invalid optionsJson: noSrcAlpha";
+            r.noSrcAlpha = val.b;
+        } else if (key == "setColorInterp") {
+            if (val.kind != json::Value::Kind::kBool) return "Invalid optionsJson: setColorInterp";
+            r.sourceColorInterp = val.b;
         } else {
             return "Invalid optionsJson: unknown option " + key;
         }

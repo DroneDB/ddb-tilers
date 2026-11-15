@@ -113,6 +113,13 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     settings.resampling = request.resampling;
     settings.dstAlpha = request.dstAlpha;
     settings.dstNodata = request.dstNodata;
+    settings.noSrcAlpha = request.noSrcAlpha;
+    if (request.outputType) {
+        // GDALWarpResolveWorkingDataType: the union of the source's type and the output's
+        const tiff::SampleType work = tiff::SampleTypeUnion(src->Type(), *request.outputType);
+        if (work == tiff::SampleType::kUnknown) return Status(StatusCode::kInvalidArgument, "Unsupported output type");
+        settings.workingType = work;
+    }
     for (const int b : request.bands) {
         if (b < 1 || b > src->Bands()) return Status(StatusCode::kInvalidArgument, "Invalid band " + std::to_string(b));
         settings.bands.push_back(b - 1);
@@ -136,8 +143,19 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
     out.alphaBand = plan->alphaBand;
     out.sourceLevel = level;
     out.colorTable = std::move(colorTable);
-    // gdalwarp's MEM output: the warped bands undefined, the alpha band alpha
-    for (int b = 0; b < out.bands; ++b) out.colorInterp.emplace_back(b == out.alphaBand ? "Alpha" : "Undefined");
+    // gdalwarp's MEM output: the warped bands undefined (with -setci: as their source bands), the alpha
+    // band alpha
+    std::vector<int> warpedBands = settings.bands;
+    if (warpedBands.empty())
+        for (int b = 0; b < src->Bands(); ++b)
+            if (request.noSrcAlpha || src->AlphaBand() != b || b != src->Bands() - 1 || src->Bands() < 2)
+                warpedBands.push_back(b);
+    for (int b = 0; b < out.bands; ++b) {
+        if (b == out.alphaBand) out.colorInterp.emplace_back("Alpha");
+        else if (request.sourceColorInterp && static_cast<size_t>(b) < warpedBands.size())
+            out.colorInterp.push_back(src->ColorInterp(warpedBands[static_cast<size_t>(b)]));
+        else out.colorInterp.emplace_back("Undefined");
+    }
     // A MEM band with a colour table is a palette band
     if (!out.colorTable.empty()) out.colorInterp[0] = "Palette";
     const size_t ss = plan->SampleSize(), pb = plan->PixelBytes();
@@ -177,6 +195,14 @@ Expected<WarpedRaster> WarpRegion(const std::string& path, const RegionRequest& 
         }
     } catch (const std::exception& ex) {
         return Status(StatusCode::kInternal, ex.what());
+    }
+    // A working type wider than -ot's: gdalwarp copies its buffer into the output's type
+    if (request.outputType && *request.outputType != out.type) {
+        const size_t n = static_cast<size_t>(out.width) * out.height * static_cast<size_t>(out.bands);
+        std::vector<uint8_t> converted(n * tiff::SampleTypeSize(*request.outputType));
+        ConvertSamples(out.pixels.data(), out.type, converted.data(), *request.outputType, n);
+        out.pixels = std::move(converted);
+        out.type = *request.outputType;
     }
     return out;
 }

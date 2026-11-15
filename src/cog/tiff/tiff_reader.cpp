@@ -151,6 +151,49 @@ std::string_view SampleTypeName(SampleType t) noexcept {
     }
 }
 
+SampleType SampleTypeUnion(SampleType a, SampleType b) noexcept {
+    const auto info = [](SampleType t, int& bits, bool& isSigned, bool& floating) {
+        switch (t) {
+            case SampleType::kU8: bits = 8; isSigned = false; floating = false; return true;
+            case SampleType::kI8: bits = 8; isSigned = true; floating = false; return true;
+            case SampleType::kU16: bits = 16; isSigned = false; floating = false; return true;
+            case SampleType::kI16: bits = 16; isSigned = true; floating = false; return true;
+            case SampleType::kU32: bits = 32; isSigned = false; floating = false; return true;
+            case SampleType::kI32: bits = 32; isSigned = true; floating = false; return true;
+            case SampleType::kU64: bits = 64; isSigned = false; floating = false; return true;
+            case SampleType::kI64: bits = 64; isSigned = true; floating = false; return true;
+            case SampleType::kF32: bits = 32; isSigned = true; floating = true; return true;
+            case SampleType::kF64: bits = 64; isSigned = true; floating = true; return true;
+            default: return false;
+        }
+    };
+    int bits[2];
+    bool sign[2], flt[2];
+    if (!info(a, bits[0], sign[0], flt[0]) || !info(b, bits[1], sign[1], flt[1])) return SampleType::kUnknown;
+    int n;  // GetMinBitsForPair
+    if (flt[0] != flt[1]) {
+        const int f = flt[0] ? 0 : 1, i = 1 - f;
+        n = std::max(bits[f], 2 * bits[i]);
+    } else if (sign[0] != sign[1]) {
+        if (!sign[0] && bits[0] < bits[1]) n = bits[1];
+        else if (!sign[1] && bits[1] < bits[0]) n = bits[0];
+        else {
+            const int u = sign[0] ? 1 : 0, sgn = 1 - u;
+            n = std::max(bits[sgn], 2 * bits[u]);
+        }
+    } else {
+        n = std::max(bits[0], bits[1]);
+    }
+    // GDALFindDataType
+    if (flt[0] || flt[1]) return n <= 32 ? SampleType::kF32 : SampleType::kF64;
+    const bool isSigned = sign[0] || sign[1];
+    if (n <= 8) return isSigned ? SampleType::kI8 : SampleType::kU8;
+    if (n <= 16) return isSigned ? SampleType::kI16 : SampleType::kU16;
+    if (n <= 32) return isSigned ? SampleType::kI32 : SampleType::kU32;
+    if (n <= 64) return isSigned ? SampleType::kI64 : SampleType::kU64;
+    return SampleType::kF64;
+}
+
 size_t SampleTypeSize(SampleType t) noexcept {
     switch (t) {
         case SampleType::kU8:

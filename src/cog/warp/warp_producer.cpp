@@ -81,8 +81,9 @@ double AlphaMax(tiff::SampleType type, std::optional<int> nbits) {
 SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
     SourceSpec s;
     s.bands = src.Bands();
-    // gdalwarp takes the last band as the source alpha when it is an alpha band.
-    if (src.AlphaBand() == s.bands - 1 && s.bands > 1) {
+    // gdalwarp takes the last band as the source alpha when it is an alpha band (not with -nosrcalpha).
+    const bool noSrcAlpha = settings.grid && settings.noSrcAlpha;
+    if (!noSrcAlpha && src.AlphaBand() == s.bands - 1 && s.bands > 1) {
         s.alpha = s.bands - 1;
         s.alphaScale = static_cast<float>(1.0 / AlphaMax(src.Type(), src.Nbits(s.alpha)));
     }
@@ -184,6 +185,10 @@ public:
     Status Init() {
         W_ = static_cast<int>(src_.Width());
         H_ = static_cast<int>(src_.Height());
+        // The window holds the source's samples in the working type (gdalwarp -ot): the plan's
+        work_ = plan_.type;
+        workSize_ = tiff::SampleTypeSize(work_);
+        workPixelBytes_ = workSize_ * static_cast<size_t>(src_.Bands());
         if (const auto& sgt = geo_.GeoTransform(); sgt && !settings_.grid) {
             const auto& g = *sgt;
             srcPixel_ = std::min(std::hypot(g[1], g[4]), std::hypot(g[2], g[5]));
@@ -282,7 +287,7 @@ public:
         uint32_t chunkRows = th;
         if (whole.x1 > whole.x0) {
             const uint64_t bytes = static_cast<uint64_t>(whole.x1 - whole.x0) * static_cast<uint64_t>(whole.y1 - whole.y0) *
-                                   src_.PixelBytes();
+                                   workPixelBytes_;
             const uint64_t parts = (bytes + (uint64_t{16} << 20) - 1) / (uint64_t{16} << 20);
             chunkRows = static_cast<uint32_t>(std::max<uint64_t>(8, (th + parts - 1) / std::max<uint64_t>(parts, 1)));
         }
@@ -439,7 +444,7 @@ private:
         // GetWorkingMemoryForWindow's costs: the working type (the band type) of each warped band,
         // then the masks GDAL keeps for them.
         const int gdalBands = static_cast<int>(spec_.warped.size()) / (src_.Complex() ? 2 : 1);
-        const int bits = static_cast<int>(src_.SampleSize() * 8 * spec_.warped.size());
+        const int bits = static_cast<int>(workSize_ * 8 * spec_.warped.size());
         WarpChunkOptions o;
         o.srcPixelBits = bits + (spec_.alpha >= 0 ? 32 : spec_.mask ? 1 : 0) + (spec_.nodata ? gdalBands : 0);
         o.dstPixelBits = bits + (spec_.dstNodata ? gdalBands : 0) + (spec_.dstAlpha ? 32 : 0);
@@ -452,7 +457,7 @@ private:
             o.dstBlockHeight = 1;
         } else if (settings_.target == Target::kSourceCrs) {
             // gdalwarp's GeoTIFF: strips of the warped bands and the alpha band.
-            const size_t gdalPixel = src_.SampleSize() * (spec_.warped.size() + (spec_.dstAlpha ? 1 : 0));
+            const size_t gdalPixel = workSize_ * (spec_.warped.size() + (spec_.dstAlpha ? 1 : 0));
             o.dstBlockWidth = static_cast<int>(plan_.width);
             o.dstBlockHeight = GtiffStripRows(plan_.width, plan_.height, gdalPixel);
         }
@@ -674,7 +679,7 @@ private:
         win.y0 = need.y0;
         win.w = need.x1 - need.x0;
         win.h = need.y1 - need.y0;
-        win.pb = src_.PixelBytes();
+        win.pb = workPixelBytes_;
         const size_t np = static_cast<size_t>(win.w) * static_cast<size_t>(win.h);
         win.px.resize(np * win.pb + kWindowPadding);
         if (spec_.mask) win.mask.resize(np);
@@ -714,23 +719,30 @@ private:
                 const int ox = bx * bw_, oy = by * bh_;
                 const int cx0 = std::max(ox, need.x0), cx1 = std::min(ox + bw_, need.x1);
                 const int cy0 = std::max(oy, need.y0), cy1 = std::min(oy + bh_, need.y1);
+                const size_t srcPb = src_.PixelBytes();
                 for (int y = cy0; y < cy1; ++y) {
                     const size_t so = static_cast<size_t>(y - oy) * static_cast<size_t>(bw_) + static_cast<size_t>(cx0 - ox);
-                    std::memcpy(win.px.data() + win.Index(cx0, y) * win.pb, data + so * win.pb,
-                                static_cast<size_t>(cx1 - cx0) * win.pb);
+                    uint8_t* const to = win.px.data() + win.Index(cx0, y) * win.pb;
+                    const size_t n = static_cast<size_t>(cx1 - cx0);
+                    if (work_ == src_.Type()) {
+                        std::memcpy(to, data + so * srcPb, n * srcPb);
+                    } else {
+                        // GDALCopyWords of the source's samples into the working type
+                        ConvertSamples(data + so * srcPb, src_.Type(), to, work_, n * static_cast<size_t>(src_.Bands()));
+                    }
                     if (spec_.mask) std::memcpy(win.mask.data() + win.Index(cx0, y), mask + so, static_cast<size_t>(cx1 - cx0));
                 }
             }
         }
         // Unified validity: the mask, or "not every band at nodata" (the merged per-band masks).
-        const size_t ss = src_.SampleSize();
+        const size_t ss = workSize_;
         if (spec_.mask) {
             win.valid.resize(np + kWindowPadding);
             for (size_t i = 0; i < np; ++i) win.valid[i] = win.mask[i] != 0;
         } else if (spec_.nodata) {
             win.valid.resize(np + kWindowPadding);
             const double nodata = *spec_.nodata;
-            VisitSampleType(src_.Type(), [&]<typename T>() {
+            VisitSampleType(work_, [&]<typename T>() {
                 for (size_t i = 0; i < np; ++i) {
                     const uint8_t* const pixel = win.px.data() + i * win.pb;
                     bool any = false;
@@ -749,7 +761,7 @@ private:
         if (spec_.alpha >= 0) {
             win.density.resize(np);
             const uint8_t* const alpha = win.px.data() + static_cast<size_t>(spec_.alpha) * ss;
-            VisitSampleType(src_.Type(), [&]<typename T>() {
+            VisitSampleType(work_, [&]<typename T>() {
                 const float inv = spec_.alphaScale;
                 for (size_t i = 0; i < np; ++i) {
                     // GDALWarpSrcAlphaMasker: value * (1 / SRC_ALPHA_MAX), at most 1.
@@ -788,12 +800,12 @@ private:
         p.nearest = settings_.resampling == Resampling::kNearest;
         const int nWarped = static_cast<int>(spec_.warped.size());
         const int nOut = plan_.MaskOut() ? 3 : nWarped;  // a JPEG output keeps the colour bands
-        p.type = src_.Type();
+        p.type = work_;
         p.sourceWidth = W_;
         p.sourceHeight = H_;
         p.bandOffsets.clear();
         for (int bi = 0; bi < nOut; ++bi)
-            p.bandOffsets.push_back(static_cast<size_t>(spec_.warped[static_cast<size_t>(bi)]) * src_.SampleSize());
+            p.bandOffsets.push_back(static_cast<size_t>(spec_.warped[static_cast<size_t>(bi)]) * workSize_);
         p.outPixelBytes = plan_.PixelBytes();
         // GDAL's kernels without masks are those of 8 and 16-bit integers and Float32; any other
         // type goes through its real-valued kernel, which weighs densities and rounds as with masks
@@ -822,6 +834,8 @@ private:
     // Sources without a geotransform: GDAL's approximate transformer, its chunks, and the
     // inverse of the output geotransform as GDAL computes it.
     std::optional<RowApproximator> rows_;
+    tiff::SampleType work_ = tiff::SampleType::kU8;  // the working type of the warp (the plan's)
+    size_t workSize_ = 1, workPixelBytes_ = 1;
     mutable std::mutex scratchMutex_;
     mutable std::vector<std::unique_ptr<Scratch>> freeScratch_;
     std::vector<WarpChunk> chunks_;
@@ -900,7 +914,8 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
     p.geoTransform = grid.geoTransform;
     p.zoom = grid.zoom;
     if (!settings.grid) p.overviews = pyramid::OverviewSizes(p.width, p.height, p.blockSize, true);
-    p.type = src.Type();
+    // A grid of gdalwarp -ot: computed and written in the working type
+    p.type = settings.grid && settings.workingType ? *settings.workingType : src.Type();
     const bool jpeg = !settings.grid && !settings.noJpeg && JpegEligible(src, settings);
     std::vector<std::string> interps;
     for (int b : spec.warped) interps.push_back(src.ColorInterp(b));
@@ -969,6 +984,19 @@ Expected<std::vector<WarpChunk>> GdalWarpChunks(const build::RasterSource& src, 
     auto p = MakeProducer(src, plan, settings);
     if (!p.ok()) return p.status();
     return (*p)->Chunks();
+}
+
+void ConvertSamples(const uint8_t* in, tiff::SampleType from, uint8_t* out, tiff::SampleType to, size_t count) {
+    VisitSampleType(from, [&]<typename F>() {
+        VisitSampleType(to, [&]<typename T>() {
+            for (size_t i = 0; i < count; ++i) {
+                F v;
+                std::memcpy(&v, in + i * sizeof(F), sizeof(F));
+                const T w = static_cast<T>(v);
+                std::memcpy(out + i * sizeof(T), &w, sizeof(T));
+            }
+        });
+    });
 }
 
 }  // namespace ddbt::cog::warp

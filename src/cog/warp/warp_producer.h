@@ -63,7 +63,16 @@ struct WarpSettings {
     std::optional<ExplicitGrid> grid;
     std::vector<int> bands;
     std::optional<double> dstNodata;
+    /// With a grid: gdalwarp -nosrcalpha (a last alpha band of the source is warped as data, not as
+    /// the density of its pixels), and the working type of -ot (the union of the source's type and
+    /// the output's, which the warp computes and writes in; unset: the source's).
+    bool noSrcAlpha = false;
+    std::optional<tiff::SampleType> workingType;
 };
+
+/// `count` samples of type `from` converted to type `to` (static_cast, as GDALCopyWords converts into a
+/// type that holds them).
+void ConvertSamples(const uint8_t* in, tiff::SampleType from, uint8_t* out, tiff::SampleType to, size_t count);
 
 /// The plan of the warped COG of `source` (everything but the GDAL metadata).
 Expected<build::Plan> WarpPlan(const build::RasterSource& source, const WarpSettings& settings);

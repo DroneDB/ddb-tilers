@@ -2,7 +2,7 @@
 //
 // The warp of a raster into memory on a grid the host gives, as gdalwarp -of MEM -t_srs <crs>
 // -te <extent> [-te_srs <crs>] -ts <width> <height> -r bilinear|near [-b ...] [-dstalpha]
-// [-dstnodata <value>] makes it (the renders of a region of a map): the warp producer of the COG
+// [-dstnodata <value>] [-ot <type>] [-nosrcalpha] [-setci] makes it (the renders of a region of a map): the warp producer of the COG
 // builds with gdalwarp's own rules (WarpSettings::grid), from the overview gdalwarp picks (-ovr AUTO:
 // the source window of a 10 x 10 grid of the output, GDALBandGetBestOverviewLevel with threshold 1).
 #pragma once
@@ -28,6 +28,9 @@ struct RegionRequest {
     std::vector<int> bands;                // -b, 1-based (empty: every band but a last alpha band)
     bool dstAlpha = false;                 // -dstalpha
     std::optional<double> dstNodata;       // -dstnodata
+    std::optional<tiff::SampleType> outputType;  // -ot (warped in the union of it and the source's type)
+    bool noSrcAlpha = false;               // -nosrcalpha: a last alpha band is warped as data
+    bool sourceColorInterp = false;        // -setci: the bands named as their source bands
 };
 
 struct WarpedRaster {
