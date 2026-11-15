@@ -296,10 +296,16 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.type = tiff::SampleType::kU8;
     SetPhotometric(p, r.colorInterp);
     const auto alpha = std::find(r.colorInterp.begin(), r.colorInterp.end(), "Alpha");
-    if (r.mask && (r.nodata || alpha != r.colorInterp.end()))
-        return Status(StatusCode::kInvalidArgument, "A raster with a mask has neither a nodata value nor an alpha band");
+    if (r.mask && alpha != r.colorInterp.end())
+        return Status(StatusCode::kInvalidArgument, "A raster with a mask has no alpha band");
     if (r.mask) {
+        // The mask decides which pixels the overviews average; a nodata value is kept (and replaced
+        // where an average computes it), as GTiff keeps both
         p.transparency = Transparency::kMask;
+        if (r.nodata) {
+            p.nodata = *r.nodata;
+            p.nodataText = std::to_string(*r.nodata);
+        }
     } else if (r.nodata) {
         p.transparency = Transparency::kNoData;
         p.nodata = *r.nodata;
@@ -724,6 +730,7 @@ private:
                              dh, dst, child.Stride());
             pyramid::DownsampleSpec maskSpec = spec;
             maskSpec.bands = 1;
+            maskSpec.hasNoData = false;
             pyramid::Average(maskSpec, wmask.data(), static_cast<size_t>(ce - cb), cb, rb, ce - cb, re - rb,
                              wmask.data(), colTaps, rowTaps, dw, dh,
                              child.MaskAt(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0),

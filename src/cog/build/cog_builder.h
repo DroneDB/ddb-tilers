@@ -121,7 +121,8 @@ struct HostRaster {
     std::optional<uint8_t> nodata;
     /// An internal 1-bit mask (GDAL's per-dataset mask band): the host fills it as one more sample
     /// after the bands of each pixel (0: transparent); its overviews are GDAL's AVERAGE of the mask
-    /// with itself as its mask (255 wherever a pixel they cover is not 0), the bands' with it.
+    /// with itself as its mask (255 wherever a pixel they cover is not 0), the bands' with it (a nodata
+    /// value is kept too, and replaced where an average computes it).
     bool mask = false;
     /// GDALBuildOverviews factors (2, 4, 8...): level i is (width + f - 1) / f x (height + f - 1) / f.
     std::vector<uint32_t> overviewFactors;
