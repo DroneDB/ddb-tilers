@@ -48,7 +48,7 @@ struct Plan {
     int bands = 1;  // bands of the image (the alpha band included when kept)
     tiff::SampleType type = tiff::SampleType::kU8;
     Transparency transparency = Transparency::kNone;
-    int alphaBand = -1;                // kAlpha: index of the alpha band
+    int alphaBand = -1;                // the alpha band (kAlpha: it masks the others; kMask: averaged with itself)
     bool alphaMasksOverviews = false;  // kAlpha: GDAL's alpha mask rule (2 / 4 bands, 8 / 16-bit)
     std::optional<double> nodata;
     std::string nodataText;
@@ -63,9 +63,15 @@ struct Plan {
     bool complex = false;            // complex samples: `bands` counts both components of each
     OverviewResampling resampling = OverviewResampling::kCubic;
     /// kAverage of a palette band whose colour table (as GTiff reads it back) is not the identity:
-    /// GDAL's average in colour (pyramid::PaletteAverage), each level from the one above in the
-    /// chunks of GDALRegenerateOverviewsEx; the masks are not read
+    /// GDAL's average in colour (pyramid::PaletteAverage) in the chunks of GDALRegenerateOverviewsEx,
+    /// each level from the one above; the masks are not read. A second band (alpha) is regenerated on
+    /// its own, as the internal mask is: each level from the one above, in chunks, with itself as
+    /// its mask.
     std::optional<pyramid::PaletteTable> averagePalette;
+    /// averagePalette: every level from the full resolution, in the chunks of its largest factor, as
+    /// GDALRegenerateOverviewsEx computes a band whose mask is neither its nodata value nor all valid
+    /// (an internal mask, an alpha band)
+    bool paletteFromFullResolution = false;
     /// A tile whose mask is all 0 is written whole (GTiff without SPARSE_OK keeps the pixels under a
     /// mask), else left sparse (the COG driver's)
     bool keepMaskedTiles = false;
@@ -133,9 +139,10 @@ struct Strip {
 };
 
 bool IsFloatType(tiff::SampleType t);
-/// A palette output (GTiff's CreateCopy of a 1-band raster with a colour table): photometric
+/// A palette output (GTiff's CreateCopy of a raster of 1 or 2 bands with a colour table): photometric
 /// palette, the ColorMap GDAL writes for `table` (8-bit entries times 257, 2^bits entries, the
-/// missing ones black), overviews by nearest neighbour (the COG driver's rule).
+/// missing ones black), a second band written as unassociated alpha (masking band 1 when the plan has
+/// no other transparency), overviews by nearest neighbour (the COG driver's rule).
 void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table);
 /// A complex output (the source's complex bands, `bands` counting both components of each): the
 /// photometric and ExtraSamples of its complex bands (`interps`, one per complex band), overviews

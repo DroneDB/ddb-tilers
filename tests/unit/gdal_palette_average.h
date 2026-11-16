@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: MPL-2.0
 #pragma once
 
-// GDALBuildOverviews AVERAGE of a 1-band 8-bit palette GTiff, written the way GDAL 3.13 computes it,
-// loop for loop, to hold ddb-tilers' palette average to (pyramid/average.h PaletteAverage):
+// GDALBuildOverviews AVERAGE of an 8-bit palette GTiff, written the way GDAL 3.13 computes it, loop
+// for loop, to hold ddb-tilers' palette average to (pyramid/average.h PaletteAverage):
 //   - the colour table GTiff reads back from the file (TIFFColorMapTagToColorTable: the ColorMap of
 //     2^8 entries, the missing ones black, every entry opaque but the one of the nodata value);
 //   - GDALRegenerateOverviewsEx: the rows of a level read in chunks (UpdateChunkHeightAndGetChunkSize,
-//     GDAL_OVR_CHUNK_MAX_SIZE 10 MiB), the destination rows of each chunk, each level from the one
-//     above (GDALRegenerateCascadingOverviews), the overviews tiled as GTIFFGetOverviewBlockSize says;
-//   - GDALResampleChunk_AverageOrRMS_T's palette branch and BestColorEntry (gcore/overview.cpp).
+//     GDAL_OVR_CHUNK_MAX_SIZE 10 MiB), the destination rows of each chunk; each level from the one
+//     above (GDALRegenerateCascadingOverviews) when the mask of the palette band is its nodata value or
+//     all valid, else every level from the full resolution in the chunks of the largest factor; the
+//     overviews tiled as GTIFFGetOverviewBlockSize says;
+//   - GDALResampleChunk_AverageOrRMS_T's palette branch and BestColorEntry (gcore/overview.cpp);
+//   - the overviews of an internal mask (and of an alpha band beside a palette, of 0 and 255 only): each
+//     level from the one above, averaged with itself as its mask in the chunks of GDALRegenerateOverviewsEx,
+//     or by blocks without chunks (GDALRegenerateOverviewsMultiBand) when its first chunk exceeds 10 MiB.
 // GDAL's types are kept (GDALColorEntry's shorts, the int distances, the 64-bit totals).
 
 #include <algorithm>
@@ -17,6 +22,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace ddbt::test {
@@ -147,15 +153,18 @@ inline void GdalAveragePaletteChunk(const uint8_t* pChunk, int nChunkXSize, int 
     }
 }
 
-// GDALRegenerateOverviewsEx of one overview (nDstWidth x nDstHeight) of a band of nWidth x nHeight
-// samples whose blocks are nFRYBlockSize rows high
-inline std::vector<uint8_t> GdalPaletteOverview(const std::vector<uint8_t>& src, int nWidth, int nHeight, int nDstWidth,
-                                                int nDstHeight, int nFRYBlockSize,
-                                                const std::vector<GdalColorEntry>& table, bool bHasNoData,
-                                                double dfNoDataValue) {
-    const int nMaxOvrFactor =
-        std::max({1, static_cast<int>(static_cast<double>(nWidth) / nDstWidth + 0.5),
-                  static_cast<int>(static_cast<double>(nHeight) / nDstHeight + 0.5)});
+// The largest factor GDALRegenerateOverviewsEx computes at once (nMaxOvrFactor)
+inline int GdalMaxOvrFactor(int nWidth, int nHeight, const std::vector<std::pair<int, int>>& overviews) {
+    int nMaxOvrFactor = 1;
+    for (const auto& [nDstWidth, nDstHeight] : overviews)
+        nMaxOvrFactor = std::max({nMaxOvrFactor, static_cast<int>(static_cast<double>(nWidth) / nDstWidth + 0.5),
+                                  static_cast<int>(static_cast<double>(nHeight) / nDstHeight + 0.5)});
+    return nMaxOvrFactor;
+}
+
+// GDALRegenerateOverviewsEx's chunk rows (UpdateChunkHeightAndGetChunkSize, 1-byte work samples, no kernel); 0 when
+// a band without a colour table, tiled narrower than it is wide, goes to GDALRegenerateOverviewsMultiBand instead
+inline int GdalChunkRows(int nWidth, int nMaxOvrFactor, int nFRXBlockSize, int nFRYBlockSize, bool bColorTable) {
     int nFullResYChunk = nFRYBlockSize;
     const auto UpdateChunkHeightAndGetChunkSize = [&]() {
         nFullResYChunk = std::max(nFullResYChunk, 2 * nMaxOvrFactor);
@@ -163,27 +172,139 @@ inline std::vector<uint8_t> GdalPaletteOverview(const std::vector<uint8_t>& src,
     };
     const int nChunkMaxSize = 10485760;
     int64_t nChunkSize = UpdateChunkHeightAndGetChunkSize();
-    if (nChunkSize <= nChunkMaxSize) {
+    if (nChunkSize > nChunkMaxSize) {
+        if (!bColorTable && nFRXBlockSize < nWidth) return 0;
+    } else {
         while (nChunkSize < nChunkMaxSize / 2) {
             nFullResYChunk *= 2;
             nChunkSize = UpdateChunkHeightAndGetChunkSize();
         }
     }
-    std::vector<uint8_t> dst(static_cast<size_t>(nDstWidth) * static_cast<size_t>(nDstHeight));
+    return nFullResYChunk;
+}
+
+// GDALRegenerateOverviewsEx's loop over the chunks of rows of a band of nWidth x nHeight samples: `compute` gets each
+// overview's chunk (iOverview, nChunkYOff, nFullResYChunk, nDstYOff, nDstYOff2, the ratios)
+template <typename Compute>
+void GdalForEachChunk(int nWidth, int nHeight, const std::vector<std::pair<int, int>>& overviews, int nChunkRows,
+                      Compute compute) {
+    int nFullResYChunk = nChunkRows;
     for (int nChunkYOff = 0; nChunkYOff < nHeight; nChunkYOff += nFullResYChunk) {
         if (nFullResYChunk + nChunkYOff > nHeight) nFullResYChunk = nHeight - nChunkYOff;
-        const double dfXRatioDstToSrc = static_cast<double>(nWidth) / nDstWidth;
-        const double dfYRatioDstToSrc = static_cast<double>(nHeight) / nDstHeight;
-        const int nDstYOff = static_cast<int>(0.5 + nChunkYOff / dfYRatioDstToSrc);
-        if (nDstYOff == nDstHeight) continue;
-        int nDstYOff2 = static_cast<int>(0.5 + (nChunkYOff + nFullResYChunk) / dfYRatioDstToSrc);
-        if (nChunkYOff + nFullResYChunk == nHeight) nDstYOff2 = nDstHeight;
-        GdalAveragePaletteChunk(src.data() + static_cast<size_t>(nChunkYOff) * static_cast<size_t>(nWidth), nWidth,
-                                nChunkYOff, nFullResYChunk, nDstWidth, nDstYOff, nDstYOff2, dfXRatioDstToSrc,
-                                dfYRatioDstToSrc, table, bHasNoData, dfNoDataValue,
-                                dst.data() + static_cast<size_t>(nDstYOff) * static_cast<size_t>(nDstWidth));
+        for (size_t iOverview = 0; iOverview < overviews.size(); ++iOverview) {
+            const auto [nDstWidth, nDstHeight] = overviews[iOverview];
+            const double dfXRatioDstToSrc = static_cast<double>(nWidth) / nDstWidth;
+            const double dfYRatioDstToSrc = static_cast<double>(nHeight) / nDstHeight;
+            const int nDstYOff = static_cast<int>(0.5 + nChunkYOff / dfYRatioDstToSrc);
+            if (nDstYOff == nDstHeight) continue;
+            int nDstYOff2 = static_cast<int>(0.5 + (nChunkYOff + nFullResYChunk) / dfYRatioDstToSrc);
+            if (nChunkYOff + nFullResYChunk == nHeight) nDstYOff2 = nDstHeight;
+            compute(iOverview, nChunkYOff, nFullResYChunk, nDstYOff, nDstYOff2, dfXRatioDstToSrc, dfYRatioDstToSrc);
+        }
     }
+}
+
+// GDALRegenerateOverviewsEx of the overviews (nDstWidth x nDstHeight each) of a palette band of nWidth x nHeight samples
+// whose blocks are nFRYBlockSize rows high, all at once from it
+inline std::vector<std::vector<uint8_t>> GdalPaletteOverviewsOf(const std::vector<uint8_t>& src, int nWidth, int nHeight,
+                                                                const std::vector<std::pair<int, int>>& overviews,
+                                                                int nFRYBlockSize, const std::vector<GdalColorEntry>& table,
+                                                                bool bHasNoData, double dfNoDataValue) {
+    const int nChunkRows =
+        GdalChunkRows(nWidth, GdalMaxOvrFactor(nWidth, nHeight, overviews), nWidth, nFRYBlockSize, true);
+    std::vector<std::vector<uint8_t>> dst;
+    for (const auto& [w, h] : overviews) dst.emplace_back(static_cast<size_t>(w) * static_cast<size_t>(h));
+    GdalForEachChunk(nWidth, nHeight, overviews, nChunkRows,
+                     [&](size_t i, int nChunkYOff, int nChunkYSize, int nDstYOff, int nDstYOff2, double rx, double ry) {
+                         const int nDstWidth = overviews[i].first;
+                         GdalAveragePaletteChunk(src.data() + static_cast<size_t>(nChunkYOff) * static_cast<size_t>(nWidth),
+                                                 nWidth, nChunkYOff, nChunkYSize, nDstWidth, nDstYOff, nDstYOff2, rx, ry,
+                                                 table, bHasNoData, dfNoDataValue,
+                                                 dst[i].data() + static_cast<size_t>(nDstYOff) * static_cast<size_t>(nDstWidth));
+                     });
     return dst;
+}
+
+// GDALRegenerateOverviewsEx of one overview (nDstWidth x nDstHeight) of a band of nWidth x nHeight
+// samples whose blocks are nFRYBlockSize rows high
+inline std::vector<uint8_t> GdalPaletteOverview(const std::vector<uint8_t>& src, int nWidth, int nHeight, int nDstWidth,
+                                                int nDstHeight, int nFRYBlockSize,
+                                                const std::vector<GdalColorEntry>& table, bool bHasNoData,
+                                                double dfNoDataValue) {
+    return GdalPaletteOverviewsOf(src, nWidth, nHeight, {{nDstWidth, nDstHeight}}, nFRYBlockSize, table, bHasNoData,
+                                  dfNoDataValue)
+        .front();
+}
+
+// The overview sizes of `factors` (ceil(size / factor)), as GDALBuildOverviews gives a GTiff
+inline std::vector<std::pair<int, int>> GdalOverviewSizes(int width, int height, const std::vector<int>& factors) {
+    std::vector<std::pair<int, int>> sizes;
+    for (const int f : factors) sizes.emplace_back((width + f - 1) / f, (height + f - 1) / f);
+    return sizes;
+}
+
+// GTIFFGetOverviewBlockSize
+inline int GdalOverviewBlockSize(int blockSize) {
+    const bool keep = blockSize >= 64 && blockSize <= 4096 && (blockSize & (blockSize - 1)) == 0;
+    return keep ? blockSize : 128;
+}
+
+// GDALBuildOverviews AVERAGE of a palette band whose mask is an internal mask or an alpha band (GMF_PER_DATASET): every
+// level of `factors` from the full resolution at once
+inline std::vector<std::vector<uint8_t>> GdalPaletteOverviewsFromFullResolution(const std::vector<uint8_t>& src, int width,
+                                                                                int height, int blockSize,
+                                                                                const std::vector<int>& factors,
+                                                                                const std::vector<GdalColorEntry>& table,
+                                                                                bool bHasNoData, double dfNoDataValue) {
+    return GdalPaletteOverviewsOf(src, width, height, GdalOverviewSizes(width, height, factors), blockSize, table,
+                                  bHasNoData, dfNoDataValue);
+}
+
+// The overviews of a band of 0 and 255 averaged with itself as its mask (an internal mask, an alpha band of 0 and 255):
+// 255 where a pixel of the source rows of its chunk (all of them by blocks) is not 0, else 0; each level from the one
+// above
+inline std::vector<std::vector<uint8_t>> GdalMaskOverviews(const std::vector<uint8_t>& src, int width, int height,
+                                                           int blockSize, const std::vector<int>& factors) {
+    std::vector<std::vector<uint8_t>> levels;
+    levels.reserve(factors.size());  // `above` points into it
+    const std::vector<uint8_t>* above = &src;
+    int w = width, h = height, block = blockSize;
+    for (const auto& [dw, dh] : GdalOverviewSizes(width, height, factors)) {
+        const std::vector<std::pair<int, int>> one{{dw, dh}};
+        int chunkRows = GdalChunkRows(w, GdalMaxOvrFactor(w, h, one), block, block, false);
+        if (chunkRows == 0) chunkRows = h;  // by blocks: the windows of the rows, never clipped
+        std::vector<uint8_t> dst(static_cast<size_t>(dw) * static_cast<size_t>(dh));
+        const std::vector<uint8_t>& s = *above;
+        GdalForEachChunk(w, h, one, chunkRows, [&](size_t, int nChunkYOff, int nChunkYSize, int nDstYOff, int nDstYOff2,
+                                                   double rx, double ry) {
+            const int nChunkBottomYOff = nChunkYOff + nChunkYSize;
+            for (int iDstLine = nDstYOff; iDstLine < nDstYOff2; ++iDstLine) {
+                int nSrcYOff = static_cast<int>(iDstLine * ry + 1e-8);
+                if (nSrcYOff < nChunkYOff) nSrcYOff = nChunkYOff;
+                int nSrcYOff2 = static_cast<int>(std::ceil((iDstLine + 1) * ry - 1e-8));
+                if (nSrcYOff2 == nSrcYOff) ++nSrcYOff2;
+                if (nSrcYOff2 > nChunkBottomYOff) nSrcYOff2 = nChunkBottomYOff;
+                for (int iDstPixel = 0; iDstPixel < dw; ++iDstPixel) {
+                    int nSrcXOff = static_cast<int>(iDstPixel * rx + 1e-8);
+                    int nSrcXOff2 = static_cast<int>(std::ceil((iDstPixel + 1) * rx - 1e-8));
+                    if (nSrcXOff2 == nSrcXOff) ++nSrcXOff2;
+                    if (nSrcXOff2 > w) nSrcXOff2 = w;
+                    bool any = false;
+                    for (int y = nSrcYOff; y < nSrcYOff2 && !any; ++y)
+                        for (int x = nSrcXOff; x < nSrcXOff2 && !any; ++x)
+                            any = s[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)] != 0;
+                    dst[static_cast<size_t>(iDstLine) * static_cast<size_t>(dw) + static_cast<size_t>(iDstPixel)] =
+                        any ? 255 : 0;
+                }
+            }
+        });
+        levels.push_back(std::move(dst));
+        above = &levels.back();
+        w = dw;
+        h = dh;
+        block = GdalOverviewBlockSize(blockSize);
+    }
+    return levels;
 }
 
 // GDALBuildOverviews AVERAGE of the palette band of a tiled GTiff (square blocks of blockSize):
@@ -192,9 +313,7 @@ inline std::vector<std::vector<uint8_t>> GdalPaletteOverviews(const std::vector<
                                                               int blockSize, const std::vector<int>& factors,
                                                               const std::vector<GdalColorEntry>& table, bool bHasNoData,
                                                               double dfNoDataValue) {
-    // GTIFFGetOverviewBlockSize
-    const bool keep = blockSize >= 64 && blockSize <= 4096 && (blockSize & (blockSize - 1)) == 0;
-    const int ovrBlockSize = keep ? blockSize : 128;
+    const int ovrBlockSize = GdalOverviewBlockSize(blockSize);
     std::vector<std::vector<uint8_t>> levels;
     levels.reserve(factors.size());  // `above` points into it
     const std::vector<uint8_t>* above = &src;

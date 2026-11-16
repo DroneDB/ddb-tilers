@@ -10,8 +10,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <stdexcept>
 
 #include "cog/build/derived_source.h"
@@ -75,6 +78,16 @@ void SetPhotometric(Plan& p, const std::vector<std::string>& interps) {
 void SetPalette(Plan& p, const std::vector<std::array<uint8_t, 3>>& table) {
     p.photometric = tiff::photometric::kPalette;
     p.extraSamples.clear();
+    if (p.bands == 2) {
+        // GTiff's CreateCopy of a palette of 2 bands writes the second one as unassociated alpha, which then masks
+        // band 1 (GDAL's alpha mask rule) unless a nodata value or a mask decides the transparency
+        p.extraSamples.push_back(tiff::extrasample::kUnassociatedAlpha);
+        if (p.transparency == Transparency::kNone) {
+            p.transparency = Transparency::kAlpha;
+            p.alphaBand = 1;
+            p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
+        }
+    }
     // CreateTIFFColorTable: 256 entries for 8-bit samples, 65536 for 16-bit
     const size_t n = tiff::SampleTypeSize(p.type) == 1 ? 256 : 65536;
     p.colorMap.assign(3 * n, 0);
@@ -176,7 +189,8 @@ Expected<Plan> OwnGridPlan(const RasterSource& src, const BuildOptions& o) {
         p.alphaBand = src.AlphaBand();
         p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
     }
-    if (const auto table = src.ColorTable(); table && p.bands == 1) SetPalette(p, *table);
+    // GTiff's CreateCopy writes the colour table of band 1 for an image of 1 or 2 bands
+    if (const auto table = src.ColorTable(); table && p.bands <= 2) SetPalette(p, *table);
     if (src.Complex()) {
         std::vector<std::string> complexInterps;
         for (int b = 0; b < p.bands / 2; ++b) complexInterps.push_back(src.ColorInterp(b));
@@ -268,6 +282,14 @@ struct HostTiffMetadata {
     std::string gdalMetadata;  // "" when there is none
 };
 
+// The colour interpretations GTiff writes for the bands of a host raster: the host's, but the second band of
+// a palette, which CreateCopy writes as alpha
+std::vector<std::string> HostInterps(const HostRaster& r) {
+    std::vector<std::string> interps = r.colorInterp;
+    if (!r.colorTable.empty() && interps.size() == 2) interps[1] = "Alpha";
+    return interps;
+}
+
 HostTiffMetadata HostMetadata(const Plan& p, const HostRaster& r) {
     HostTiffMetadata out;
     std::string items = GtiffMetadataItems(r.metadata, out.tags);
@@ -277,7 +299,8 @@ HostTiffMetadata HostMetadata(const Plan& p, const HostRaster& r) {
         out.tags.push_back(std::move(xmp));
     }
     char number[64];
-    for (size_t b = 0; b < r.colorInterp.size(); ++b) {
+    const std::vector<std::string> interps = HostInterps(r);
+    for (size_t b = 0; b < interps.size(); ++b) {
         const int sample = static_cast<int>(b);
         if (b < r.bandMetadata.size())
             for (const auto& [name, value] : r.bandMetadata[b]) items += GdalMetadataItem(name, value, sample);
@@ -292,8 +315,8 @@ HostTiffMetadata HostMetadata(const Plan& p, const HostRaster& r) {
         if (b < r.units.size() && !r.units[b].empty()) items += GdalMetadataItem("UNITTYPE", r.units[b], sample, "unittype");
         if (b < r.descriptions.size() && !r.descriptions[b].empty())
             items += GdalMetadataItem("DESCRIPTION", r.descriptions[b], sample, "description");
-        if (r.colorInterp[b] != ImpliedColorInterp(p, b))
-            items += GdalMetadataItem("COLORINTERP", r.colorInterp[b], sample, "colorinterp");
+        if (interps[b] != ImpliedColorInterp(p, b))
+            items += GdalMetadataItem("COLORINTERP", interps[b], sample, "colorinterp");
     }
     out.gdalMetadata = GdalMetadataDocument(items);
     return out;
@@ -370,17 +393,33 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     }
     p.bands = bands;
     p.type = r.type;
-    SetPhotometric(p, r.colorInterp);
+    const std::vector<std::string> interps = HostInterps(r);
+    SetPhotometric(p, interps);
+    const auto alpha = std::find(interps.begin(), interps.end(), "Alpha");
+    if (r.nodata) {
+        p.nodata = *r.nodata;
+        p.nodataText = GdalNoDataText(*r.nodata);
+    }
+    const bool byteNoData = r.nodata && *r.nodata >= 0 && *r.nodata <= 255 && *r.nodata == std::floor(*r.nodata);
+    if (alpha != interps.end()) p.alphaBand = static_cast<int>(alpha - interps.begin());
+    if (r.mask) {
+        // The mask decides which pixels the overviews average (a nodata value is still replaced where an
+        // average computes it), as GTiff keeps both; an alpha band is averaged with itself as its mask
+        p.transparency = Transparency::kMask;
+    } else if (byteNoData) {
+        p.transparency = Transparency::kNoData;
+    } else if (alpha != interps.end()) {
+        p.transparency = Transparency::kAlpha;
+        p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
+    }
     if (!r.colorTable.empty()) {
-        // GTiff's colour table: band 1 of 1 or 2 samples (the second one extra), 8 or 16 bits; the
+        // GTiff's colour table: band 1 of 1 or 2 samples (the second one alpha), 8 or 16 bits; the
         // ColorMap holds no alpha
         if (bands > 2 || tiff::SampleTypeSize(r.type) > 2 || IsFloatType(r.type))
             return Status(StatusCode::kInvalidArgument, "A colour table is for 1 or 2 bands of 8 or 16-bit integers");
-        const std::vector<uint16_t> extra = p.extraSamples;
         std::vector<std::array<uint8_t, 3>> rgb;
         for (const auto& c : r.colorTable) rgb.push_back({c[0], c[1], c[2]});
         SetPalette(p, rgb);
-        p.extraSamples = extra;
         if (!r.overviewFactors.empty()) {
             // GDALBuildOverviews AVERAGE averages a palette band in colour unless its colour table, as
             // GTiff reads it back from the file (the ColorMap padded to 256 entries, opaque but the
@@ -392,35 +431,14 @@ Expected<Plan> HostPlan(const HostRaster& r) {
             written.noData = r.nodata;
             std::vector<pyramid::ColorEntry> table = tiff::GdalColorTable(written).value();
             if (!pyramid::IsIdentityTable(table)) {
-                // GTiff then regenerates band 1 alone, cascading from level to level only when its mask is
-                // its nodata or all valid: with an internal mask (a per-dataset mask) GDAL computes every
-                // level from the full resolution, which this pipeline (each level from the one above) does
-                // not; a second band would be averaged on its own as well
-                if (bands != 1 || r.mask)
-                    return Status(StatusCode::kInvalidArgument,
-                                  "Overviews of a colour table that is not the identity are for one band without a mask");
+                // GTiff then regenerates band by band (GDALRegenerateOverviewsEx): band 1 cascades from level
+                // to level only when its mask is its nodata value or all valid; with an internal mask or an
+                // alpha band (GMF_PER_DATASET) every level is computed from the full resolution. A second band
+                // (alpha) cascades on its own, with itself as its mask.
                 p.averagePalette = pyramid::AveragePalette(std::move(table), r.nodata);
+                p.paletteFromFullResolution = r.mask || (!r.nodata && alpha != interps.end());
             }
         }
-    }
-    const auto alpha = std::find(r.colorInterp.begin(), r.colorInterp.end(), "Alpha");
-    if (r.mask && alpha != r.colorInterp.end())
-        return Status(StatusCode::kInvalidArgument, "A raster with a mask has no alpha band");
-    if (r.nodata) {
-        p.nodata = *r.nodata;
-        p.nodataText = GdalNoDataText(*r.nodata);
-    }
-    const bool byteNoData = r.nodata && *r.nodata >= 0 && *r.nodata <= 255 && *r.nodata == std::floor(*r.nodata);
-    if (r.mask) {
-        // The mask decides which pixels the overviews average (a nodata value is still replaced where an
-        // average computes it), as GTiff keeps both
-        p.transparency = Transparency::kMask;
-    } else if (byteNoData) {
-        p.transparency = Transparency::kNoData;
-    } else if (alpha != r.colorInterp.end()) {
-        p.transparency = Transparency::kAlpha;
-        p.alphaBand = static_cast<int>(alpha - r.colorInterp.begin());
-        p.alphaMasksOverviews = AlphaMaskRule(p.bands, p.alphaBand, p.type);
     }
     p.codec = r.codec;
     p.predictor = r.predictor;
@@ -448,17 +466,28 @@ public:
         levels_.push_back(MakeLevel(plan.width, plan.height, B));
         for (const auto& [w2, h2] : plan.overviews)
             levels_.push_back(MakeLevel(w2, h2, B));
-        if (plan.averagePalette) {
-            // GDALRegenerateOverviewsEx reads each level in chunks of rows, from the block height of the
-            // level (the full resolution's, then the overviews' GTiff writes)
+        if (plan.resampling == OverviewResampling::kAverage) {
+            // GDALRegenerateOverviewsEx reads each level in chunks of rows, from the block size of the level
+            // (the full resolution's, then the overviews' GTiff writes): a palette band's, and a mask's or the
+            // alpha band's beside a palette (which GDAL may read by blocks instead)
             for (size_t k = 0; k + 1 < levels_.size(); ++k) {
-                const Level& P = levels_[k];
+                Level& P = levels_[k];
                 const Level& C = levels_[k + 1];
-                const uint32_t blockHeight = k == 0 ? B : GtiffOverviewBlockSize(B);
-                levels_[k].averageChunkRows =
-                    pyramid::RegenerateChunkRows(static_cast<int>(P.width), static_cast<int>(P.height),
-                                                 static_cast<int>(C.width), static_cast<int>(C.height),
-                                                 static_cast<int>(blockHeight));
+                const int block = static_cast<int>(k == 0 ? B : GtiffOverviewBlockSize(B));
+                const int pw = static_cast<int>(P.width), ph = static_cast<int>(P.height);
+                const int cw = static_cast<int>(C.width), ch = static_cast<int>(C.height);
+                if (plan.averagePalette) P.averageChunkRows = pyramid::RegenerateChunkRows(pw, ph, cw, ch, block);
+                if (OwnMaskChannels()) P.maskChunkRows = pyramid::RegenerateChunkRowsOrBlocks(pw, ph, cw, ch, block, block);
+            }
+            if (plan.paletteFromFullResolution && levels_.size() > 1) {
+                // Every level at once, in the chunks of the largest factor
+                int factor = 1;
+                for (size_t k = 1; k < levels_.size(); ++k)
+                    factor = std::max(factor, pyramid::OverviewFactor(static_cast<int>(plan.width), static_cast<int>(plan.height),
+                                                                      static_cast<int>(levels_[k].width),
+                                                                      static_cast<int>(levels_[k].height)));
+                fullResolutionChunkRows_ =
+                    pyramid::RegenerateChunkRowsOfFactor(static_cast<int>(plan.width), factor, static_cast<int>(B));
             }
         }
         if (options_.statistics) {
@@ -510,9 +539,54 @@ private:
         // The strip of the next level being filled, and its next pixel row to compute.
         std::shared_ptr<Strip> child;
         uint32_t childNextY = 0;
-        // The rows of the chunks the next level's palette average reads this one in (0: one chunk)
+        // The rows of the chunks the next level's palette average reads this one in (0: one chunk), and
+        // its mask's and alpha band's (0: by blocks, without chunks)
         int averageChunkRows = 0;
+        int maskChunkRows = 0;
+        // The cascade from this level stopped at a row whose palette (from the full resolution) is not
+        // computed yet
+        bool waitsForPalette = false;
+        // paletteFromFullResolution: the rows [paletteY0, paletteNextY) of this level's palette band
+        // computed from the full resolution and not yet in its strips
+        std::vector<uint8_t> palette;
+        uint32_t paletteY0 = 0, paletteNextY = 0;
     };
+
+    // The source rows of the rows [d0, d1) of a level of AVERAGE, for each way it computes them: its bands
+    // (GDALRegenerateOverviewsMultiBand's windows), its palette band (in chunks) and its mask and the alpha
+    // band beside a palette (in chunks or blocks)
+    struct AverageRows {
+        std::optional<pyramid::AverageTaps> bands, palette, own;
+        int SrcBegin() const {
+            int b = std::numeric_limits<int>::max();
+            for (const auto* t : {&bands, &palette, &own})
+                if (*t) b = std::min(b, (*t)->SrcBegin());
+            return b;
+        }
+        int SrcEnd() const {
+            int e = std::numeric_limits<int>::min();
+            for (const auto* t : {&bands, &palette, &own})
+                if (*t) e = std::max(e, (*t)->SrcEnd());
+            return e;
+        }
+    };
+
+    // Channels regenerated on their own with themselves as their mask: the internal mask, and the alpha band
+    // beside a palette band
+    bool OwnMaskChannels() const noexcept {
+        return plan_.MaskOut() || (plan_.averagePalette && plan_.bands == 2);
+    }
+
+    AverageRows AverageRowsOf(const Level& P, const Level& C, int d0, int d1) const {
+        AverageRows r;
+        const int src = static_cast<int>(P.height), dst = static_cast<int>(C.height);
+        if (!plan_.averagePalette)
+            r.bands = pyramid::AverageAxis(src, dst, d0, d1);
+        else if (!plan_.paletteFromFullResolution)
+            r.palette = pyramid::AverageAxis(src, dst, d0, d1, P.averageChunkRows);
+        if (OwnMaskChannels()) r.own = pyramid::AverageAxis(src, dst, d0, d1, P.maskChunkRows);
+        return r;
+    }
 
     // A row of level 0 in flight: its compression tasks, and the strip of decoded pixels for
     // the statistics (JPEG: the decoded tiles; otherwise the strip itself).
@@ -682,31 +756,34 @@ private:
         if (plan_.resampling == OverviewResampling::kNearest)
             return {NearestSource(srcSize, dstSize, d0), NearestSource(srcSize, dstSize, d1 - 1) + 1};
         if (plan_.resampling == OverviewResampling::kAverage) {
-            const pyramid::AverageTaps t = pyramid::AverageAxis(static_cast<int>(srcSize), static_cast<int>(dstSize),
-                                                                d0, d1, P.averageChunkRows);
-            return {t.SrcBegin(), t.SrcEnd()};
+            const AverageRows r = AverageRowsOf(P, C, d0, d1);
+            // A level whose every channel comes from elsewhere (the full resolution) reads no row of this one
+            if (!r.bands && !r.palette && !r.own) return {d0, d0};
+            return {r.SrcBegin(), r.SrcEnd()};
         }
         const pyramid::Taps t = pyramid::CubicTaps(static_cast<int>(srcSize), static_cast<int>(dstSize), d0, d1);
         return {t.SrcBegin(), t.SrcEnd()};
     }
 
-    // Level k got a new strip: computes every row of level k + 1 whose taps are now available,
-    // emits the strips of level k + 1 it completes (recursively), keeps the tail rows the next
-    // ones read.
+    // Level k got a new strip (or, resumed, the palette rows of level k + 1 it waited for): computes every row
+    // of level k + 1 whose taps are now available, emits the strips of level k + 1 it completes (recursively),
+    // keeps the tail rows the next ones read.
     void Cascade(uint32_t k, exec::TaskGroup& g) {
         Level& P = levels_[k];
         Level& C = levels_[k + 1];
         const uint32_t B = plan_.blockSize;
-        const Strip& cur = *P.cur;
-        const int availEnd = static_cast<int>(cur.y0 + cur.rows);
-        // Last child row computable: its taps end within the rows received.
+        const int availEnd = static_cast<int>(P.cur ? P.cur->y0 + P.cur->rows : P.tailY0 + P.tailRows);
+        // Last child row computable: its taps end within the rows received, and its palette (from the full
+        // resolution) is computed.
+        const uint32_t limit = plan_.paletteFromFullResolution ? C.paletteNextY : C.height;
         uint32_t yEnd = P.childNextY;
-        while (yEnd < C.height) {
+        while (yEnd < limit) {
             const auto [b0, e0] = TapRange(P, C, static_cast<int>(yEnd), static_cast<int>(yEnd) + 1);
             (void)b0;
             if (e0 > availEnd) break;
             ++yEnd;
         }
+        P.waitsForPalette = yEnd == limit && limit < C.height;
         while (P.childNextY < yEnd) {
             const uint32_t childRow = P.childNextY / B;
             if (!P.child) {
@@ -719,10 +796,10 @@ private:
                 exec::ParallelFor(0, C.blocksAcross, 1,
                                   [&](size_t c) { NearestTile(P, child, static_cast<uint32_t>(c), d0, d1); });
             } else if (plan_.resampling == OverviewResampling::kAverage) {
-                const pyramid::AverageTaps rowTaps = pyramid::AverageAxis(
-                    static_cast<int>(P.height), static_cast<int>(C.height), d0, d1, P.averageChunkRows);
+                const AverageRows rows = AverageRowsOf(P, C, d0, d1);
                 exec::ParallelFor(0, C.blocksAcross, 1,
-                                  [&](size_t c) { AverageTile(P, child, static_cast<uint32_t>(c), rowTaps, d0, d1); });
+                                  [&](size_t c) { AverageTile(P, child, static_cast<uint32_t>(c), rows, d0, d1); });
+                if (plan_.paletteFromFullResolution) TakePaletteRows(C, child, d0, d1);
             } else {
                 const pyramid::Taps rowTaps =
                     pyramid::CubicTaps(static_cast<int>(P.height), static_cast<int>(C.height), d0, d1);
@@ -738,35 +815,114 @@ private:
                 AddStrip(k + 1, done, g);
             }
         }
-        // Keep the rows the next child rows read.
-        const size_t pb = plan_.PixelBytes();
-        const size_t rowBytes = static_cast<size_t>(P.width) * pb;
+        // Keep the rows the next child rows read, and (the full resolution) the rows the palette rows of every
+        // level still to compute read.
+        std::optional<int> keepFrom;
+        if (P.childNextY < C.height)
+            keepFrom = TapRange(P, C, static_cast<int>(P.childNextY), static_cast<int>(P.childNextY) + 1).first;
+        if (k == 0 && plan_.paletteFromFullResolution)
+            if (const std::optional<int> palette = FullResolutionRowsNeeded())
+                keepFrom = std::min(keepFrom.value_or(*palette), *palette);
+        KeepTail(P, keepFrom, availEnd);
+        P.cur.reset();
+    }
+
+    // Keeps rows [from, availEnd) of level P as its tail (none without `from`).
+    void KeepTail(Level& P, std::optional<int> from, int availEnd) {
+        const size_t rowBytes = static_cast<size_t>(P.width) * plan_.PixelBytes();
         const bool hasMask = plan_.StripMask();
-        if (P.childNextY < C.height) {
-            const int keepFrom =
-                TapRange(P, C, static_cast<int>(P.childNextY), static_cast<int>(P.childNextY) + 1).first;
-            const uint32_t from = static_cast<uint32_t>(std::max(keepFrom, 0));
-            const uint32_t n = static_cast<uint32_t>(availEnd) > from ? static_cast<uint32_t>(availEnd) - from : 0;
-            std::vector<uint8_t> tail(static_cast<size_t>(n) * rowBytes), tailMask;
-            if (hasMask) tailMask.resize(static_cast<size_t>(n) * P.width);
-            for (uint32_t i = 0; i < n; ++i) {
-                const uint32_t y = from + i;
-                std::memcpy(tail.data() + static_cast<size_t>(i) * rowBytes, RowOf(P, y), rowBytes);
-                if (hasMask) std::memcpy(tailMask.data() + static_cast<size_t>(i) * P.width, MaskRowOf(P, y), P.width);
-            }
-            Account(static_cast<int64_t>(tail.size() + tailMask.size()) -
-                    static_cast<int64_t>(P.tail.size() + P.tailMask.size()));
-            P.tail = std::move(tail);
-            P.tailMask = std::move(tailMask);
-            P.tailY0 = from;
-            P.tailRows = n;
-        } else {
+        if (!from) {
             Account(-static_cast<int64_t>(P.tail.size() + P.tailMask.size()));
             P.tail.clear();
             P.tailMask.clear();
             P.tailRows = 0;
+            return;
         }
-        P.cur.reset();
+        const uint32_t first = static_cast<uint32_t>(std::max(*from, 0));
+        const uint32_t n = static_cast<uint32_t>(availEnd) > first ? static_cast<uint32_t>(availEnd) - first : 0;
+        std::vector<uint8_t> tail(static_cast<size_t>(n) * rowBytes), tailMask;
+        if (hasMask) tailMask.resize(static_cast<size_t>(n) * P.width);
+        for (uint32_t i = 0; i < n; ++i) {
+            const uint32_t y = first + i;
+            std::memcpy(tail.data() + static_cast<size_t>(i) * rowBytes, RowOf(P, y), rowBytes);
+            if (hasMask) std::memcpy(tailMask.data() + static_cast<size_t>(i) * P.width, MaskRowOf(P, y), P.width);
+        }
+        Account(static_cast<int64_t>(tail.size() + tailMask.size()) - static_cast<int64_t>(P.tail.size() + P.tailMask.size()));
+        P.tail = std::move(tail);
+        P.tailMask = std::move(tailMask);
+        P.tailY0 = first;
+        P.tailRows = n;
+    }
+
+    // ---- The palette band of every level from the full resolution (paletteFromFullResolution)
+
+    // The source rows of the rows [d0, d1) of level C's palette band at full resolution
+    pyramid::AverageTaps FullResolutionRows(const Level& C, int d0, int d1) const {
+        return pyramid::AverageAxis(static_cast<int>(plan_.height), static_cast<int>(C.height), d0, d1,
+                                    fullResolutionChunkRows_);
+    }
+
+    // The first row of the full resolution a palette row still to compute reads, if any
+    std::optional<int> FullResolutionRowsNeeded() const {
+        std::optional<int> first;
+        for (size_t j = 1; j < levels_.size(); ++j) {
+            const Level& C = levels_[j];
+            if (C.paletteNextY >= C.height) continue;
+            const int b = FullResolutionRows(C, static_cast<int>(C.paletteNextY), static_cast<int>(C.paletteNextY) + 1).SrcBegin();
+            first = std::min(first.value_or(b), b);
+        }
+        return first;
+    }
+
+    // The full resolution got rows: computes the palette rows of every level they complete, as
+    // GDALRegenerateOverviewsEx computes them from its chunks, into the level's palette rows.
+    void PaletteFromFullResolution() {
+        const Level& L0 = levels_[0];
+        const int availEnd = static_cast<int>(L0.cur->y0 + L0.cur->rows);
+        for (size_t j = 1; j < levels_.size(); ++j) {
+            Level& C = levels_[j];
+            const int d0 = static_cast<int>(C.paletteNextY);
+            int d1 = d0;
+            while (d1 < static_cast<int>(C.height) && FullResolutionRows(C, d1, d1 + 1).SrcEnd() <= availEnd) ++d1;
+            if (d1 == d0) continue;
+            const pyramid::AverageTaps rowTaps = FullResolutionRows(C, d0, d1);
+            const size_t before = C.palette.size();
+            C.palette.resize(before + static_cast<size_t>(d1 - d0) * C.width);
+            Account(static_cast<int64_t>(C.palette.size() - before));
+            uint8_t* rows = C.palette.data() + before;
+            const uint32_t B = plan_.blockSize;
+            exec::ParallelFor(0, C.blocksAcross, 1, [&](size_t c) {
+                const int x0 = static_cast<int>(c * B), x1 = static_cast<int>(std::min<size_t>((c + 1) * B, C.width));
+                const pyramid::AverageTaps colTaps =
+                    pyramid::AverageAxis(static_cast<int>(plan_.width), static_cast<int>(C.width), x0, x1);
+                thread_local std::vector<uint8_t> plane;
+                BandWindow(L0, 0, colTaps.SrcBegin(), colTaps.SrcEnd(), rowTaps.SrcBegin(), rowTaps.SrcEnd(), plane);
+                pyramid::PaletteAverage(*plan_.averagePalette, plane.data(),
+                                        static_cast<size_t>(colTaps.SrcEnd() - colTaps.SrcBegin()), colTaps.SrcBegin(),
+                                        rowTaps.SrcBegin(), colTaps, rowTaps, x1 - x0, d1 - d0, rows + x0, C.width);
+            });
+            C.paletteNextY = static_cast<uint32_t>(d1);
+        }
+    }
+
+    // Rows [d0, d1) of level C's palette band into its strip `child`, then dropped from its palette rows
+    void TakePaletteRows(Level& C, Strip& child, int d0, int d1) {
+        const size_t pb = plan_.PixelBytes();
+        for (int y = d0; y < d1; ++y) {
+            const uint8_t* src = C.palette.data() + static_cast<size_t>(y - static_cast<int>(C.paletteY0)) * C.width;
+            uint8_t* dst = child.Pixel(0, static_cast<uint32_t>(y) - child.y0);
+            for (uint32_t x = 0; x < C.width; ++x) dst[static_cast<size_t>(x) * pb] = src[x];
+        }
+        const size_t taken = static_cast<size_t>(d1 - static_cast<int>(C.paletteY0)) * C.width;
+        C.palette.erase(C.palette.begin(), C.palette.begin() + static_cast<std::ptrdiff_t>(taken));
+        Account(-static_cast<int64_t>(taken));
+        C.paletteY0 = static_cast<uint32_t>(d1);
+    }
+
+    // Cascades that waited for palette rows now computed go on, from the level nearest the full resolution
+    void ResumeCascades(exec::TaskGroup& g) {
+        for (size_t k = 1; k + 1 < levels_.size(); ++k)
+            if (levels_[k].waitsForPalette) Cascade(static_cast<uint32_t>(k), g);
     }
 
     // Row y of level k from its window (tail rows, then the current strip).
@@ -784,6 +940,10 @@ private:
         if (k + 1 >= levels_.size()) return;
         Level& L = levels_[k];
         L.cur = s;
+        if (k == 0 && plan_.paletteFromFullResolution) {
+            PaletteFromFullResolution();
+            ResumeCascades(g);
+        }
         Cascade(k, g);
     }
 
@@ -825,59 +985,107 @@ private:
         }
     }
 
-    // Rows [d0, d1) of tile `col` of level k + 1 by GDAL's AVERAGE (8-bit) of a GTiff: every band
-    // with the alpha as its mask (the alpha band too; the mask of the strip is the alpha of the
-    // level, AlphaToMask at the end of the strip), with the internal mask (and the mask's next level),
-    // with its nodata, or unmasked; a palette band in colour.
-    void AverageTile(const Level& P, Strip& child, uint32_t col, const pyramid::AverageTaps& rowTaps, int d0, int d1) {
+    // The samples of band `band` (8-bit) in the window [cb, ce) x [rb, re) of level k, one after the other
+    void BandWindow(const Level& P, int band, int cb, int ce, int rb, int re, std::vector<uint8_t>& plane) const {
+        const size_t pb = plan_.PixelBytes();
+        const size_t sww = static_cast<size_t>(ce - cb);
+        plane.resize(sww * static_cast<size_t>(re - rb));
+        for (int y = rb; y < re; ++y) {
+            const uint8_t* row = RowOf(P, static_cast<uint32_t>(y)) + static_cast<size_t>(cb) * pb + static_cast<size_t>(band);
+            uint8_t* out = plane.data() + static_cast<size_t>(y - rb) * sww;
+            for (size_t x = 0; x < sww; ++x) out[x] = row[x * pb];
+        }
+    }
+
+    // Rows [d0, d1) of tile `col` of level k + 1 by GDAL's AVERAGE (8-bit) of a GTiff, each channel as GTiff
+    // regenerates it (rows: their source rows for each):
+    // - the bands of an image without a palette (GDALRegenerateOverviewsMultiBand, windows): with the alpha as
+    //   their mask (the alpha band too: the mask band of a GTiff alpha band is the alpha band itself, so its
+    //   overview is 255 wherever a pixel it covers is not 0), with the internal mask (an alpha band beside it with
+    //   itself), with their nodata, or unmasked;
+    // - a palette band in colour, in chunks (from the full resolution: TakePaletteRows);
+    // - on their own, in chunks or by blocks, with themselves as their mask: the alpha band beside a palette, and
+    //   the internal mask (GTiff regenerates the mask's overviews before the bands').
+    void AverageTile(const Level& P, Strip& child, uint32_t col, const AverageRows& rows, int d0, int d1) {
         const uint32_t B = plan_.blockSize;
         const int x0 = static_cast<int>(col * B);
         const int x1 = static_cast<int>(std::min((col + 1) * B, child.width));
         const pyramid::AverageTaps colTaps =
             pyramid::AverageAxis(static_cast<int>(P.width), static_cast<int>(child.width), x0, x1);
         const int cb = colTaps.SrcBegin(), ce = colTaps.SrcEnd();
-        const int rb = rowTaps.SrcBegin(), re = rowTaps.SrcEnd();
+        const int rb = rows.SrcBegin(), re = rows.SrcEnd();
         thread_local std::vector<uint8_t> win, wmask;
         CopyWindow(P, cb, ce, rb, re, win, wmask);
         const size_t pb = plan_.PixelBytes();
-        const int dw = x1 - x0, dh = d1 - d0;
+        const int dw = x1 - x0, dh = d1 - d0, ww = ce - cb, wh = re - rb;
         uint8_t* dst = child.Pixel(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0);
         pyramid::DownsampleSpec spec;
         spec.type = plan_.type;
         spec.bands = plan_.bands;
         spec.hasNoData = plan_.nodata.has_value();
         spec.noData = plan_.nodata.value_or(0);
-        const size_t srcStride = static_cast<size_t>(ce - cb) * pb;
-        if (plan_.averagePalette) {
-            pyramid::PaletteAverage(*plan_.averagePalette, win.data(), srcStride, cb, rb, colTaps, rowTaps, dw, dh, dst,
-                                    child.Stride());
-        } else if (plan_.transparency == Transparency::kNoData) {
-            spec.mask = pyramid::MaskMode::kNoData;
-            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, nullptr, colTaps, rowTaps, dw, dh,
-                             dst, child.Stride());
-        } else if (plan_.MaskOut()) {
-            // A per-dataset mask: the bands with it, and its own next level, the AVERAGE of the mask with
-            // itself as its mask (GTiff regenerates the mask overviews so, before the bands')
-            spec.mask = pyramid::MaskMode::kExternal;
-            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, wmask.data(), colTaps, rowTaps, dw,
-                             dh, dst, child.Stride());
-            pyramid::DownsampleSpec maskSpec = spec;
-            maskSpec.bands = 1;
-            maskSpec.hasNoData = false;
-            pyramid::Average(maskSpec, wmask.data(), static_cast<size_t>(ce - cb), cb, rb, ce - cb, re - rb,
-                             wmask.data(), colTaps, rowTaps, dw, dh,
-                             child.MaskAt(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0),
-                             child.width);
-        } else if (plan_.transparency == Transparency::kAlpha && plan_.StripMask()) {
-            // Every band with the alpha as its mask, the alpha band too: the mask band of a GTiff alpha
-            // band is the alpha band itself, so its overview is 255 wherever a pixel it covers is not 0
-            spec.mask = pyramid::MaskMode::kExternal;
-            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, wmask.data(), colTaps, rowTaps, dw,
-                             dh, dst, child.Stride());
-        } else {
-            spec.mask = pyramid::MaskMode::kNone;
-            pyramid::Average(spec, win.data(), srcStride, cb, rb, ce - cb, re - rb, nullptr, colTaps, rowTaps, dw, dh,
-                             dst, child.Stride());
+        const size_t srcStride = static_cast<size_t>(ww) * pb;
+        // Band `band` of the window averaged with itself as its mask, into the band of the child
+        const auto averageOwnBand = [&](int band, const pyramid::AverageTaps& rowTaps) {
+            thread_local std::vector<uint8_t> plane, out;
+            plane.resize(static_cast<size_t>(ww) * static_cast<size_t>(wh));
+            for (size_t i = 0; i < plane.size(); ++i) plane[i] = win[i * pb + static_cast<size_t>(band)];
+            pyramid::DownsampleSpec one = spec;
+            one.bands = 1;
+            one.mask = pyramid::MaskMode::kExternal;
+            out.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh));
+            pyramid::Average(one, plane.data(), static_cast<size_t>(ww), cb, rb, ww, wh, plane.data(), colTaps, rowTaps, dw,
+                             dh, out.data(), static_cast<size_t>(dw));
+            for (int y = 0; y < dh; ++y)
+                for (int x = 0; x < dw; ++x)
+                    dst[static_cast<size_t>(y) * child.Stride() + static_cast<size_t>(x) * pb + static_cast<size_t>(band)] =
+                        out[static_cast<size_t>(y) * static_cast<size_t>(dw) + static_cast<size_t>(x)];
+        };
+        if (rows.bands) {
+            const pyramid::AverageTaps& rowTaps = *rows.bands;
+            if (plan_.transparency == Transparency::kNoData) {
+                spec.mask = pyramid::MaskMode::kNoData;
+                pyramid::Average(spec, win.data(), srcStride, cb, rb, ww, wh, nullptr, colTaps, rowTaps, dw, dh, dst,
+                                 child.Stride());
+            } else if (plan_.MaskOut() || (plan_.transparency == Transparency::kAlpha && plan_.StripMask())) {
+                // A per-dataset mask: the internal mask, or the alpha band as GDAL's mask band
+                spec.mask = pyramid::MaskMode::kExternal;
+                pyramid::Average(spec, win.data(), srcStride, cb, rb, ww, wh, wmask.data(), colTaps, rowTaps, dw, dh, dst,
+                                 child.Stride());
+                if (plan_.MaskOut() && plan_.alphaBand >= 0) averageOwnBand(plan_.alphaBand, rowTaps);
+            } else {
+                spec.mask = pyramid::MaskMode::kNone;
+                pyramid::Average(spec, win.data(), srcStride, cb, rb, ww, wh, nullptr, colTaps, rowTaps, dw, dh, dst,
+                                 child.Stride());
+            }
+        }
+        if (rows.palette) {
+            if (pb == 1) {
+                pyramid::PaletteAverage(*plan_.averagePalette, win.data(), srcStride, cb, rb, colTaps, *rows.palette, dw,
+                                        dh, dst, child.Stride());
+            } else {
+                thread_local std::vector<uint8_t> plane, out;
+                BandWindow(P, 0, cb, ce, rb, re, plane);
+                out.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh));
+                pyramid::PaletteAverage(*plan_.averagePalette, plane.data(), static_cast<size_t>(ww), cb, rb, colTaps,
+                                        *rows.palette, dw, dh, out.data(), static_cast<size_t>(dw));
+                for (int y = 0; y < dh; ++y)
+                    for (int x = 0; x < dw; ++x)
+                        dst[static_cast<size_t>(y) * child.Stride() + static_cast<size_t>(x) * pb] =
+                            out[static_cast<size_t>(y) * static_cast<size_t>(dw) + static_cast<size_t>(x)];
+            }
+        }
+        if (rows.own) {
+            if (plan_.averagePalette && plan_.bands == 2) averageOwnBand(1, *rows.own);
+            if (plan_.MaskOut()) {
+                pyramid::DownsampleSpec maskSpec = spec;
+                maskSpec.bands = 1;
+                maskSpec.hasNoData = false;
+                maskSpec.mask = pyramid::MaskMode::kExternal;
+                pyramid::Average(maskSpec, wmask.data(), static_cast<size_t>(ww), cb, rb, ww, wh, wmask.data(), colTaps,
+                                 *rows.own, dw, dh,
+                                 child.MaskAt(static_cast<uint32_t>(x0), static_cast<uint32_t>(d0) - child.y0), child.width);
+            }
         }
     }
 
@@ -1073,6 +1281,9 @@ private:
             jobs.pop_front();
         }
         if (statsGroup) statsGroup->Wait();
+        for (size_t k = 0; k + 1 < levels_.size(); ++k)
+            if (levels_[k].childNextY < levels_[k + 1].height)
+                throw std::runtime_error("The overviews were left incomplete at level " + std::to_string(k + 1));
         for (Level& L : levels_) {
             L.cur.reset();
             L.child.reset();
@@ -1089,6 +1300,8 @@ private:
     std::vector<uint8_t> jpegTables_;
     std::vector<uint8_t> fill_;
     std::atomic<uint64_t> live_{0}, peakBytes_{0};
+    // paletteFromFullResolution: the rows of the chunks of the full resolution every level is computed from
+    int fullResolutionChunkRows_ = 0;
 
 public:
     StatsAccumulator* Stats() { return stats_.get(); }

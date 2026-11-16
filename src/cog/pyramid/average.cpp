@@ -71,26 +71,38 @@ AverageTaps AverageAxis(int srcSize, int dstSize, int dst0, int dst1, int chunkR
     return t;
 }
 
-int RegenerateChunkRows(int srcWidth, int srcHeight, int dstWidth, int dstHeight, int blockHeight) {
-    const int factor = std::max({1, static_cast<int>(static_cast<double>(srcWidth) / dstWidth + 0.5),
-                                 static_cast<int>(static_cast<double>(srcHeight) / dstHeight + 0.5)});
-    constexpr int64_t kChunkMaxSize = 10485760;  // GDAL_OVR_CHUNK_MAX_SIZE
-    int64_t rows = blockHeight;
-    // UpdateChunkHeightAndGetChunkSize: 1-byte work samples, no kernel radius
-    const auto chunkSize = [&] {
-        rows = std::max<int64_t>(rows, 2 * int64_t{factor});
-        return rows * srcWidth;
-    };
-    int64_t size = chunkSize();
-    // Larger than the maximum: kept as it is (a palette band does not go to the block-based
-    // GDALRegenerateOverviewsMultiBand); else doubled to get close to the maximum
-    if (size <= kChunkMaxSize) {
-        while (size < kChunkMaxSize / 2) {
-            rows *= 2;
-            size = chunkSize();
-        }
+namespace {
+
+constexpr int64_t kChunkMaxSize = 10485760;  // GDAL_OVR_CHUNK_MAX_SIZE
+
+// UpdateChunkHeightAndGetChunkSize's first chunk: 1-byte work samples, no kernel radius
+int64_t FirstChunkRows(int factor, int blockHeight) { return std::max<int64_t>(blockHeight, 2 * int64_t{factor}); }
+
+}  // namespace
+
+int OverviewFactor(int srcWidth, int srcHeight, int dstWidth, int dstHeight) {
+    return std::max({1, static_cast<int>(static_cast<double>(srcWidth) / dstWidth + 0.5),
+                     static_cast<int>(static_cast<double>(srcHeight) / dstHeight + 0.5)});
+}
+
+int RegenerateChunkRowsOfFactor(int srcWidth, int factor, int blockHeight) {
+    int64_t rows = FirstChunkRows(factor, blockHeight);
+    // Larger than the maximum: kept as it is; else doubled to get close to the maximum
+    if (rows * srcWidth <= kChunkMaxSize) {
+        while (rows * srcWidth < kChunkMaxSize / 2) rows *= 2;
     }
     return static_cast<int>(rows);
+}
+
+int RegenerateChunkRows(int srcWidth, int srcHeight, int dstWidth, int dstHeight, int blockHeight) {
+    return RegenerateChunkRowsOfFactor(srcWidth, OverviewFactor(srcWidth, srcHeight, dstWidth, dstHeight), blockHeight);
+}
+
+int RegenerateChunkRowsOrBlocks(int srcWidth, int srcHeight, int dstWidth, int dstHeight, int blockWidth,
+                                int blockHeight) {
+    const int factor = OverviewFactor(srcWidth, srcHeight, dstWidth, dstHeight);
+    if (FirstChunkRows(factor, blockHeight) * srcWidth > kChunkMaxSize && blockWidth < srcWidth) return 0;
+    return RegenerateChunkRowsOfFactor(srcWidth, factor, blockHeight);
 }
 
 uint8_t CastNoData(double nodata) {

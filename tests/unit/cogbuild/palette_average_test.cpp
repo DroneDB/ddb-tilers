@@ -143,6 +143,22 @@ TEST(PaletteAverage, chunksAreTheBlockHeightGrownAsGdalGrowsThem) {
     EXPECT_EQ(RegenerateChunkRows(1000, 1000, 1, 1, 64), 8000);  // twice the factor, then doubled
 }
 
+// Every level at once from the full resolution: chunks from twice the largest factor (255 for 70000 x 601 down to 274
+// x 3); a band without a colour table (a mask, an alpha band) is read by blocks without chunks when its first chunk
+// exceeds 10 MiB and its blocks are narrower than it (0), else in chunks as a palette band
+TEST(PaletteAverage, chunksOfTheLargestFactorAndBlocksBeyondTenMebibytes) {
+    EXPECT_EQ(OverviewFactor(70000, 601, 274, 3), 255);
+    EXPECT_EQ(RegenerateChunkRowsOfFactor(70000, 255, 256), 510);  // over 10 MiB: kept
+    EXPECT_EQ(RegenerateChunkRowsOfFactor(70000, 2, 256), 256);
+    EXPECT_EQ(RegenerateChunkRowsOfFactor(10241, 255, 256), 1020);  // 510 rows hold less than 5 MiB: doubled
+    EXPECT_EQ(RegenerateChunkRowsOrBlocks(70000, 601, 35000, 301, 256, 256), 0);
+    EXPECT_EQ(RegenerateChunkRowsOrBlocks(70000, 601, 35000, 301, 70000, 256), 256) << "one block across: chunks";
+    EXPECT_EQ(RegenerateChunkRowsOrBlocks(10241, 1537, 5121, 769, 256, 256), 512);
+    for (const int width : {301, 10241, 40000, 70000})
+        EXPECT_EQ(ddbt::test::GdalChunkRows(width, 2, 256, 256, false), RegenerateChunkRowsOrBlocks(width, 600, (width + 1) / 2, 300, 256, 256))
+            << width;
+}
+
 // GDAL averages the whole pixels of the window alike: 3 -> 2 columns, destination pixel 0 covers
 // [0, 1.5) and counts pixels 0 and 1 whole (a weighted average would give pixel 1 half its weight)
 TEST(PaletteAverage, countsEveryPixelOfTheWindowAlike) {

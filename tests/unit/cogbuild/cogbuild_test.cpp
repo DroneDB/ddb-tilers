@@ -269,7 +269,8 @@ struct SourceCog {
     std::optional<double> nodata;
     std::vector<uint8_t> pixels;
     std::vector<uint8_t> maskBytes;
-    std::vector<uint16_t> colorMap;  // a palette source (1 band, 8-bit)
+    std::vector<uint16_t> colorMap;  // a palette source (8-bit)
+    std::vector<uint16_t> extraSamples;
     bool complex = false;            // `bands` values are bands / 2 complex samples
 
     SourceCog(tiff::SampleType t, int n, bool m, std::optional<double> nd) : type(t), bands(n), mask(m), nodata(nd) {
@@ -303,6 +304,7 @@ struct SourceCog {
         s.complex = complex;
         s.photometric = !colorMap.empty() ? 3 : (!complex && bands >= 3) ? 2 : 1;
         s.colorMap = colorMap;
+        s.extraSamples = extraSamples;
         s.codec = encode::Codec::kDeflate;
         s.predictor = 1;
         s.hasMask = mask;
@@ -629,25 +631,31 @@ TEST(CogBuild, OutputMetadataFollowsGdal) {
 }
 
 // The colour tables GDAL gives sources without a palette of their own: black and white for a
-// 1-bit image (white first when min-is-white), an inverted grey ramp for 8-bit min-is-white; and a
-// ColorMap of 8-bit values read as they are. A 1-bit image reads as bytes 0 / 1.
+// 1-bit image (white first when min-is-white) of one band, an inverted grey ramp for 8-bit min-is-white; and a
+// ColorMap of 8-bit values read as they are, beside an alpha band too (GTiff reads the ColorMap whatever the
+// samples of a pixel). A 1-bit image reads as bytes 0 / 1.
 TEST(CogBuild, SourcesGetGdalsColourTables) {
     TempDir dir;
     auto write = [&](const std::string& name, uint16_t bits, uint16_t photometric, uint16_t compression,
-                     const std::vector<uint16_t>& colorMap) {
+                     const std::vector<uint16_t>& colorMap, uint16_t samples = 1) {
         const std::string path = dir.File(name);
         TIFF* t = TIFFOpen(path.c_str(), "w");
         EXPECT_NE(t, nullptr);
         TIFFSetField(t, TIFFTAG_IMAGEWIDTH, 40);
         TIFFSetField(t, TIFFTAG_IMAGELENGTH, 8);
-        TIFFSetField(t, TIFFTAG_SAMPLESPERPIXEL, 1);
+        TIFFSetField(t, TIFFTAG_SAMPLESPERPIXEL, samples);
+        if (samples == 2) {
+            const uint16_t alpha[1] = {EXTRASAMPLE_UNASSALPHA};
+            TIFFSetField(t, TIFFTAG_EXTRASAMPLES, 1, alpha);
+            TIFFSetField(t, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+        }
         TIFFSetField(t, TIFFTAG_BITSPERSAMPLE, bits);
         TIFFSetField(t, TIFFTAG_PHOTOMETRIC, photometric);
         TIFFSetField(t, TIFFTAG_COMPRESSION, compression);
         TIFFSetField(t, TIFFTAG_ROWSPERSTRIP, 8);
         if (!colorMap.empty())
             TIFFSetField(t, TIFFTAG_COLORMAP, colorMap.data(), colorMap.data() + 256, colorMap.data() + 512);
-        std::vector<uint8_t> rows(bits == 1 ? 5 * 8 : 40 * 8);
+        std::vector<uint8_t> rows(bits == 1 ? 5 * 8 * samples : 40 * 8 * samples);
         for (size_t i = 0; i < rows.size(); ++i) rows[i] = bits == 1 ? 0xA5 : static_cast<uint8_t>(i);
         TIFFWriteEncodedStrip(t, 0, rows.data(), static_cast<tmsize_t>(rows.size()));
         TIFFClose(t);
@@ -689,6 +697,40 @@ TEST(CogBuild, SourcesGetGdalsColourTables) {
     const auto t257 = write("pal257.tif", 8, PHOTOMETRIC_PALETTE, COMPRESSION_LZW, by257)->ColorTable();
     EXPECT_EQ((*t257)[1], (std::array<uint8_t, 3>{255, 0, 0}));
     EXPECT_EQ((*t257)[2], (std::array<uint8_t, 3>{3, 0, 0}));
+
+    const auto withAlpha = write("pal-alpha.tif", 8, PHOTOMETRIC_PALETTE, COMPRESSION_LZW, small, 2);
+    const auto ta = withAlpha->ColorTable();
+    ASSERT_TRUE(ta) << "the ColorMap of band 1 beside an alpha band";
+    EXPECT_EQ((*ta)[1], (std::array<uint8_t, 3>{200, 0, 0}));
+    EXPECT_EQ(withAlpha->ColorInterp(0), "Palette");
+    EXPECT_EQ(withAlpha->ColorInterp(1), "Alpha");
+    tiff::IfdInfo bits;
+    bits.sampleType = tiff::SampleType::kBit1;
+    bits.bitsPerSample = 1;
+    bits.photometric = tiff::photometric::kMinIsBlack;
+    bits.samplesPerPixel = 2;
+    EXPECT_FALSE(tiff::GdalColorTable(bits)) << "a bitmap's two colours are those of an image of one band";
+    bits.samplesPerPixel = 1;
+    EXPECT_TRUE(tiff::GdalColorTable(bits));
+}
+
+// A palette of 2 bands keeps its ColorMap at its own grid, its second band written as unassociated alpha (GTiff's
+// CreateCopy of a palette of 2 bands)
+TEST(CogBuild, OwnGridPaletteOfTwoBandsKeepsItsColorMapBesideAnAlphaBand) {
+    TempDir dir;
+    SourceCog src(tiff::SampleType::kU8, 2, false, std::nullopt);
+    src.colorMap.resize(3 * 256);
+    for (uint32_t i = 0; i < 256; ++i) src.colorMap[i] = static_cast<uint16_t>(i * 257);
+    src.extraSamples = {tiff::extrasample::kUnassociatedAlpha};
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    src.Write(in);
+    ASSERT_TRUE(build::BuildCog(in, out, {}).ok());
+    auto r = tiff::TiffReader::Open(out);
+    ASSERT_TRUE(r.ok());
+    const tiff::IfdInfo& m = (*r)->Ifd((*r)->MainImage());
+    EXPECT_EQ(m.photometric, tiff::photometric::kPalette);
+    EXPECT_EQ(m.colorMap, src.colorMap);
+    EXPECT_EQ(m.extraSamples, (std::vector<uint16_t>{tiff::extrasample::kUnassociatedAlpha}));
 }
 
 TEST(CogBuild, MissingInputFails) {

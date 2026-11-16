@@ -244,7 +244,9 @@ void ReadPlanned(const ddbtRaster* raster, const tl::SamplePlan& plan, const int
             ConvertSamples(nativeType, samples.data(), count, static_cast<double*>(out));
     }
     if (mask != nullptr) {
-        if (view.HasDatasetMask()) tl::GatherDatasetMask(view, plan, mask);
+        // GDAL's mask band of band 1 when it is the dataset's own (GMF_PER_DATASET): an internal mask wins over an
+        // alpha band (RasterView::HasDatasetMask, the tiles' rule, leaves it to the alpha band)
+        if (view.Source().Mask() == tl::MaskKind::kPerDataset) tl::GatherDatasetMask(view, plan, mask);
         else std::memset(mask, 255, pixels);
     }
 }

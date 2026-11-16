@@ -54,11 +54,25 @@ struct AverageTaps {
 /// source windows are clipped to it.
 AverageTaps AverageAxis(int srcSize, int dstSize, int dst0, int dst1, int chunkRows = 0);
 
+/// The factor GDALRegenerateOverviewsEx gives an overview of a band: int(size / overview size + 0.5)
+/// of the larger of the axes, at least 1.
+int OverviewFactor(int srcWidth, int srcHeight, int dstWidth, int dstHeight);
+
 /// The rows of the chunks GDALRegenerateOverviewsEx reads a band of 8-bit samples in to compute
-/// one overview of it by AVERAGE (nFullResYChunk): the block height of the band, at least twice the
-/// factor of the overview (int(size / overview size + 0.5), the larger of the axes), doubled while
-/// a chunk holds less than half of GDAL_OVR_CHUNK_MAX_SIZE (10 MiB) of samples.
+/// its overviews by AVERAGE (nFullResYChunk): the block height of the band, at least twice the
+/// largest factor of the overviews it computes at once (OverviewFactor), doubled while a chunk holds
+/// less than half of GDAL_OVR_CHUNK_MAX_SIZE (10 MiB) of samples; a first chunk larger than that is
+/// kept as it is.
+int RegenerateChunkRowsOfFactor(int srcWidth, int factor, int blockHeight);
+/// The same for one overview (dstWidth x dstHeight) of a palette band, whose regeneration has no
+/// other way to go.
 int RegenerateChunkRows(int srcWidth, int srcHeight, int dstWidth, int dstHeight, int blockHeight);
+/// The same for one overview of a band without a colour table (a mask, an alpha band), or 0 when
+/// GDALRegenerateOverviewsEx gives it to GDALRegenerateOverviewsMultiBand instead, which reads it by
+/// blocks without clipping rows to chunks: when its first chunk is larger than 10 MiB and the band is
+/// tiled narrower than it is wide.
+int RegenerateChunkRowsOrBlocks(int srcWidth, int srcHeight, int dstWidth, int dstHeight, int blockWidth,
+                                int blockHeight);
 
 /// GDAL's cast of a nodata value to an 8-bit sample (static_cast<GByte> of the double, as x86 does it)
 uint8_t CastNoData(double nodata);

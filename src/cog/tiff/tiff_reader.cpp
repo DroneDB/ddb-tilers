@@ -911,7 +911,9 @@ std::optional<uint32_t> TiffReader::MaskOf(uint32_t ifd) const {
 }
 
 std::optional<std::vector<std::array<uint8_t, 4>>> GdalColorTable(const IfdInfo& m) {
-    if (m.samplesPerPixel != 1 || m.bitsPerSample > 16) return std::nullopt;
+    // GTiffDataset reads the ColorMap (or makes the ramp of min-is-white) whatever the samples of a pixel,
+    // for band 1; a bitmap's two colours are those of an image of one band (GTiffBitmapBand)
+    if (m.bitsPerSample > 16) return std::nullopt;
     std::vector<std::array<uint8_t, 4>> table;
     if (!m.colorMap.empty()) {
         const size_t n = m.colorMap.size() / 3;
@@ -932,7 +934,7 @@ std::optional<std::vector<std::array<uint8_t, 4>>> GdalColorTable(const IfdInfo&
         }
         return table;
     }
-    if (m.sampleType == SampleType::kBit1) {
+    if (m.sampleType == SampleType::kBit1 && m.samplesPerPixel == 1) {
         // GTiffBitmapBand
         const bool white0 = m.photometric == photometric::kMinIsWhite;
         const uint8_t a = white0 ? 255 : 0, b = white0 ? 0 : 255;

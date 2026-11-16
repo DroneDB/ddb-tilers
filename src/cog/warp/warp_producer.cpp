@@ -937,8 +937,9 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
             for (int b = 0; b < src.Bands() / 2; ++b) complexInterps.push_back(src.ColorInterp(b));
             build::SetComplex(p, complexInterps);
         }
-        // gdalwarp keeps the colour table of a 1-band source (its indices are warped as values)
-        if (const auto table = src.ColorTable(); table && p.bands == 1) build::SetPalette(p, *table);
+        // gdalwarp gives its output the colour table of band 1 of the source (its indices are warped as values),
+        // which GTiff writes for an image of 1 or 2 bands (the source's palette band and the alpha band of the warp)
+        if (const auto table = src.ColorTable(); table && p.bands <= 2) build::SetPalette(p, *table);
         p.codec = settings.losslessCodec;
         if (!p.complex) p.predictor = build::IsFloatType(p.type) ? 3 : 2;
         p.level = settings.level;
