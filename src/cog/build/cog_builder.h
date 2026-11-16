@@ -118,6 +118,18 @@ struct HostRaster {
     std::vector<std::string> colorInterp;
     /// The description of each band ("" for none; empty: none), in GDAL_METADATA as GTiff writes it
     std::vector<std::string> descriptions;
+    /// Metadata a host copies from its source, written as GTiff writes it (WriteMetadata):
+    /// - `metadata`: the default-domain items of the dataset, in order (GtiffMetadata: the TIFFTAG_*
+    ///   items GTiff knows become their TIFF tags, AREA_OR_POINT is left to the GeoKeys);
+    /// - per band (each empty: none): its default-domain items in order, its scale and offset (an
+    ///   OFFSET and a SCALE item unless they are 0 and 1), its unit (UNITTYPE), in GDAL_METADATA
+    ///   before its description;
+    /// - `xmp`: the XMP packet (TIFFTAG_XMLPACKET), "" for none.
+    std::vector<std::pair<std::string, std::string>> metadata;
+    std::vector<std::vector<std::pair<std::string, std::string>>> bandMetadata;
+    std::vector<double> scales, offsets;
+    std::vector<std::string> units;
+    std::string xmp;
     uint32_t blockSize = 256;  // square tiles, a multiple of 16
     encode::Codec codec = encode::Codec::kDeflate;
     int predictor = 2;  // 1 none, 2 horizontal, 3 floating point (floating-point samples only)

@@ -162,8 +162,21 @@ writer::RawTag RationalTag(uint16_t tag, double value) {
     return t;
 }
 
-void GtiffMetadata(const std::vector<std::pair<std::string, std::string>>& items, std::vector<writer::RawTag>& tags,
-                   std::string& gdalMetadata) {
+std::string GdalMetadataItem(const std::string& name, const std::string& value, int sample, const char* role) {
+    // GTiff's AppendMetadataItem: the attributes escaped once by the serialization; the value escaped
+    // by GDAL, then again by the serialization (its GDAL_METADATA readers unescape twice)
+    std::string item = "  <Item name=\"" + xml::Escape(name, true) + "\"";
+    if (sample >= 0) item += " sample=\"" + std::to_string(sample) + "\"";
+    if (role != nullptr) item += " role=\"" + std::string(role) + "\"";
+    return item + ">" + xml::Escape(xml::Escape(value, true), false) + "</Item>\n";
+}
+
+std::string GdalMetadataDocument(const std::string& items) {
+    return items.empty() ? std::string() : "<GDALMetadata>\n" + items + "</GDALMetadata>\n";
+}
+
+std::string GtiffMetadataItems(const std::vector<std::pair<std::string, std::string>>& items,
+                               std::vector<writer::RawTag>& tags) {
     // GTiffDataset's asTIFFTags (the DGIWG GEO_METADATA / TIFF_RSID are left out).
     enum class Kind : uint8_t { kString, kFloat, kShort, kUnit };
     struct Known {
@@ -206,12 +219,14 @@ void GtiffMetadata(const std::vector<std::pair<std::string, std::string>>& items
             continue;
         }
         if (key == "AREA_OR_POINT") continue;
-        // GDAL escapes the value, then the XML serialization escapes it again (its GDAL_METADATA
-        // readers unescape twice).
-        doc += "  <Item name=\"" + xml::Escape(name, true) + "\">" + xml::Escape(xml::Escape(value, true), false) +
-               "</Item>\n";
+        doc += GdalMetadataItem(name, value);
     }
-    gdalMetadata = doc.empty() ? std::string() : "<GDALMetadata>\n" + doc + "</GDALMetadata>\n";
+    return doc;
+}
+
+void GtiffMetadata(const std::vector<std::pair<std::string, std::string>>& items, std::vector<writer::RawTag>& tags,
+                   std::string& gdalMetadata) {
+    gdalMetadata = GdalMetadataDocument(GtiffMetadataItems(items, tags));
 }
 
 }  // namespace ddbt::cog::build

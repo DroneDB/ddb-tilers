@@ -1124,6 +1124,82 @@ TEST(HostApi, WriteRasterWritesTheHostsPixelsAndTheirAverageOverviews) {
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+// The items of the metadata domain `name` of a ddbtRasterMetadata object (its "domains"), none when absent
+std::vector<std::string> DomainItems(const ddbt::cog::tiler::json::Value& owner, const std::string& name) {
+    std::vector<std::string> items;
+    if (const auto* domains = owner.Find("domains"))
+        for (const auto& d : domains->arr)
+            if (d.Find("name")->str == name)
+                for (const auto& i : d.Find("items")->arr) items.push_back(i.str);
+    return items;
+}
+
+ddbt::cog::tiler::json::Value RasterMetadata(ddbtRaster* raster) {
+    char* out = nullptr;
+    EXPECT_EQ(ddbtRasterMetadata(raster, &out), DDBT_ERR_NONE) << ddbtLastError();
+    auto v = ddbt::cog::tiler::json::Parse(out != nullptr ? out : "{}");
+    ddbtFree(out);
+    return v ? *v : ddbt::cog::tiler::json::Value{};
+}
+
+}  // namespace
+
+// ddbtWriteRaster writes the metadata a host copies from its source where GTiff writes it, so a reader
+// gets it back as GDAL reads it: the dataset items (a TIFFTAG_* item as its tag), the items, scale,
+// offset and unit of each band (a scale of 1 and an offset of 0 write nothing), the XMP packet; values
+// with XML characters come back as they were given
+TEST(HostApi, WriteRasterWritesTheMetadataOfItsSourceWhereGtiffWritesIt) {
+    const auto dir = ApiScratch("write-metadata");
+    const std::string out = (dir / "out.tif").string();
+    const std::string xmp = R"(<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF/></x:xmpmeta>)";
+    const std::string options = R"({"width": 40, "height": 30, "colorInterp": ["Red", "Green", "Blue", "Alpha"],
+        "blockSize": 16, "geoTransform": [1000, 2, 0, 5000, 0, -2], "crs": "EPSG:3857",
+        "metadata": [["ZETA", "last <&> \"first\""], ["TIFFTAG_SOFTWARE", "a tool"], ["ALPHA", "1"]],
+        "bandMetadata": [[["WAVELENGTH", "650"]], [], [["WAVELENGTH", "550"], ["FWHM", "40"]], []],
+        "scales": [0.1, 1, 0.25, 1], "offsets": [-5, 0, 0, 0], "units": ["Celsius", "", "", ""],
+        "descriptions": ["red & hot", "", "", ""], "xmp": )" + std::string("\"") +
+                                R"(<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF/></x:xmpmeta>")" + "}";
+    ASSERT_EQ(ddbtWriteRaster(out.c_str(), options.c_str(), FillRgba, nullptr, nullptr, nullptr), DDBT_ERR_NONE)
+        << ddbtLastError();
+
+    OpenRaster r(out);
+    ASSERT_NE(r.raster, nullptr);
+    const auto info = r.Info();
+    const auto& bands = info.Find("bands")->arr;
+    ASSERT_EQ(bands.size(), 4u);
+    EXPECT_EQ(bands[0].Find("scale")->num, 0.1);
+    EXPECT_EQ(bands[0].Find("offset")->num, -5.0);
+    EXPECT_EQ(bands[0].Find("unit")->str, "Celsius");
+    EXPECT_EQ(bands[0].Find("description")->str, "red & hot");
+    EXPECT_EQ(bands[1].Find("scale"), nullptr) << "a scale of 1 and an offset of 0 write nothing";
+    EXPECT_EQ(bands[1].Find("unit"), nullptr);
+    EXPECT_EQ(bands[2].Find("scale")->num, 0.25);
+    EXPECT_EQ(bands[2].Find("offset")->num, 0.0) << "an offset of 0 is written with a scale that is not 1";
+
+    const auto md = RasterMetadata(r.raster);
+    // As GDAL lists them: the TIFF tags, the GDAL_METADATA items in their order, then the GeoKeys'
+    EXPECT_EQ(DomainItems(md, ""), (std::vector<std::string>{"TIFFTAG_SOFTWARE=a tool", "ZETA=last <&> \"first\"",
+                                                              "ALPHA=1", "AREA_OR_POINT=Area"}));
+    EXPECT_EQ(DomainItems(md, "xml:XMP"), std::vector<std::string>{xmp});
+    const auto& mdBands = md.Find("bands")->arr;
+    ASSERT_EQ(mdBands.size(), 4u);
+    EXPECT_EQ(DomainItems(mdBands[0], ""), std::vector<std::string>{"WAVELENGTH=650"});
+    EXPECT_TRUE(DomainItems(mdBands[1], "").empty());
+    EXPECT_EQ(DomainItems(mdBands[2], ""), (std::vector<std::string>{"WAVELENGTH=550", "FWHM=40"}));
+
+    // A list of one entry per band names every band or none
+    const std::string fewer = R"({"width": 8, "height": 8, "colorInterp": ["Gray", "Gray"], "scales": [2]})";
+    EXPECT_EQ(ddbtWriteRaster((dir / "fewer.tif").string().c_str(), fewer.c_str(), FillRgba, nullptr, nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
+    const std::string notPairs = R"({"width": 8, "height": 8, "colorInterp": ["Gray"], "metadata": [["A"]]})";
+    EXPECT_EQ(ddbtWriteRaster((dir / "pairs.tif").string().c_str(), notPairs.c_str(), FillRgba, nullptr, nullptr,
+                              nullptr),
+              DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
 // A raster without georeferencing is opened for reading (a host reads the pixels of a photo copied to
 // a GeoTIFF), and the tiler still refuses it
 TEST(HostApi, RasterWithoutGeoreferencingIsReadNotTiled) {

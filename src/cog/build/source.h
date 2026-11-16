@@ -145,6 +145,17 @@ writer::RawTag RationalTag(uint16_t tag, double value);
 /// float, printed with %.8g and parsed back.
 double GdalFloatTag(double value);
 
+/// One item of GDAL_METADATA as GTiff writes it (AppendMetadataItem): a dataset item, or with `sample`
+/// (0-based) a band item, with its `role` ("scale", "offset", "unittype", "description",
+/// "colorinterp") when it has one.
+std::string GdalMetadataItem(const std::string& name, const std::string& value, int sample = -1,
+                             const char* role = nullptr);
+/// The GDAL_METADATA document of these items, "" when there is none.
+std::string GdalMetadataDocument(const std::string& items);
+/// GtiffMetadata's items, without the document around them.
+std::string GtiffMetadataItems(const std::vector<std::pair<std::string, std::string>>& items,
+                               std::vector<writer::RawTag>& tags);
+
 /// GDAL's GTiff writer for the default-domain metadata of a dataset (WriteMDMetadata): the
 /// TIFFTAG_* items it knows become TIFF tags (`tags`), AREA_OR_POINT is left to the GeoKeys, the
 /// other items become the GDAL_METADATA document (`gdalMetadata`, "" when there is none), each

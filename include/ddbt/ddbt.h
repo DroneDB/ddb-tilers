@@ -325,6 +325,11 @@ typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int hei
  * failure. optionsJson: {"width", "height", "type" (GDAL's name of the type of the samples: "Byte", "UInt16",
  * "Int16", "UInt32", "Int32", "Float32", "Float64"...; "Byte"), "colorInterp" (GDAL's names, one per band: "Red",
  * "Green", "Blue", "Alpha", "Gray", "Undefined"...), "descriptions" (the description of each band, "" for none),
+ * the metadata a host copies from its source, written where GTiff writes it: "metadata" (the dataset's items, in order,
+ * as [["NAME", "value"], ...]: the TIFFTAG_* items GTiff knows become their TIFF tags, AREA_OR_POINT is the GeoKeys',
+ * the others GDAL_METADATA items), "bandMetadata" (the items of each band, the same pairs), "scales" and "offsets"
+ * (one number per band; 1 and 0 write nothing), "units" (the unit of each band, "" for none), "xmp" (the XMP packet,
+ * TIFFTAG_XMLPACKET); each list of one entry per band names every band or none,
  * "blockSize" (256; a multiple of 16), "codec"
  * ("none" | "deflate" | "lzw" | "zstd"; "deflate"), "predictor" (1 | 2 | 3, 3 for floating-point samples only; 2), "level" (DEFLATE / ZSTD level,
  * 0: GDAL's default), "nodata" (a number, or "nan": the GDAL_NODATA of the bands; a value Byte holds masks its pixels in the

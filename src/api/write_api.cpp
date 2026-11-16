@@ -5,6 +5,8 @@
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "api/api_common.h"
 #include "api/build_progress.h"
@@ -25,6 +27,39 @@ bool Unsigned(const json::Value& v, uint32_t& out) {
     if (!v.IsNumber() || v.num < 0 || v.num > 4294967295.0 || v.num != static_cast<double>(static_cast<uint32_t>(v.num)))
         return false;
     out = static_cast<uint32_t>(v.num);
+    return true;
+}
+
+// Name / value pairs ([["NAME", "value"], ...], in order) into `out`; false when `v` is not that
+bool Items(const json::Value& v, std::vector<std::pair<std::string, std::string>>& out) {
+    if (v.kind != json::Value::Kind::kArray) return false;
+    for (const json::Value& item : v.arr) {
+        if (item.kind != json::Value::Kind::kArray || item.arr.size() != 2 ||
+            item.arr[0].kind != json::Value::Kind::kString || item.arr[0].str.empty() ||
+            item.arr[1].kind != json::Value::Kind::kString)
+            return false;
+        out.emplace_back(item.arr[0].str, item.arr[1].str);
+    }
+    return true;
+}
+
+// One number per band into `out`; false when `v` is not that
+bool Numbers(const json::Value& v, std::vector<double>& out) {
+    if (v.kind != json::Value::Kind::kArray) return false;
+    for (const json::Value& n : v.arr) {
+        if (!n.IsNumber() || !std::isfinite(n.num)) return false;
+        out.push_back(n.num);
+    }
+    return true;
+}
+
+// One text per band into `out`; false when `v` is not that
+bool Texts(const json::Value& v, std::vector<std::string>& out) {
+    if (v.kind != json::Value::Kind::kArray) return false;
+    for (const json::Value& t : v.arr) {
+        if (t.kind != json::Value::Kind::kString) return false;
+        out.push_back(t.str);
+    }
     return true;
 }
 
@@ -49,11 +84,25 @@ std::string ParseRaster(const char* optionsJson, HostRaster& r, uint64_t& memory
                 r.colorInterp.push_back(v.str);
             }
         } else if (key == "descriptions") {
-            if (val.kind != json::Value::Kind::kArray) return "Invalid optionsJson: descriptions";
-            for (const json::Value& v : val.arr) {
-                if (v.kind != json::Value::Kind::kString) return "Invalid optionsJson: descriptions must be texts";
-                r.descriptions.push_back(v.str);
+            if (!Texts(val, r.descriptions)) return "Invalid optionsJson: descriptions must be texts";
+        } else if (key == "metadata") {
+            if (!Items(val, r.metadata)) return "Invalid optionsJson: metadata must be [name, value] pairs";
+        } else if (key == "bandMetadata") {
+            if (val.kind != json::Value::Kind::kArray) return "Invalid optionsJson: bandMetadata";
+            for (const json::Value& band : val.arr) {
+                r.bandMetadata.emplace_back();
+                if (!Items(band, r.bandMetadata.back()))
+                    return "Invalid optionsJson: bandMetadata must be [name, value] pairs for each band";
             }
+        } else if (key == "scales") {
+            if (!Numbers(val, r.scales)) return "Invalid optionsJson: scales must be numbers";
+        } else if (key == "offsets") {
+            if (!Numbers(val, r.offsets)) return "Invalid optionsJson: offsets must be numbers";
+        } else if (key == "units") {
+            if (!Texts(val, r.units)) return "Invalid optionsJson: units must be texts";
+        } else if (key == "xmp") {
+            if (val.kind != json::Value::Kind::kString) return "Invalid optionsJson: xmp must be a text";
+            r.xmp = val.str;
         } else if (key == "type") {
             const auto t = val.kind == json::Value::Kind::kString ? ddbt::api::SampleTypeOfGdalName(val.str) : std::nullopt;
             if (!t) return "Invalid optionsJson: type must be a GDAL data type name (Byte, UInt16, Float32...)";

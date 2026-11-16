@@ -6,6 +6,7 @@
 #include <chrono>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -256,36 +257,45 @@ std::string ImpliedColorInterp(const Plan& p, size_t b) {
     return "Undefined";
 }
 
-// Text in an XML element of GDAL_METADATA
-std::string XmlEscaped(const std::string& text) {
-    std::string out;
-    for (const char c : text) {
-        switch (c) {
-            case '&': out += "&amp;"; break;
-            case '<': out += "&lt;"; break;
-            case '>': out += "&gt;"; break;
-            case '"': out += "&quot;"; break;
-            default: out += c;
-        }
-    }
-    return out;
-}
+// The metadata of a host raster as GTiff writes it (WriteMetadata): the TIFF tags of the dataset items
+// GTiff knows and the XMP packet, and GDAL_METADATA: the other dataset items, then for each band its
+// items, its OFFSET and SCALE (role "offset", "scale"; %.17g, unless 0 and 1), its UNITTYPE, its
+// DESCRIPTION and the colour interpretation the photometric does not give (role "colorinterp"), so
+// GDAL reads every band back as the host gave it
+struct HostTiffMetadata {
+    std::vector<writer::RawTag> tags;
+    std::string gdalMetadata;  // "" when there is none
+};
 
-// GDAL_METADATA of a host raster, as GTiff writes the band items (WriteMetadata): the description of each
-// band that has one (role "description"), and the colour interpretations the photometric does not give
-// (role "colorinterp"), so GDAL reads every band back as the host named it; "" when there is none
-std::string HostMetadata(const Plan& p, const HostRaster& r) {
-    std::string items;
-    for (size_t b = 0; b < r.colorInterp.size(); ++b) {
-        const std::string sample = std::to_string(b);
-        if (b < r.descriptions.size() && !r.descriptions[b].empty())
-            items += "  <Item name=\"DESCRIPTION\" sample=\"" + sample + "\" role=\"description\">" +
-                     XmlEscaped(r.descriptions[b]) + "</Item>\n";
-        if (r.colorInterp[b] != ImpliedColorInterp(p, b))
-            items += "  <Item name=\"COLORINTERP\" sample=\"" + sample + "\" role=\"colorinterp\">" +
-                     r.colorInterp[b] + "</Item>\n";
+HostTiffMetadata HostMetadata(const Plan& p, const HostRaster& r) {
+    HostTiffMetadata out;
+    std::string items = GtiffMetadataItems(r.metadata, out.tags);
+    if (!r.xmp.empty()) {
+        // libtiff's TIFFTAG_XMLPACKET: bytes, without a terminating NUL
+        writer::RawTag xmp{700, 1, r.xmp.size(), std::vector<uint8_t>(r.xmp.begin(), r.xmp.end())};
+        out.tags.push_back(std::move(xmp));
     }
-    return items.empty() ? std::string() : "<GDALMetadata>\n" + items + "</GDALMetadata>\n";
+    char number[64];
+    for (size_t b = 0; b < r.colorInterp.size(); ++b) {
+        const int sample = static_cast<int>(b);
+        if (b < r.bandMetadata.size())
+            for (const auto& [name, value] : r.bandMetadata[b]) items += GdalMetadataItem(name, value, sample);
+        const double offset = b < r.offsets.size() ? r.offsets[b] : 0.0;
+        const double scale = b < r.scales.size() ? r.scales[b] : 1.0;
+        if (offset != 0.0 || scale != 1.0) {
+            std::snprintf(number, sizeof(number), "%.17g", offset);
+            items += GdalMetadataItem("OFFSET", number, sample, "offset");
+            std::snprintf(number, sizeof(number), "%.17g", scale);
+            items += GdalMetadataItem("SCALE", number, sample, "scale");
+        }
+        if (b < r.units.size() && !r.units[b].empty()) items += GdalMetadataItem("UNITTYPE", r.units[b], sample, "unittype");
+        if (b < r.descriptions.size() && !r.descriptions[b].empty())
+            items += GdalMetadataItem("DESCRIPTION", r.descriptions[b], sample, "description");
+        if (r.colorInterp[b] != ImpliedColorInterp(p, b))
+            items += GdalMetadataItem("COLORINTERP", r.colorInterp[b], sample, "colorinterp");
+    }
+    out.gdalMetadata = GdalMetadataDocument(items);
+    return out;
 }
 
 class HostProducer final : public TileProducer {
@@ -339,6 +349,11 @@ Expected<Plan> HostPlan(const HostRaster& r) {
         return Status(StatusCode::kInvalidArgument, "Overviews are written for 8-bit bands only");
     if (r.predictor < 1 || r.predictor > 3 || (r.predictor == 3 && !floating))
         return Status(StatusCode::kInvalidArgument, "Predictor 3 is for floating-point samples");
+    const auto perBand = [bands](size_t n) { return n == 0 || n == static_cast<size_t>(bands); };
+    if (!perBand(r.descriptions.size()) || !perBand(r.bandMetadata.size()) || !perBand(r.scales.size()) ||
+        !perBand(r.offsets.size()) || !perBand(r.units.size()))
+        return Status(StatusCode::kInvalidArgument,
+                      "The descriptions, band metadata, scales, offsets and units name every band or none");
     Plan p;
     p.ownGrid = true;
     p.width = r.width;
@@ -391,7 +406,6 @@ Expected<Plan> HostPlan(const HostRaster& r) {
     p.level = r.level;
     p.resampling = OverviewResampling::kAverage;
     p.keepMaskedTiles = true;
-    p.gdalMetadata = HostMetadata(p, r);
     return p;
 }
 
@@ -1114,7 +1128,9 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     spec.predictor = plan.predictor;
     spec.hasMask = plan.MaskOut();
     spec.noDataText = plan.nodataText;
-    spec.gdalMetadata = plan.gdalMetadata;
+    HostTiffMetadata metadata = HostMetadata(plan, raster);
+    spec.gdalMetadata = std::move(metadata.gdalMetadata);
+    spec.extraTags = std::move(metadata.tags);
     spec.geoTransform = plan.geoTransform;
     spec.georeferenced = raster.georeferenced;
     spec.geoKeys = raster.geoKeys;
