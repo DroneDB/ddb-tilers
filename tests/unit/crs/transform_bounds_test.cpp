@@ -5,6 +5,10 @@
 // projection in grads, a box no point of which transforms.
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+
 #include "core/crs/transform_bounds.h"
 
 namespace {
@@ -24,6 +28,22 @@ using ddbt::crs::Bounds;
 using ddbt::crs::Crs;
 using ddbt::crs::TransformBounds;
 
+// The doubles between a and b (of one sign)
+int64_t UlpsApart(double a, double b) {
+    int64_t x = 0, y = 0;
+    std::memcpy(&x, &a, sizeof x);
+    std::memcpy(&y, &b, sizeof y);
+    return std::llabs(x - y);
+}
+
+// The reference is GDAL's on Linux: with glibc's sin, cos, exp... the bounds are its own to the bit; another C
+// library rounds those functions differently in their last bits (as GDAL on it does), a few ulps at the end
+#if defined(__GLIBC__)
+constexpr int64_t kMaxUlps = 0;
+#else
+constexpr int64_t kMaxUlps = 4;
+#endif
+
 TEST(TransformBounds, MatchesGdalForEveryCase) {
     for (const BoundsCase& c : kBoundsCases) {
         SCOPED_TRACE(c.name);
@@ -32,7 +52,8 @@ TEST(TransformBounds, MatchesGdalForEveryCase) {
         ASSERT_EQ(b.has_value(), c.transforms);
         if (!b) continue;
         const double got[4] = {b->minX, b->minY, b->maxX, b->maxY};
-        for (int i = 0; i < 4; ++i) EXPECT_EQ(got[i], c.bounds[i]) << "bound " << i;
+        for (int i = 0; i < 4; ++i)
+            EXPECT_LE(UlpsApart(got[i], c.bounds[i]), kMaxUlps) << "bound " << i << ": " << got[i] << " for " << c.bounds[i];
     }
 }
 

@@ -116,6 +116,16 @@ namespace {
 
 namespace json = ddbt::cog::tiler::json;
 
+// `text` as a JSON string, its quotes included: the path of a file put in options (a Windows path has backslashes)
+std::string JsonString(const std::string& text) {
+    std::string out = "\"";
+    for (const char c : text) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    return out + "\"";
+}
+
 std::filesystem::path ApiScratch(const std::string& name) {
     return ddbt::copc::tiler::test::ScratchDir("api-" + name);
 }
@@ -1073,7 +1083,7 @@ TEST(HostApi, WriteRasterWritesTheHostsPixelsAndTheirAverageOverviews) {
     const std::string out = (dir / "out.tif").string();
     const std::string options = R"({"width": 300, "height": 201, "colorInterp": ["Red", "Green", "Blue", "Alpha"],
         "blockSize": 64, "overviewFactors": [2, 4], "geoTransform": [1000, 2, 0, 5000, 0, -2],
-        "geoKeysFrom": ")" + crsFile + R"("})";
+        "geoKeysFrom": )" + JsonString(crsFile) + "}";
     ASSERT_EQ(ddbtWriteRaster(out.c_str(), options.c_str(), FillRgba, nullptr, nullptr, nullptr), DDBT_ERR_NONE)
         << ddbtLastError();
 
@@ -1228,8 +1238,8 @@ TEST(HostApi, WriteRasterWritesThePixelIsPointOfItsAreaOrPointItem) {
     };
     const std::string point = write("point.tif", R"(, "crs": "EPSG:3857", "metadata": [["AREA_OR_POINT", "Point"]])");
     check(point, "Point");
-    check(write("from-point.tif", R"(, "geoKeysFrom": ")" + point + "\""), "Area");
-    check(write("from-point-kept.tif", R"(, "geoKeysFrom": ")" + point + R"(", "metadata": [["area_or_point", "point"]])"),
+    check(write("from-point.tif", R"(, "geoKeysFrom": )" + JsonString(point)), "Area");
+    check(write("from-point-kept.tif", R"(, "geoKeysFrom": )" + JsonString(point) + R"(, "metadata": [["area_or_point", "point"]])"),
           "Point");
     std::filesystem::remove_all(dir);
 }
