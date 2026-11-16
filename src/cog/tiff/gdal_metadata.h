@@ -24,6 +24,9 @@
 
 namespace ddbt::cog::tiff {
 
+/// Whether `a` and `b` are the same text but for the case of ASCII letters (GDAL's EQUAL).
+bool EqualNoCase(std::string_view a, std::string_view b);
+
 class TiffReader;
 struct GeoKeyDirectory;
 

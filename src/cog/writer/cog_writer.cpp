@@ -571,6 +571,26 @@ Expected<GeoKeys> GeoKeysOfFile(const std::string& path) {
     return keys;
 }
 
+GeoKeys WithRasterType(GeoKeys keys, bool pixelIsPoint) {
+    // The directory: a header of 4 shorts (the last one the count of keys), then 4 shorts per key
+    // (key, location, count, value), in key order
+    constexpr uint16_t kRasterType = 1025;
+    const uint16_t value = pixelIsPoint ? 2 : 1;
+    if (keys.directory.size() < 4) keys.directory = {1, 1, 0, 0};
+    size_t at = 4;
+    for (; at + 3 < keys.directory.size() && keys.directory[at] < kRasterType; at += 4) {
+    }
+    if (at + 3 < keys.directory.size() && keys.directory[at] == kRasterType) {
+        keys.directory[at + 1] = 0;
+        keys.directory[at + 2] = 1;
+        keys.directory[at + 3] = value;
+        return keys;
+    }
+    keys.directory.insert(keys.directory.begin() + static_cast<std::ptrdiff_t>(at), {kRasterType, 0, 1, value});
+    ++keys.directory[3];
+    return keys;
+}
+
 Expected<GeoKeys> GeoKeysOf(const crs::Crs& c) {
     std::optional<int> code;
     try {

@@ -18,6 +18,15 @@
 
 namespace ddbt::cog::tiff {
 
+static char Upper(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; }
+
+bool EqualNoCase(std::string_view a, std::string_view b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (Upper(a[i]) != Upper(b[i])) return false;
+    return true;
+}
+
 namespace {
 
 namespace tags {
@@ -51,14 +60,6 @@ constexpr uint16_t kCompressionWebp = 50001;
 
 constexpr std::string_view kImageStructure = "IMAGE_STRUCTURE";
 
-char Upper(char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - 'a' + 'A') : c; }
-
-bool EqualNoCase(std::string_view a, std::string_view b) {
-    if (a.size() != b.size()) return false;
-    for (size_t i = 0; i < a.size(); ++i)
-        if (Upper(a[i]) != Upper(b[i])) return false;
-    return true;
-}
 
 bool StartsWithNoCase(std::string_view s, std::string_view prefix) {
     return s.size() >= prefix.size() && EqualNoCase(s.substr(0, prefix.size()), prefix);

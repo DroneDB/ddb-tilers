@@ -67,6 +67,10 @@ Expected<GeoKeys> GeoKeysOf(const crs::Crs& crs);
 /// an output in the CRS of that file.
 Expected<GeoKeys> GeoKeysOfFile(const std::string& path);
 
+/// `keys` with GTRasterTypeGeoKey set to PixelIsPoint or PixelIsArea (added in key order when it is
+/// missing), as GDAL's GTiff driver writes it from the AREA_OR_POINT item of the dataset.
+GeoKeys WithRasterType(GeoKeys keys, bool pixelIsPoint);
+
 struct ImageSpec {
     uint32_t width = 0, height = 0;  // full resolution
     uint32_t blockSize = 512;        // square tiles

@@ -21,6 +21,7 @@
 #include "cog/codecs/jpeg.h"
 #include "cog/pyramid/average.h"
 #include "cog/pyramid/overview.h"
+#include "cog/tiff/gdal_metadata.h"
 #include "cog/warp/warp_producer.h"
 #include "core/exec/parallel_for.h"
 #include "core/exec/task_group.h"
@@ -1131,9 +1132,19 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     HostTiffMetadata metadata = HostMetadata(plan, raster);
     spec.gdalMetadata = std::move(metadata.gdalMetadata);
     spec.extraTags = std::move(metadata.tags);
+    // GTiff writes the raster type the AREA_OR_POINT item of the dataset gives (PixelIsArea without one),
+    // whatever the GeoKeys it is given say, and the origin of a PixelIsPoint raster at the centre of its
+    // first pixel (GTIFF_POINT_GEO_IGNORE off), which a reader moves back to the corner
+    const bool pixelIsPoint = std::any_of(raster.metadata.begin(), raster.metadata.end(), [](const auto& item) {
+        return tiff::EqualNoCase(item.first, "AREA_OR_POINT") && tiff::EqualNoCase(item.second, "Point");
+    });
     spec.geoTransform = plan.geoTransform;
+    if (pixelIsPoint) {
+        spec.geoTransform[0] += spec.geoTransform[1] * 0.5 + spec.geoTransform[2] * 0.5;
+        spec.geoTransform[3] += spec.geoTransform[4] * 0.5 + spec.geoTransform[5] * 0.5;
+    }
     spec.georeferenced = raster.georeferenced;
-    spec.geoKeys = raster.geoKeys;
+    spec.geoKeys = raster.georeferenced ? writer::WithRasterType(raster.geoKeys, pixelIsPoint) : raster.geoKeys;
     spec.overviews = plan.overviews;
     auto w = writer::CogWriter::Create(output, spec, o.writer);
     if (!w.ok()) return w.status();

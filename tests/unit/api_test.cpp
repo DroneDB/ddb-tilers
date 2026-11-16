@@ -1200,6 +1200,38 @@ TEST(HostApi, WriteRasterWritesTheMetadataOfItsSourceWhereGtiffWritesIt) {
     std::filesystem::remove_all(dir);
 }
 
+// A raster whose AREA_OR_POINT item is Point is written as GTiff writes it (PixelIsPoint, the origin at the
+// centre of its first pixel), so a reader gets back the geotransform it was given and the item; GeoKeys
+// copied from a PixelIsPoint file without that item are written PixelIsArea, as GTiff writes a raster
+// created with that geotransform
+TEST(HostApi, WriteRasterWritesThePixelIsPointOfItsAreaOrPointItem) {
+    const auto dir = ApiScratch("write-point");
+    const auto write = [&](const std::string& name, const std::string& extra) {
+        const std::string out = (dir / name).string();
+        const std::string options = R"({"width": 20, "height": 10, "colorInterp": ["Red", "Green", "Blue", "Alpha"],
+            "blockSize": 16, "geoTransform": [1000, 2, 0, 5000, 0, -2])" + extra + "}";
+        EXPECT_EQ(ddbtWriteRaster(out.c_str(), options.c_str(), FillRgba, nullptr, nullptr, nullptr), DDBT_ERR_NONE)
+            << ddbtLastError();
+        return out;
+    };
+    const auto check = [](const std::string& file, const std::string& areaOrPoint) {
+        OpenRaster r(file);
+        ASSERT_NE(r.raster, nullptr);
+        const auto info = r.Info();
+        const auto& gt = info.Find("geoTransform")->arr;
+        EXPECT_EQ(gt[0].num, 1000.0);
+        EXPECT_EQ(gt[3].num, 5000.0);
+        const auto items = DomainItems(RasterMetadata(r.raster), "");
+        EXPECT_NE(std::find(items.begin(), items.end(), "AREA_OR_POINT=" + areaOrPoint), items.end()) << file;
+    };
+    const std::string point = write("point.tif", R"(, "crs": "EPSG:3857", "metadata": [["AREA_OR_POINT", "Point"]])");
+    check(point, "Point");
+    check(write("from-point.tif", R"(, "geoKeysFrom": ")" + point + "\""), "Area");
+    check(write("from-point-kept.tif", R"(, "geoKeysFrom": ")" + point + R"(", "metadata": [["area_or_point", "point"]])"),
+          "Point");
+    std::filesystem::remove_all(dir);
+}
+
 // A raster without georeferencing is opened for reading (a host reads the pixels of a photo copied to
 // a GeoTIFF), and the tiler still refuses it
 TEST(HostApi, RasterWithoutGeoreferencingIsReadNotTiled) {
