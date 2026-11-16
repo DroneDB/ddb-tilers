@@ -336,7 +336,9 @@ typedef int (*ddbtFillCallback)(void *userData, int x, int y, int width, int hei
  * overviews, any other masks nothing and is cast to 8 bits as GDAL's overviews cast it), "mask" (true: an internal 1-bit mask, which the host fills as one more sample after the
  * bands of each pixel, 0 where it is transparent; the bands' overviews honour it, and its own are 255 wherever a
  * pixel they cover is not 0), "overviewFactors" ([2, 4, ...]: level i is
- * ceil(width / f) x ceil(height / f); for 8-bit bands only), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose
+ * ceil(width / f) x ceil(height / f); for 8-bit bands only; a band with a "colorTable" ([[r, g, b] or [r, g, b, a], ...]: the
+ * colour table of band 1) gets GDAL's average of a palette band, the colours of the pixels averaged and the nearest entry of
+ * the table, for one band without "mask", unless the table is the identity), "geoTransform" (6 numbers), "geoKeysFrom" (a GeoTIFF whose
  * CRS, its GeoKeys as they are, the output takes) or "crs" (a CRS with an EPSG code, any text PROJ reads: GDAL's
  * GeoKeys of EPSG:3857 and EPSG:4326, the code of another), "memoryMb" (pipeline budget, 2048)}.
  * progress: phases "overviews", "compressing". */

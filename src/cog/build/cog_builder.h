@@ -144,7 +144,10 @@ struct HostRaster {
     /// value is kept too, and replaced where an average computes it).
     bool mask = false;
     /// The colour table of band 1 (RGBA entries; the ColorMap keeps red, green and blue): a palette
-    /// image of 1 or 2 bands of 8 or 16-bit integers, without overviews.
+    /// image of 1 or 2 bands of 8 or 16-bit integers. Its overviews average the colours of the
+    /// pixels as GDAL averages a palette band (pyramid::PaletteAverage, over the table GTiff reads
+    /// back: 256 entries, only the nodata entry transparent), for one band without a mask; a table
+    /// GTiff reads back as the identity averages the indices as any 8-bit band.
     std::vector<std::array<uint8_t, 4>> colorTable;
     /// GDALBuildOverviews factors (2, 4, 8...): level i is (width + f - 1) / f x (height + f - 1) / f.
     std::vector<uint32_t> overviewFactors;

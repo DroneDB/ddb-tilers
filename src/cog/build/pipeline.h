@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "cog/encode/block_encoder.h"
+#include "cog/pyramid/average.h"
 #include "cog/tiff/tiff_reader.h"
 #include "core/mem/aligned.h"
 
@@ -61,6 +62,10 @@ struct Plan {
     std::vector<uint16_t> colorMap;  // the ColorMap of a palette output (TIFF's R, G, B values)
     bool complex = false;            // complex samples: `bands` counts both components of each
     OverviewResampling resampling = OverviewResampling::kCubic;
+    /// kAverage of a palette band whose colour table (as GTiff reads it back) is not the identity:
+    /// GDAL's average in colour (pyramid::PaletteAverage), each level from the one above in the
+    /// chunks of GDALRegenerateOverviewsEx; the masks are not read
+    std::optional<pyramid::PaletteTable> averagePalette;
     /// A tile whose mask is all 0 is written whole (GTiff without SPARSE_OK keeps the pixels under a
     /// mask), else left sparse (the COG driver's)
     bool keepMaskedTiles = false;

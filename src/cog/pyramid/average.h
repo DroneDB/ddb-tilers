@@ -20,10 +20,17 @@
 // The nodata value is GDAL's cast of it to 8 bits (static_cast of a double: a value outside 0..255
 // wraps as an int32 truncated to its low byte), which a band whose nodata Byte cannot hold also
 // has (its mask is all valid: MaskMode::kNone, the replacement still applies).
+//
+// A palette band (GCI_PaletteIndex) whose colour table is not the identity is averaged in colour
+// instead (PaletteAverage): GTiff then regenerates its overviews band by band with
+// GDALRegenerateOverviewsEx, which reads the level above in chunks of full-width rows (radius 0,
+// no rows around them) and clips the source rows of each destination row to its chunk.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 #include "cog/pyramid/overview.h"
@@ -40,7 +47,18 @@ struct AverageTaps {
     int SrcBegin() const;  // first source index any destination reads
     int SrcEnd() const;    // one past the last
 };
-AverageTaps AverageAxis(int srcSize, int dstSize, int dst0, int dst1);
+/// chunkRows: 0 for the whole axis in one chunk (GDALRegenerateOverviewsMultiBand's windows), else
+/// the rows of GDALRegenerateOverviewsEx's chunks (RegenerateChunkRows): chunk j is the source rows
+/// [j * chunkRows, (j + 1) * chunkRows), it computes the destination rows
+/// [int(0.5 + j * chunkRows / ratio), the same of chunk j + 1) (the last one: to dstSize) and their
+/// source windows are clipped to it.
+AverageTaps AverageAxis(int srcSize, int dstSize, int dst0, int dst1, int chunkRows = 0);
+
+/// The rows of the chunks GDALRegenerateOverviewsEx reads a band of 8-bit samples in to compute
+/// one overview of it by AVERAGE (nFullResYChunk): the block height of the band, at least twice the
+/// factor of the overview (int(size / overview size + 0.5), the larger of the axes), doubled while
+/// a chunk holds less than half of GDAL_OVR_CHUNK_MAX_SIZE (10 MiB) of samples.
+int RegenerateChunkRows(int srcWidth, int srcHeight, int dstWidth, int dstHeight, int blockHeight);
 
 /// GDAL's cast of a nodata value to an 8-bit sample (static_cast<GByte> of the double, as x86 does it)
 uint8_t CastNoData(double nodata);
@@ -53,5 +71,35 @@ uint8_t CastNoData(double nodata);
 void Average(const DownsampleSpec& spec, const uint8_t* src, size_t srcStride, int srcX0, int srcY0, int srcW,
              int srcH, const uint8_t* srcMask, const AverageTaps& cols, const AverageTaps& rows, int dstW, int dstH,
              uint8_t* dst, size_t dstStride);
+
+/// An RGBA entry of a colour table (GDALColorEntry: c1, c2, c3, c4).
+using ColorEntry = std::array<uint8_t, 4>;
+
+/// GDALColorTable::IsIdentity: every entry i is (i, i, i, 255).
+bool IsIdentityTable(const std::vector<ColorEntry>& entries);
+
+/// The colour table and nodata value GDAL's palette AVERAGE works with
+/// (GDALResampleChunk_AverageOrRMS_T): the band's table, the entry of the nodata value made
+/// transparent (a nodata >= 0 cast to 8 bits, when the table has that entry), or without a nodata
+/// value its first transparent entry taken as the nodata value. noData is what a destination pixel
+/// gets when none of the pixels it covers has an opaque colour (0 without a nodata value).
+struct PaletteTable {
+    std::vector<ColorEntry> entries;
+    uint8_t noData = 0;
+};
+PaletteTable AveragePalette(std::vector<ColorEntry> entries, std::optional<double> nodata);
+
+/// BestColorEntry (gcore/overview.cpp): the opaque entry nearest to (r, g, b) by squared RGB
+/// distance, the first one on a tie (0 when every entry is transparent).
+int BestColorEntry(const std::vector<ColorEntry>& entries, int r, int g, int b);
+
+/// One destination window of a palette band (1 sample per pixel), with the window conventions of
+/// Average: each destination pixel averages, unweighted, the colours of the opaque entries of the
+/// whole pixels of its window (indices past the table left out), each channel rounded
+/// ((total + count / 2) / count), and takes the entry BestColorEntry gives that colour; a pixel
+/// without any opaque colour takes table.noData. No mask is read: GDAL's palette branch ignores it.
+void PaletteAverage(const PaletteTable& table, const uint8_t* src, size_t srcStride, int srcX0, int srcY0,
+                    const AverageTaps& cols, const AverageTaps& rows, int dstW, int dstH, uint8_t* dst,
+                    size_t dstStride);
 
 }  // namespace ddbt::cog::pyramid

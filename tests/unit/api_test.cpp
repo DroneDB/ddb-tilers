@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstdint>
@@ -29,6 +30,7 @@
 #include "core/exec/thread_pool.h"
 #include "core/tile/compat.h"
 #include "ddbt/ddbt.h"
+#include "gdal_palette_average.h"
 #include "test_env.h"
 
 TEST(Api, Version) {
@@ -1262,6 +1264,135 @@ TEST(HostApi, RasterWithoutGeoreferencingIsReadNotTiled) {
     EXPECT_EQ(none, nullptr);
     EXPECT_EQ(ddbtRasterOpen("", &none), DDBT_ERR_INVALIDARGS);
     EXPECT_EQ(ddbtRasterClose(nullptr), DDBT_ERR_NONE);
+    std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+// The index of pixel (x, y) of a palette raster the test writes: areas of one class, other classes
+// scattered among them
+uint8_t PaletteIndex(int x, int y) {
+    const uint32_t area = (static_cast<uint32_t>(x / 3) * 2654435761u) ^ (static_cast<uint32_t>(y / 2) * 40503u);
+    const uint32_t pixel = (static_cast<uint32_t>(x) * 73856093u) ^ (static_cast<uint32_t>(y) * 19349663u);
+    return static_cast<uint8_t>(((pixel >> 7) % 5 == 0 ? pixel >> 11 : area >> 13) % 48);
+}
+
+int FillPalette(void*, int x, int y, int w, int h, uint8_t* out, size_t stride) {
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c) out[static_cast<size_t>(r) * stride + static_cast<size_t>(c)] = PaletteIndex(x + c, y + r);
+    return 0;
+}
+
+int FillGreys(void*, int x, int y, int w, int h, uint8_t* out, size_t stride) {
+    for (int r = 0; r < h; ++r)
+        for (int c = 0; c < w; ++c)
+            out[static_cast<size_t>(r) * stride + static_cast<size_t>(c)] =
+                static_cast<uint8_t>(((x + c) * 7 + (y + r) * 13 + ((x + c) * (y + r)) % 11) % 256);
+    return 0;
+}
+
+// Band 1 of level `level` of a written raster
+std::vector<uint8_t> ReadLevel(ddbtRaster* raster, int level, int w, int h) {
+    const int band = 1;
+    std::vector<uint8_t> px(static_cast<size_t>(w) * static_cast<size_t>(h));
+    EXPECT_EQ(ddbtRasterReadLevel(raster, level, 0, 0, w, h, &band, 1, DDBT_SAMPLE_NATIVE, px.data(), nullptr),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    return px;
+}
+
+}  // namespace
+
+// ddbtWriteRaster gives a palette band the overviews GDALBuildOverviews AVERAGE computes for it, sample
+// for sample (tests/unit/gdal_palette_average.h): the colours of the pixels averaged and the nearest
+// entry of the table GTiff reads back (40 colours, 216 black ones after them, the nodata entry
+// transparent), each level from the one above in the chunks GDAL reads it in (10241 samples wide: 512
+// rows, so some rows of level 1 lose the source rows above their chunk)
+TEST(HostApi, WriteRasterAveragesAColourTableAsGdalAveragesAPaletteBand) {
+    const auto dir = ApiScratch("write-palette");
+    const int w = 10241, h = 701;
+    const std::vector<int> factors{2, 4, 8};
+    std::vector<std::array<uint8_t, 3>> rgb;
+    std::string table;
+    for (int i = 0; i < 40; ++i) {
+        rgb.push_back({static_cast<uint8_t>(i * 67 % 256), static_cast<uint8_t>((i * 131 + 40) % 256),
+                       static_cast<uint8_t>((i * 29 + 7) % 256)});
+        table += std::string(i > 0 ? ", " : "") + "[" + std::to_string(rgb.back()[0]) + ", " +
+                 std::to_string(rgb.back()[1]) + ", " + std::to_string(rgb.back()[2]) + ", 255]";
+    }
+    const std::string out = (dir / "palette.tif").string();
+    const std::string options = R"({"width": 10241, "height": 701, "colorInterp": ["Palette"], "colorTable": [)" + table +
+                                R"(], "nodata": 5, "blockSize": 256, "overviewFactors": [2, 4, 8]})";
+    ASSERT_EQ(ddbtWriteRaster(out.c_str(), options.c_str(), FillPalette, nullptr, nullptr, nullptr), DDBT_ERR_NONE)
+        << ddbtLastError();
+
+    std::vector<uint8_t> src(static_cast<size_t>(w) * static_cast<size_t>(h));
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) src[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)] = PaletteIndex(x, y);
+    const auto readBack = ddbt::test::GtiffReadBackTable(rgb, true, 5);
+    const auto expected = ddbt::test::GdalPaletteOverviews(src, w, h, 256, factors, readBack, true, 5);
+
+    OpenRaster r(out);
+    ASSERT_NE(r.raster, nullptr);
+    const auto info = r.Info();
+    const auto* overviews = info.Find("overviews");
+    ASSERT_NE(overviews, nullptr);
+    ASSERT_EQ(overviews->arr.size(), factors.size());
+    const auto* colours = info.Find("bands")->arr[0].Find("colorTable");
+    ASSERT_NE(colours, nullptr);
+    ASSERT_EQ(colours->arr.size(), 256u);
+    EXPECT_EQ(colours->arr[5].arr[3].u, 0u) << "the nodata entry is transparent";
+    EXPECT_EQ(ReadLevel(r.raster, 0, w, h), src);
+    for (size_t l = 0; l < factors.size(); ++l) {
+        const int lw = (w + factors[l] - 1) / factors[l], lh = (h + factors[l] - 1) / factors[l];
+        ASSERT_EQ(overviews->arr[l].arr[0].u, static_cast<uint64_t>(lw));
+        ASSERT_EQ(overviews->arr[l].arr[1].u, static_cast<uint64_t>(lh));
+        const std::vector<uint8_t> level = ReadLevel(r.raster, static_cast<int>(l) + 1, lw, lh);
+        size_t differ = 0;
+        for (size_t i = 0; i < level.size(); ++i) differ += level[i] != expected[l][i];
+        EXPECT_EQ(differ, 0u) << "level " << l + 1;
+    }
+    std::filesystem::remove_all(dir);
+}
+
+// A colour table GTiff reads back as the identity (every entry i the grey i, opaque) has the overviews
+// of any 8-bit band (GTiff regenerates them as for a band without a table); GDAL regenerates a palette
+// band with a mask from the full resolution at every level, and a second band on its own: refused
+TEST(HostApi, WriteRasterAveragesAnIdentityTableAsAGreyBandAndRefusesAPaletteWithAMask) {
+    const auto dir = ApiScratch("write-identity");
+    std::string identity;
+    for (int i = 0; i < 256; ++i)
+        identity += std::string(i > 0 ? ", " : "") + "[" + std::to_string(i) + ", " + std::to_string(i) + ", " +
+                    std::to_string(i) + "]";
+    const std::string size = R"("width": 301, "height": 203, "blockSize": 64, "overviewFactors": [2, 4, 8])";
+    const std::string palette = (dir / "palette.tif").string(), grey = (dir / "grey.tif").string();
+    ASSERT_EQ(ddbtWriteRaster(palette.c_str(), (R"({"colorInterp": ["Palette"], "colorTable": [)" + identity + "], " + size + "}").c_str(),
+                              FillGreys, nullptr, nullptr, nullptr),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    ASSERT_EQ(ddbtWriteRaster(grey.c_str(), (R"({"colorInterp": ["Gray"], )" + size + "}").c_str(), FillGreys, nullptr,
+                              nullptr, nullptr),
+              DDBT_ERR_NONE)
+        << ddbtLastError();
+    OpenRaster p(palette), g(grey);
+    ASSERT_NE(p.raster, nullptr);
+    ASSERT_NE(g.raster, nullptr);
+    for (int l = 1; l <= 3; ++l) {
+        const int f = 1 << l;
+        EXPECT_EQ(ReadLevel(p.raster, l, (301 + f - 1) / f, (203 + f - 1) / f),
+                  ReadLevel(g.raster, l, (301 + f - 1) / f, (203 + f - 1) / f))
+            << "level " << l;
+    }
+
+    const std::string colours = R"("colorTable": [[0, 0, 0], [255, 0, 0], [0, 255, 0]], )";
+    EXPECT_EQ(ddbtWriteRaster((dir / "masked.tif").string().c_str(),
+                              (R"({"colorInterp": ["Palette"], "mask": true, )" + colours + size + "}").c_str(),
+                              FillPalette, nullptr, nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtWriteRaster((dir / "two.tif").string().c_str(),
+                              (R"({"colorInterp": ["Palette", "Alpha"], )" + colours + size + "}").c_str(), FillPalette,
+                              nullptr, nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
     std::filesystem::remove_all(dir);
 }
 
