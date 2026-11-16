@@ -2,10 +2,11 @@
 //
 // IEEE 754 half-precision samples (TIFF SampleFormat 3, 16 bits; GDAL's Float16) to and from float,
 // as GDAL's CPLHalfToFloat and CPLFloatToHalf convert them: subnormals, infinities and NaN payloads
-// kept; a float is truncated to a half, a value beyond the halves is an infinity. DoubleToHalf is
-// GDAL's GFloat16 from a double, which depends on the build: the compiler's _Float16 (correctly
-// rounded) where it has one (DDBT_HAVE__FLOAT16, the test GDAL's build makes: GCC and Clang on
-// x86-64, an MSVC that has it), else CPLFloatToHalf of the float.
+// kept; a float is truncated to a half, a value beyond the halves is an infinity. DoubleToHalf rounds a
+// double to the nearest half (ties to even), as GDAL's GFloat16 does with the compiler's _Float16
+// (DDBT_HAVE__FLOAT16, the test GDAL's build makes: GCC and Clang on x86-64). A GDAL built without
+// _Float16 (MSVC) rounds only the halves it converts eight at a time (GDALCopyWords) and truncates the
+// others, depending on where a sample falls in a buffer: ddb-tilers rounds them all, on every platform.
 #pragma once
 
 #include <cstdint>
@@ -63,6 +64,43 @@ inline uint16_t FloatToHalf(float value) noexcept {
     return static_cast<uint16_t>((sign << 15) | (exponent << 10) | mantissa);
 }
 
+/// A double rounded once to the nearest half, ties to even (IEEE 754), without _Float16: subnormal
+/// halves, an infinity past 65504 (65520 and above), a NaN quiet with the top of its payload
+inline uint16_t DoubleToHalfNearest(double value) noexcept {
+    uint64_t d = 0;
+    std::memcpy(&d, &value, sizeof d);
+    const auto sign = static_cast<uint16_t>((d >> 48) & 0x8000u);
+    const auto exponent = static_cast<int>((d >> 52) & 0x7FFu);
+    const uint64_t mantissa = d & ((uint64_t{1} << 52) - 1);
+    if (exponent == 0x7FF) {
+        if (mantissa == 0) return static_cast<uint16_t>(sign | 0x7C00u);  // infinity
+        return static_cast<uint16_t>(sign | 0x7E00u | ((mantissa >> 42) & 0x3FFu));  // quiet NaN
+    }
+    if (exponent == 0) return sign;  // zero, or a double subnormal: far below the halves
+    const uint64_t m = mantissa | (uint64_t{1} << 52);
+    // Rounds q + rem / 2^shift to the nearest integer, ties to even
+    const auto round = [](uint64_t q, uint64_t rem, int shift) {
+        const uint64_t half = uint64_t{1} << (shift - 1);
+        return (rem > half || (rem == half && (q & 1u) != 0)) ? q + 1 : q;
+    };
+    const int e = exponent - 1023 + 15;  // the exponent of a normal half
+    if (e <= 0) {
+        // A subnormal half: the value in units of 2^-24 is m / 2^(1051 - exponent)
+        const int shift = 1051 - exponent;
+        if (shift >= 54) return sign;  // below half of the smallest subnormal
+        const uint64_t q = round(m >> shift, m & ((uint64_t{1} << shift) - 1), shift);
+        return static_cast<uint16_t>(sign | q);  // 0x400 is the smallest normal half
+    }
+    uint64_t q = round(mantissa >> 42, mantissa & ((uint64_t{1} << 42) - 1), 42);
+    int halfExponent = e;
+    if (q == 0x400u) {  // rounded up into the next binade
+        q = 0;
+        ++halfExponent;
+    }
+    if (halfExponent >= 31) return static_cast<uint16_t>(sign | 0x7C00u);  // infinity
+    return static_cast<uint16_t>(sign | (static_cast<unsigned>(halfExponent) << 10) | q);
+}
+
 inline uint16_t DoubleToHalf(double value) noexcept {
 #if defined(DDBT_HAVE__FLOAT16)
     const _Float16 h = static_cast<_Float16>(value);
@@ -70,7 +108,7 @@ inline uint16_t DoubleToHalf(double value) noexcept {
     std::memcpy(&bits, &h, sizeof bits);
     return bits;
 #else
-    return FloatToHalf(static_cast<float>(value));
+    return DoubleToHalfNearest(value);
 #endif
 }
 
