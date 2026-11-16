@@ -4,7 +4,8 @@
 // as GDAL's CPLHalfToFloat and CPLFloatToHalf convert them: subnormals, infinities and NaN payloads
 // kept; a float is truncated to a half, a value beyond the halves is an infinity. DoubleToHalf is
 // GDAL's GFloat16 from a double, which depends on the build: the compiler's _Float16 (correctly
-// rounded) where it has one, as GCC and Clang on x86-64, else CPLFloatToHalf of the float.
+// rounded) where it has one (DDBT_HAVE__FLOAT16, the test GDAL's build makes: GCC and Clang on
+// x86-64, an MSVC that has it), else CPLFloatToHalf of the float.
 #pragma once
 
 #include <cstdint>
@@ -63,7 +64,7 @@ inline uint16_t FloatToHalf(float value) noexcept {
 }
 
 inline uint16_t DoubleToHalf(double value) noexcept {
-#if defined(__FLT16_MAX__)
+#if defined(DDBT_HAVE__FLOAT16)
     const _Float16 h = static_cast<_Float16>(value);
     uint16_t bits = 0;
     std::memcpy(&bits, &h, sizeof bits);

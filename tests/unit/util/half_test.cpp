@@ -37,7 +37,7 @@ TEST(Half, aFloatIsTruncatedAndADoubleRoundedAsGdalsBuildDoes) {
     EXPECT_EQ(FloatToHalf(between), 0x3C00);
     EXPECT_EQ(FloatToHalf(1e6f), 0x7C00);   // beyond the halves: infinity
     EXPECT_EQ(FloatToHalf(1e-9f), 0x0000);  // below them: zero
-#if defined(__FLT16_MAX__)
+#if defined(DDBT_HAVE__FLOAT16)
     // With the compiler's _Float16, GDAL's GFloat16 rounds the double to nearest
     EXPECT_EQ(DoubleToHalf(static_cast<double>(between)), 0x3C01);
     EXPECT_EQ(DoubleToHalf(-9999.0), 0xF0E2);  // -10000: the nearest half

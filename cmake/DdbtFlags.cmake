@@ -97,6 +97,23 @@ endif()
 target_compile_definitions(ddbt_flags INTERFACE
   "HWY_DISABLED_TARGETS=(HWY_AVX3_SPR|HWY_AVX10_2)")
 
+# Whether the compiler has _Float16 with its conversions, tested as GDAL's build tests it
+# (HAVE__FLOAT16, cmake/helpers/configure.cmake of GDAL): GDAL converts a double to a half through
+# _Float16 (rounded to nearest) when it has one, else by truncating the float, and our halves must be
+# GDAL's with the same compiler (util::DoubleToHalf). GCC and Clang have it on x86-64; MSVC decides.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+  int main() {
+    _Float16 h = 1;
+    float f = h;
+    double d = h;
+    return f != 0 && d != 0 ? 0 : 1;
+  }
+" DDBT_HAVE__FLOAT16)
+if(DDBT_HAVE__FLOAT16)
+  target_compile_definitions(ddbt_flags INTERFACE DDBT_HAVE__FLOAT16)
+endif()
+
 # Build information baked into the library (version.cpp).
 execute_process(COMMAND git rev-parse --short HEAD
                 WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
