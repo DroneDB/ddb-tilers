@@ -355,12 +355,17 @@ std::string DecodeRegionMaskColumn(const PassPlan& pp, Region& g, uint32_t mc) {
         if (!d->sparse) {
             const int bx0 = static_cast<int>(mc) * mw;
             const int vw = std::min(mw, pp.W - bx0);
+            // A 1-bit mask as 0 / 255, an 8-bit one as it is
+            const bool bits = d->sampleType == tiff::SampleType::kBit1;
             for (; y < yEnd; ++y) {
                 const int my = y - mbr * mh;
-                tiff::ExpandBits(d->data() + static_cast<size_t>(my) * d->rowStride, d->rowStride,
-                                 static_cast<uint32_t>(vw), 1, 255, row.data(), static_cast<size_t>(vw));
+                const uint8_t* in = d->data() + static_cast<size_t>(my) * d->rowStride;
+                if (bits) {
+                    tiff::ExpandBits(in, d->rowStride, static_cast<uint32_t>(vw), 1, 255, row.data(), static_cast<size_t>(vw));
+                    in = row.data();
+                }
                 std::memcpy(g.mask.data() + static_cast<size_t>(y - g.y0) * static_cast<size_t>(rw) + (cx0 - g.x0),
-                            row.data() + (cx0 - bx0), static_cast<size_t>(cx1 - cx0));
+                            in + (cx0 - bx0), static_cast<size_t>(cx1 - cx0));
             }
         }
         y = yEnd;

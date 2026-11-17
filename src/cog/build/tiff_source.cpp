@@ -225,9 +225,16 @@ Status TiffSource::ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const
     if (!maskIfd_) return Status(StatusCode::kInvalidArgument, "no mask");
     const tiff::IfdInfo& m = Data();
     const tiff::IfdInfo& k = reader_->Ifd(*maskIfd_);
-    if (k.blockWidth != m.blockWidth || k.blockHeight != m.blockHeight || k.sampleType != tiff::SampleType::kBit1)
+    // GDAL reads a mask of 1 bit (as 0 / 255) or of 8 bits a pixel
+    const bool bytes = k.sampleType == tiff::SampleType::kU8 && k.samplesPerPixel == 1;
+    if (k.blockWidth != m.blockWidth || k.blockHeight != m.blockHeight ||
+        (k.sampleType != tiff::SampleType::kBit1 && !bytes))
         return Status(StatusCode::kUnsupported, "Mask blocks differ from the image blocks in " + path_);
     const uint32_t index = k.BlockIndex(col, row, 0);
+    if (bytes) {
+        auto r = reader_->ReadBlockInto(*maskIfd_, index, {out, static_cast<size_t>(reader_->DecodedSize(*maskIfd_, index))});
+        return r.ok() ? Status::Ok() : r.status();
+    }
     auto b = reader_->ReadBlock(*maskIfd_, index);
     if (!b.ok()) return b.status();
     tiff::ExpandBits(b->data(), b->rowStride, k.blockWidth, b->height, 255, out, k.blockWidth);

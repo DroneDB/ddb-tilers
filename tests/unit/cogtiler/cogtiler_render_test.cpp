@@ -301,3 +301,46 @@ TEST(CogTilerRender, TwoBandsAreRedAndGreenWithTheirAlpha) {
         EXPECT_EQ(wrong, 0) << alphaBand;
     }
 }
+
+namespace {
+
+/// A graded mask over the columns of the where-raster (full-resolution columns): transparent left of
+/// 256, opaque from 768, a ramp between (one block column of 256 all 0, one all 255, two graded)
+uint8_t GradedMaskOfColumn(uint32_t column) {
+    if (column < 256) return 0;
+    if (column >= 768) return 255;
+    return static_cast<uint8_t>((column - 256) * 255 / 512);
+}
+
+}  // namespace
+
+TEST(CogTilerRender, AnEightBitMaskIsTheAlphaOfTheTile) {
+    // An internal mask of 8 bits a pixel (a feathered or semi-transparent raster), which GDAL reads
+    // as it is: the alpha of each tile pixel is the mask value of the level pixel it shows, the
+    // blocks all 0 and all 255 included.
+    TempDir dir;
+    const fs::path tif = dir.path() / "graded.tif";
+    SynthSpec s = WhereSpec();
+    s.mask8 = [](uint32_t x, uint32_t, int level) { return GradedMaskOfColumn(x << level); };
+    WriteSynth(tif, s);
+    int graded = 0, drawn = 0, wrong = 0;
+    for (const int z : {17, 19, 21}) {
+        const double cy = kOriginY - kH * kPixel * 0.5;
+        for (const uint32_t column : {100u, 300u, 512u, 760u, 900u}) {
+            const auto [tx, ty] = TileOf(kOriginX + column * kPixel, cy, z);
+            const auto rgba = RenderRgba(tif.string(), z, tx, ty);
+            for (size_t i = 0; i < rgba.size(); i += 4) {
+                const uint8_t a = rgba[i + 3];
+                if (a == 0) continue;
+                ++drawn;
+                const int level = rgba[i + 2] / 64;
+                const uint32_t col = static_cast<uint32_t>(((rgba[i + 2] % 64) / 4) * 256 + rgba[i]);
+                wrong += a != GradedMaskOfColumn(col << level);
+                graded += a != 255;
+            }
+        }
+    }
+    EXPECT_GT(drawn, 10000);
+    EXPECT_GT(graded, 1000) << "the mask was drawn as 0 / 255";
+    EXPECT_EQ(wrong, 0);
+}

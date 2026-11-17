@@ -117,6 +117,8 @@ void WriteReport(const std::string& path, const BuildReport& r) {
     j.obj["codec"] = json::String(r.codec);
     j.obj["jpegQuality"] = json::Unsigned(static_cast<uint64_t>(r.jpegQuality));
     j.obj["transparency"] = json::String(r.transparency);
+    j.obj["maskBits"] = json::Unsigned(static_cast<uint64_t>(r.maskBits));
+    j.obj["passes"] = json::Unsigned(static_cast<uint64_t>(r.passes));
     j.obj["fileSize"] = json::Unsigned(r.file.fileSize);
     j.obj["prefixBytes"] = json::Unsigned(r.file.prefixBytes);
     j.obj["fullResBytes"] = json::Unsigned(r.file.fullResBytes);

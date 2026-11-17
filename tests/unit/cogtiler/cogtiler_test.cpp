@@ -574,6 +574,43 @@ TEST(CogTilerStats, DefaultPassIsTheExactPass) {
     EXPECT_EQ(d[1]->mean, 349.5);
 }
 
+TEST(CogTilerStats, AnEightBitMaskLeavesOutItsZeros) {
+    // An internal mask of 8 bits a pixel (a graded one, which GDAL reads as it is): the statistics
+    // leave out the pixels where it is 0 and keep every other, as GDAL's do, in both passes. Read as
+    // packed bits, its bytes left the wrong pixels out.
+    TempDir dir;
+    const fs::path tif = dir.path() / "graded.tif";
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(1000, 1, 1);
+    spec.height = 300;
+    spec.tile = 256;
+    spec.value = [](int, uint32_t x, uint32_t y) { return static_cast<float>((x + y) % 200 + 10); };
+    // Transparent left of 300, a ramp from 1 to 255 over 300 to 554, opaque after
+    const auto alpha = [](uint32_t x) -> uint8_t { return x < 300 ? 0 : static_cast<uint8_t>(std::min(255u, x - 299)); };
+    spec.mask8 = [alpha](uint32_t x, uint32_t, int) { return alpha(x); };
+    syn::WriteSynth(tif, spec);
+    double mn = 1e9, mx = -1e9, sum = 0;
+    uint64_t n = 0;
+    for (uint32_t y = 0; y < spec.height; ++y)
+        for (uint32_t x = 0; x < spec.width; ++x) {
+            if (alpha(x) == 0) continue;
+            const double v = spec.value(0, x, y);
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+            sum += v;
+            ++n;
+        }
+    const auto src = CogSource::Open(tif.string());
+    for (const auto mode : {ddbt::cog::stats::StatsMode::kExact, ddbt::cog::stats::StatsMode::kCompat}) {
+        const auto st = ComputeBandStatistics(*src, {1}, std::nullopt, mode);
+        ASSERT_TRUE(st[0]);
+        EXPECT_EQ(st[0]->validCount, n) << static_cast<int>(mode);
+        EXPECT_EQ(st[0]->min, mn);
+        EXPECT_EQ(st[0]->max, mx);
+        EXPECT_NEAR(st[0]->mean, sum / static_cast<double>(n), 1e-9);
+    }
+}
+
 TEST(CogTilerStats, CompatPassIndependentOfThreads) {
     const auto c = BaselineCase("R1");
     if (!c) GTEST_SKIP() << "R1 baseline build missing";

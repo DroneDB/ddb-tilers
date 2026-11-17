@@ -308,7 +308,7 @@ struct CogWriter::Impl {
             d.entries.push_back(Long(tiff::tag::kNewSubfileType, level == 0 ? 4 : 5));
             d.entries.push_back(ShortOrLong(tiff::tag::kImageWidth, l.width));
             d.entries.push_back(ShortOrLong(tiff::tag::kImageLength, l.height));
-            d.entries.push_back(Short(tiff::tag::kBitsPerSample, 1));
+            d.entries.push_back(Short(tiff::tag::kBitsPerSample, spec.maskBits));
             d.entries.push_back(Short(tiff::tag::kCompression, 8));
             d.entries.push_back(Short(tiff::tag::kPhotometric, tiff::photometric::kMask));
             d.entries.push_back(Short(tiff::tag::kSamplesPerPixel, 1));
@@ -621,6 +621,8 @@ Expected<std::unique_ptr<CogWriter>> CogWriter::Create(const std::string& path, 
         return Status(StatusCode::kInvalidArgument, "COG writer: bad image or block size");
     if (spec.samples == 0 || tiff::SampleTypeSize(spec.type) == 0)
         return Status(StatusCode::kInvalidArgument, "COG writer: bad sample layout");
+    if (spec.maskBits != 1 && spec.maskBits != 8)
+        return Status(StatusCode::kInvalidArgument, "COG writer: a mask has 1 or 8 bits a sample");
     auto impl = std::make_unique<Impl>();
     impl->path = path;
     impl->spec = std::move(spec);

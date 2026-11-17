@@ -28,8 +28,12 @@ rows it reads exist. Every source block is decoded once. Details:
 
 - Grid and resampling as DroneDB's COG build: GDAL's suggested warp output, `UPPER` zoom
   strategy, bilinear warp, cubic overviews (mask-aware).
-- JPEG quality 75 YCbCr for 8-bit RGB(A) without nodata (a 1-bit mask for the alpha), else LZW
+- JPEG quality 75 YCbCr for 8-bit RGB(A) without nodata (the alpha as a 1-bit mask), else LZW
   (default), DEFLATE or ZSTD with a predictor.
+- A graded alpha (values between transparent and opaque: a feathered edge, a semi-transparent
+  overlay) is kept as an 8-bit internal mask, which GDAL reads as it reads a 1-bit one. The pass
+  sees the alpha as it reads it: when it meets a graded value it stops and the build runs again
+  with the 8-bit mask, so only such a source is read twice (up to where its alpha is graded).
 - Fully transparent tiles are not written (sparse COG); classic TIFF unless the file is larger
   than 4 GiB.
 - Exact statistics are accumulated during the pass (no second read).

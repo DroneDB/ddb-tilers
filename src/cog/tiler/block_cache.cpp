@@ -61,15 +61,26 @@ CachedBlock Decode(const CogSource& source, uint32_t ifd, uint32_t index) {
         ThrowIfError(decoded.status(), "Cannot read block " + std::to_string(index) + " of " + source.Path());
     CachedBlock cb;
     const tiff::IfdInfo& info = r.Ifd(ifd);
+    const bool mask = info.kind == tiff::SubfileKind::kMask || info.kind == tiff::SubfileKind::kOverviewMask;
+    // The pixels of the block inside the raster (it may end inside the block), and their samples a row
+    const uint32_t col = info.BlockColumn(index), row = info.BlockRow(index);
+    const uint32_t vw = std::min(decoded->width, info.width - col * info.blockWidth) * decoded->samples;
+    const uint32_t vh =
+        std::min(decoded->height, info.height > row * info.blockHeight ? info.height - row * info.blockHeight : 0u);
+    if (mask && decoded->sampleType == tiff::SampleType::kU8 && decoded->samples == 1) {
+        // An 8-bit mask (a graded one, which GDAL reads as it is): its summary from its bytes
+        const tiff::MaskBytesSummary s = tiff::SummarizeMaskBytes(decoded->data(), decoded->rowStride, vw, vh);
+        cb.summary = s.anyBetween || (s.any0 && s.any255) ? MaskSummary::kMixed
+                     : s.any255                           ? MaskSummary::kAllOne
+                                                          : MaskSummary::kAllZero;
+        cb.block = std::move(*decoded);
+        return cb;
+    }
     if (decoded->sampleType == tiff::SampleType::kBit1) {
         // Bytes: GDAL reads a 1-bit mask band as 0 / 255, a 1-bit band of the image as 0 / 1
-        const bool mask = info.kind == tiff::SubfileKind::kMask || info.kind == tiff::SubfileKind::kOverviewMask;
-        const uint32_t w = decoded->width, h = decoded->height, spp = decoded->samples;
+        const uint32_t spp = decoded->samples;
         tiff::DecodedBlock bytes = BitsAsBytes(*decoded, mask ? 255 : 1);
-        // Summary over the valid part (the raster may end inside the block), from the packed bits.
-        const uint32_t col = info.BlockColumn(index), row = info.BlockRow(index);
-        const uint32_t vw = std::min(w, info.width - col * info.blockWidth) * spp;
-        const uint32_t vh = std::min(h, info.height > row * info.blockHeight ? info.height - row * info.blockHeight : 0u);
+        // Summary over the valid part, from the packed bits.
         bool any0 = false, any1 = false;
         if (decoded->sparse) {
             any0 = vw != 0 && vh != 0;

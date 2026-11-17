@@ -6,7 +6,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdint>
+#include <functional>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -78,7 +81,9 @@ double StatsMin(const std::string& path, int band) {
 syn::SynthSpec OpaqueSource(int bands) {
     syn::SynthSpec s = syn::Spec(300, bands, 1);
     s.height = 200;
-    s.value = [](int b, uint32_t x, uint32_t y) { return static_cast<float>(50 + (x + 2 * y + 30 * b) % 150); };
+    s.value = [](int b, uint32_t x, uint32_t y) {
+        return static_cast<float>(50 + (x + 2 * y + 30 * static_cast<uint32_t>(b)) % 150);
+    };
     return s;
 }
 
@@ -107,17 +112,23 @@ TEST(WarpTransparency, ASourceWithoutTransparencyGetsAMaskOfThePixelsOutsideIt) 
             if (o.mask[i] == 255) {
                 ++inside;
                 // A JPEG moves the values by a few units
-                if (!jpeg) ASSERT_GE(o.bands[0][i], 50) << i;
+                if (!jpeg) {
+                    ASSERT_GE(o.bands[0][i], 50) << i;
+                }
             } else {
                 ASSERT_EQ(o.mask[i], 0);
                 ++outside;
-                if (!jpeg) ASSERT_EQ(o.bands[0][i], 0) << i;
+                if (!jpeg) {
+                    ASSERT_EQ(o.bands[0][i], 0) << i;
+                }
             }
         }
         // 300 x 200 source pixels of 0.25 m warped at the next zoom's finer resolution
         EXPECT_GT(inside, 300u * 200u);
         EXPECT_GT(outside, 0u);
-        if (!jpeg) EXPECT_GE(StatsMin(out, 1), 50.0) << "the padding is in the statistics";
+        if (!jpeg) {
+            EXPECT_GE(StatsMin(out, 1), 50.0) << "the padding is in the statistics";
+        }
     }
 }
 
@@ -215,6 +226,144 @@ TEST(WarpTransparency, APaletteIsWarpedByNearestNeighbour) {
         ASSERT_TRUE(o.bands[0][i] == 10 || o.bands[0][i] == 200) << "index " << int{o.bands[0][i]} << " at " << i;
     }
     EXPECT_GT(inside, 64u * 64u);
+}
+
+// An 8-bit RGBA source off the tile grid (warped to a JPEG COG, its alpha into the internal mask),
+// large enough for overviews (so that its COG is encoded again on its own grid), with the alpha
+// `alpha` (0 transparent, 255 opaque).
+syn::SynthSpec RgbaSource(std::function<uint8_t(uint32_t x, uint32_t y)> alpha) {
+    syn::SynthSpec s = syn::Spec(1200, 4, 1);
+    s.height = 800;
+    s.tile = 256;
+    s.photometric = 2;
+    s.extraSamples = {2};  // unassociated alpha
+    s.value = [alpha = std::move(alpha)](int b, uint32_t x, uint32_t y) {
+        return b == 3 ? static_cast<float>(alpha(x, y))
+                      : static_cast<float>(60 + (x / 7 + y / 5 + 40 * static_cast<uint32_t>(b)) % 120);
+    };
+    return s;
+}
+
+// The bits of a sample of the internal mask of every level of `path` (0 for a level without one)
+std::vector<uint16_t> MaskBitsOfLevels(const std::string& path) {
+    std::vector<uint16_t> bits;
+    auto r = tiff::TiffReader::Open(path);
+    EXPECT_TRUE(r.ok());
+    if (!r.ok()) return bits;
+    const tiff::TiffReader& rd = **r;
+    std::vector<uint32_t> levels = {rd.MainImage()};
+    for (const uint32_t o : rd.Overviews()) levels.push_back(o);
+    for (const uint32_t l : levels) {
+        const auto m = rd.MaskOf(l);
+        bits.push_back(m ? rd.Ifd(*m).bitsPerSample : 0);
+    }
+    return bits;
+}
+
+// The values of a mask between transparent and opaque, and how many distinct ones
+struct Grades {
+    size_t pixels = 0, values = 0;
+};
+Grades GradesOf(const std::vector<uint8_t>& mask) {
+    Grades g;
+    std::array<bool, 256> seen{};
+    for (const uint8_t v : mask) {
+        if (v == 0 || v == 255) continue;
+        ++g.pixels;
+        if (!seen[v]) ++g.values;
+        seen[v] = true;
+    }
+    return g;
+}
+
+// A graded alpha (a feathered edge, a semi-transparent overlay: values between 0 and 255) is kept in
+// an internal mask of 8 bits a pixel at every level, as the warp computes it, instead of the 1-bit
+// mask that made each of its pixels transparent or opaque. The build pass sees the alpha as it
+// reads it: a pass that meets a graded value stops and the build runs again with the 8-bit mask,
+// also when the only graded values are in the last row of the source.
+TEST(WarpTransparency, AGradedAlphaIsKeptInAnEightBitMask) {
+    TempDir dir;
+    const auto ramp = [](uint32_t x, uint32_t) -> uint8_t {
+        return x < 200 ? 0 : x >= 1000 ? 255 : static_cast<uint8_t>((x - 200) * 255 / 800);
+    };
+    const auto lastRow = [](uint32_t x, uint32_t y) -> uint8_t {
+        return y < 799 ? 255 : static_cast<uint8_t>(x * 255 / 1200);
+    };
+    for (const bool everywhere : {true, false}) {
+        const std::string in = dir.File(everywhere ? "ramp.tif" : "last-row.tif");
+        const std::string out = dir.File(everywhere ? "ramp-cog.tif" : "last-row-cog.tif");
+        syn::WriteSynth(in, RgbaSource(everywhere ? std::function<uint8_t(uint32_t, uint32_t)>(ramp) : lastRow));
+        BuildReport rep;
+        const Status s = BuildCog(in, out, {}, &rep);
+        ASSERT_TRUE(s.ok()) << s.message();
+        EXPECT_EQ(rep.codec, "JPEG");
+        EXPECT_EQ(rep.transparency, "mask");
+        EXPECT_EQ(rep.maskBits, 8) << everywhere;
+        EXPECT_EQ(rep.passes, 2) << everywhere;
+        const std::vector<uint16_t> bits = MaskBitsOfLevels(out);
+        ASSERT_GT(bits.size(), 1u) << "no overviews";
+        for (const uint16_t b : bits) EXPECT_EQ(b, 8) << everywhere;
+        const Output o = ReadOutput(out);
+        ASSERT_FALSE(o.mask.empty());
+        const Grades g = GradesOf(o.mask);
+        // The ramp covers 800 source columns (some 1360 output columns) with every value; the last row
+        // its two output rows
+        EXPECT_GT(g.values, everywhere ? 250u : 200u) << everywhere;
+        EXPECT_GT(g.pixels, everywhere ? 1000000u : 1500u) << everywhere;
+        if (everywhere) {
+            // Left to right along a row inside the source, the mask follows the ramp (up to the right
+            // edge of the source, past which it is 0)
+            const size_t row = o.height / 2;
+            uint32_t end = o.width;
+            while (end > 0 && o.mask[row * o.width + end - 1] != 255) --end;
+            ASSERT_GT(end, o.width / 2);
+            int previous = 0, drops = 0;
+            for (uint32_t x = 0; x < end; ++x) {
+                const int v = o.mask[row * o.width + x];
+                drops += v + 1 < previous;
+                previous = std::max(previous, v);
+            }
+            EXPECT_EQ(drops, 0);
+        }
+    }
+}
+
+// An alpha of transparent and opaque pixels only (an orthophoto's) keeps GDAL's 1-bit mask, built in
+// one pass: the values the warp computes between them at the edge are not a graded alpha.
+TEST(WarpTransparency, AnAlphaOfTransparentAndOpaquePixelsKeepsAOneBitMask) {
+    TempDir dir;
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    syn::WriteSynth(in, RgbaSource([](uint32_t x, uint32_t y) -> uint8_t { return x + y < 300 ? 0 : 255; }));
+    BuildReport rep;
+    const Status s = BuildCog(in, out, {}, &rep);
+    ASSERT_TRUE(s.ok()) << s.message();
+    EXPECT_EQ(rep.transparency, "mask");
+    EXPECT_EQ(rep.maskBits, 1);
+    EXPECT_EQ(rep.passes, 1);
+    for (const uint16_t b : MaskBitsOfLevels(out)) EXPECT_EQ(b, 1);
+    const Output o = ReadOutput(out);
+    EXPECT_EQ(GradesOf(o.mask).pixels, 0u);
+}
+
+// The COG of a graded alpha, encoded again on its own grid (a COG already on the tile grid), keeps its
+// 8-bit mask as it is: the source's mask was refused ("Mask blocks differ"), and a 1-bit one would
+// have flattened it.
+TEST(WarpTransparency, AnEightBitMaskIsKeptWhenItsCogIsEncodedAgain) {
+    TempDir dir;
+    const std::string in = dir.File("in.tif"), cog = dir.File("cog.tif"), again = dir.File("again.tif");
+    syn::WriteSynth(in, RgbaSource([](uint32_t x, uint32_t) -> uint8_t { return static_cast<uint8_t>(x * 255 / 1200); }));
+    ASSERT_TRUE(BuildCog(in, cog, {}).ok());
+    BuildReport rep;
+    const Status s = BuildCog(cog, again, {}, &rep);
+    ASSERT_TRUE(s.ok()) << s.message();
+    EXPECT_TRUE(rep.ownGrid);
+    EXPECT_EQ(rep.transparency, "mask");
+    EXPECT_EQ(rep.maskBits, 8);
+    for (const uint16_t b : MaskBitsOfLevels(again)) EXPECT_EQ(b, 8);
+    const Output a = ReadOutput(cog), b = ReadOutput(again);
+    ASSERT_EQ(a.mask.size(), b.mask.size());
+    EXPECT_TRUE(a.mask == b.mask);
+    EXPECT_GT(GradesOf(b.mask).values, 250u);
 }
 
 }  // namespace

@@ -60,6 +60,7 @@ struct SourceSpec {
     int bands = 0;                 // source bands
     std::vector<int> warped;       // source bands warped into the output (alpha excluded)
     int alpha = -1;                // source alpha band (density)
+    float alphaMax = 255.0f;           // SRC_ALPHA_MAX: opaque
     float alphaScale = 1.0f / 255.0f;  // 1 / SRC_ALPHA_MAX
     bool mask = false;             // the internal mask as the unified validity
     std::optional<double> nodata;  // source nodata (per band and unified validity)
@@ -90,7 +91,9 @@ SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
     const bool noSrcAlpha = settings.grid && settings.noSrcAlpha;
     if (!noSrcAlpha && src.AlphaBand() == s.bands - 1 && s.bands > 1) {
         s.alpha = s.bands - 1;
-        s.alphaScale = static_cast<float>(1.0 / AlphaMax(src.Type(), src.Nbits(s.alpha)));
+        const double max = AlphaMax(src.Type(), src.Nbits(s.alpha));
+        s.alphaMax = static_cast<float>(max);
+        s.alphaScale = static_cast<float>(1.0 / max);
     }
     for (int b = 0; b < s.bands; ++b)
         if (b != s.alpha) s.warped.push_back(b);
@@ -229,6 +232,7 @@ public:
         mapping_.width = W_;
         mapping_.height = H_;
         InitKernelParams();
+        detectGraded_ = plan_.MaskOut() && !plan_.gradedMask && spec_.alpha >= 0;
         cache_.Init(static_cast<size_t>(across_) * static_cast<size_t>(down_));
         // Planning pass: the source window of every output tile, and the consumers of each block.
         exec::ParallelFor(0, windows_.size(), 16, [&](size_t i) {
@@ -248,6 +252,7 @@ public:
 
     uint64_t BlocksDecoded() const override { return cache_.decoded.load(); }
     uint64_t PeakCacheBytes() const override { return cache_.peak.load(); }
+    bool SawGradedTransparency() const override { return graded_.load(std::memory_order_relaxed); }
 
     void Produce(uint32_t col, Strip& strip) override {
         const uint32_t B = plan_.blockSize;
@@ -771,10 +776,19 @@ private:
             const uint8_t* const alpha = win.px.data() + static_cast<size_t>(spec_.alpha) * ss;
             VisitSampleType(work_, [&]<typename T>() {
                 const float inv = spec_.alphaScale;
-                for (size_t i = 0; i < np; ++i) {
-                    // GDALWarpSrcAlphaMasker: value * (1 / SRC_ALPHA_MAX), at most 1.
-                    win.density[i] = std::min(1.0f, static_cast<float>(LoadSample<T>(alpha + i * win.pb)) * inv);
-                }
+                const auto densities = [&]<bool kDetect>() {
+                    bool graded = false;
+                    for (size_t i = 0; i < np; ++i) {
+                        // GDALWarpSrcAlphaMasker: value * (1 / SRC_ALPHA_MAX), at most 1.
+                        const float v = static_cast<float>(LoadSample<T>(alpha + i * win.pb));
+                        win.density[i] = std::min(1.0f, v * inv);
+                        if constexpr (kDetect) graded |= v > 0.0f && v < spec_.alphaMax;
+                    }
+                    if (graded) graded_.store(true, std::memory_order_relaxed);
+                };
+                // A 1-bit mask out of the alpha: is it more than transparent and opaque?
+                if (detectGraded_ && !graded_.load(std::memory_order_relaxed)) densities.template operator()<true>();
+                else densities.template operator()<false>();
             });
         } else {
             win.density.clear();
@@ -860,6 +874,9 @@ private:
     std::vector<Rect> windows_;
     BlockCache cache_;
     std::atomic<uint64_t> unplannedReads_{0};
+    // The output's 1-bit mask comes from a source alpha: watch for values between 0 and its maximum
+    bool detectGraded_ = false;
+    std::atomic<bool> graded_{false};
 };
 
 // The source's pixel <-> CRS mapping and its EPSG:3857 grid.

@@ -21,7 +21,8 @@ namespace ddbt::cog::tiler::testing {
 // of 1 (UInt8) or 4 (Float32) bytes, pixel or band interleaved, 0.25 m pixels with the
 // upper-left corner at (kOriginX, kOriginY). Tile padding past the image holds value(x, y) too.
 // Optionally: overviews of half the size each (rounded up, as GDAL's), the pixels of a level from
-// levelValue; a photometric interpretation, extra samples and a colour map; an internal mask.
+// levelValue; a photometric interpretation, extra samples and a colour map; an internal mask (of 1 or
+// 8 bits a pixel).
 inline constexpr double kOriginX = -10240777.0, kOriginY = 5916486.0, kPixel = 0.25;
 
 struct SynthSpec {
@@ -45,6 +46,8 @@ struct SynthSpec {
     std::vector<uint16_t> colorMap;        // TIFF ColorMap (3 x 2^bits values), with photometric 3
     /// An internal mask (all levels): 1 = valid.
     std::function<bool(uint32_t x, uint32_t y, int level)> mask;
+    /// An internal mask of 8 bits a pixel instead (all levels): its values (0 transparent, 255 opaque).
+    std::function<uint8_t(uint32_t x, uint32_t y, int level)> mask8;
 };
 
 inline SynthSpec Spec(uint32_t size, int bands, int bytes = 4) {
@@ -121,21 +124,24 @@ inline void WriteSynth(const std::filesystem::path& path, const SynthSpec& s) {
         if (!s.colorMap.empty()) e.push_back(t.Short(320, s.colorMap));
         if (s.nodata && level == 0) e.push_back(t.Ascii(42113, *s.nodata));
         t.AddIfd(e);
-        if (!s.mask) return;
-        // The mask: 1 bit a pixel, rows padded to a byte, blocks of the image's size.
+        if (!s.mask && !s.mask8) return;
+        // The mask: 1 bit a pixel, rows padded to a byte (or a byte a pixel), blocks of the image's size.
         std::vector<uint32_t> moff, mcount;
-        const uint32_t rowBytes = (tw + 7) / 8;
+        const uint16_t maskBits = s.mask8 ? 8 : 1;
+        const uint32_t rowBytes = s.mask8 ? tw : (tw + 7) / 8;
         for (uint32_t ty = 0; ty < down; ++ty)
             for (uint32_t tx = 0; tx < across; ++tx) {
                 std::vector<uint8_t> b(static_cast<size_t>(rowBytes) * th, 0);
                 for (uint32_t y = 0; y < th; ++y)
-                    for (uint32_t x = 0; x < tw; ++x)
-                        if (s.mask(tx * tw + x, ty * th + y, level))
-                            b[static_cast<size_t>(y) * rowBytes + x / 8] |= static_cast<uint8_t>(0x80u >> (x % 8));
+                    for (uint32_t x = 0; x < tw; ++x) {
+                        uint8_t& at = b[static_cast<size_t>(y) * rowBytes + (s.mask8 ? x : x / 8)];
+                        if (s.mask8) at = s.mask8(tx * tw + x, ty * th + y, level);
+                        else if (s.mask(tx * tw + x, ty * th + y, level)) at |= static_cast<uint8_t>(0x80u >> (x % 8));
+                    }
                 moff.push_back(static_cast<uint32_t>(t.AddData(b)));
                 mcount.push_back(static_cast<uint32_t>(b.size()));
             }
-        t.AddIfd({t.Long(254, {level > 0 ? 5u : 4u}), t.Long(256, {w}), t.Long(257, {h}), t.Short(258, {1}),
+        t.AddIfd({t.Long(254, {level > 0 ? 5u : 4u}), t.Long(256, {w}), t.Long(257, {h}), t.Short(258, {maskBits}),
                   t.Short(259, {1}), t.Short(262, {4}), t.Short(277, {1}), t.Long(322, {tw}), t.Long(323, {th}),
                   t.Long(324, moff), t.Long(325, mcount)});
     };

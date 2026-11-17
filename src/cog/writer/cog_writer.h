@@ -83,7 +83,8 @@ struct ImageSpec {
     encode::Codec codec = encode::Codec::kLzw;
     int predictor = 1;
     std::vector<uint8_t> jpegTables;  // JPEGTables tag of JPEG images
-    bool hasMask = false;              // 1-bit DEFLATE masks for every level
+    bool hasMask = false;              // DEFLATE masks for every level
+    uint16_t maskBits = 1;             // bits of a mask sample: 1, or 8 (a graded mask)
     std::string noDataText;            // GDAL_NODATA (empty: none)
     std::string gdalMetadata;          // GDAL_METADATA XML (empty: none)
     std::vector<RawTag> extraTags;     // ImageDescription, Software, resolution... (full resolution)
