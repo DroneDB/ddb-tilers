@@ -136,9 +136,10 @@ struct ThumbnailRequest {
 /// coloured points in their colours, others in the ramp over the header z range): in EPSG:3857
 /// (north up) when the cloud has a footprint, else in its own x, y (a cloud without a CRS, or
 /// without a transformation to EPSG:3857). Throws cog::tiler::TileError: kInvalidArgs for a
-/// bad size, kException for a cloud of zero extent or without points, kRefused for a root of more
-/// points than TileMaxPoints() (whatever pointBudget), like RenderTile else; `info` is filled also
-/// when the render throws once it has started.
+/// bad size, kException for a cloud of no finite extent or without points (a cloud of no extent in
+/// x and y is drawn at the centre), kRefused for a root of more points than TileMaxPoints()
+/// (whatever pointBudget), like RenderTile else; `info` is filled also when the render throws once
+/// it has started.
 void RenderThumbnail(const ThumbnailRequest& request, std::vector<uint8_t>& rgba, RenderInfo* info = nullptr);
 
 /// The footprint and zoom range of `path` for `tileSize` px tiles in the process-wide mode, as

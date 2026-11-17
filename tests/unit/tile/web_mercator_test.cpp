@@ -265,6 +265,16 @@ TEST(TileCompat, ZoomForPixelSizeAndLength) {
     const auto pc = compat::PointCloudZoomRange(m, 0, 0, 155.0, 142.0, 147);
     EXPECT_EQ(pc.min, 18);
     EXPECT_EQ(pc.max, 18 + 5);  // round(log2(147 / 4)) = round(5.2)
+    // A footprint of no extent in x or y (a line in plan) takes its longer side; one of no extent
+    // in either (one point) the length of a point cloud of no extent, 1 m: z25, not a saturated
+    // zoom whose max overflows
+    const auto line = compat::PointCloudZoomRange(m, 0, 0, 155.0, 0, 147);
+    EXPECT_EQ(line.min, 18);
+    EXPECT_EQ(line.max, 18 + 5);
+    const auto point = compat::PointCloudZoomRange(m, 10, 20, 10, 20, 147);
+    EXPECT_EQ(point.min, m.zoomForLength(compat::kPointCloudLengthOfNoExtent));
+    EXPECT_EQ(point.min, 25);
+    EXPECT_EQ(point.max, 25 + 5);
 }
 
 TEST(TileCompat, RasterBoundsQuirk) {

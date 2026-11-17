@@ -132,7 +132,15 @@ struct TileExtent {
 /// The span DroneDB uses for every COPC (getCopcInfo leaves it at 128).
 inline constexpr int kDroneDbCopcSpan = 128;
 
-/// PointCloudTiler: zoom range from the EPSG:3857 footprint and the COPC span.
+/// The side of the square a point cloud of no extent in x and y (one point, points on a vertical
+/// line) is tiled and drawn in, in the units of its footprint (metres in EPSG:3857): its points are
+/// at the centre whatever the side, which only has to be above 0.
+inline constexpr double kPointCloudLengthOfNoExtent = 1.0;
+
+/// PointCloudTiler: zoom range from the EPSG:3857 footprint and the COPC span. The length of the
+/// footprint is its shorter side; the longer one for a footprint of no extent in x or y (a line in
+/// plan); kPointCloudLengthOfNoExtent for one of no extent in either (zoomForLength(0) saturates and
+/// the max zoom past it overflows).
 ZoomRange PointCloudZoomRange(const GlobalMercator& m, double oMinX, double oMinY, double oMaxX, double oMaxY,
                               int span) noexcept;
 

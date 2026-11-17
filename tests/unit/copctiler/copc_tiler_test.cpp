@@ -20,8 +20,10 @@
 #include <thread>
 #include <unordered_set>
 
+#include "../copcbuild/synth_las.h"
 #include "api/copc_tile.h"
 #include "cog/tiler/tile_error.h"
+#include "copc/build/copc_builder.h"
 #include "copc/cache/node_cache.h"
 #include "copc/copc/copc_file.h"
 #include "copc/copc/node_decoder.h"
@@ -1327,6 +1329,61 @@ TEST_F(CopcTilerTest, AGeographicCrsOnCoordinatesItCannotHoldGivesNoTiles) {
     EXPECT_EQ(ddbt::crs::BoundsMisfit(cloud->crs(), 15, 45, 15.1, 91), "the coordinates do not fit WGS 84");
     // A projected CRS takes any value
     EXPECT_EQ(ddbt::crs::BoundsMisfit(ddbt::crs::Crs::FromWkt(test::kUtm33Wkt), 500000, 5000000, 500100, 5000100), "");
+}
+
+
+// A cloud of no extent in x and y (one point, points on a vertical line), as the builder writes it,
+// has a thumbnail with its points at the centre and a zoom range whose tile at the first zoom draws
+// them: the thumbnail had no area to fit ("zero extent") and the zoom range came from a length of 0
+// (zoomForLength saturates, the max zoom past it overflowed into an empty range)
+TEST_F(CopcTilerTest, ACloudOfNoExtentInXAndYHasAThumbnailAndTiles) {
+    struct Case {
+        const char* name;
+        uint64_t points;
+        std::array<int32_t, 3> extent;  // in units of the scale
+    };
+    for (const Case& c : {Case{"one-point", 1, {0, 0, 0}}, Case{"vertical-line", 200, {0, 0, 2000}}}) {
+        SCOPED_TRACE(c.name);
+        ddbt::copc::testing::SynthLas las;
+        las.format = 3;
+        las.wkt = test::kUtm33Wkt;
+        las.offset = {500000, 5000000, 0};
+        ddbt::copc::testing::FillRandom(las, c.points, 7, c.extent, false);
+        const std::string in = (*dir_ / (std::string(c.name) + ".las")).string();
+        const std::string path = (*dir_ / (std::string(c.name) + ".copc.laz")).string();
+        ASSERT_TRUE(ddbt::copc::testing::WriteBytes(in, ddbt::copc::testing::BuildLasBytes(las)));
+        build::CopcBuildOptions o;
+        o.metadata = false;
+        build::CopcBuildReport report;
+        ASSERT_TRUE(build::BuildCopc(in, path, o, &report).ok());
+        ASSERT_EQ(report.points, c.points);
+        EXPECT_GT(report.cube.halfSize, 0.0);  // one scale step on each side at least
+
+        ThumbnailRequest r;
+        r.path = path;
+        r.size = 64;
+        std::vector<uint8_t> rgba;
+        RenderInfo info;
+        ASSERT_NO_THROW(RenderThumbnail(r, rgba, &info));
+        EXPECT_EQ(info.points, c.points);
+        const Extent2 e = OpaqueExtent(rgba, 64);
+        ASSERT_GT(Opaque(rgba), 0u);
+        EXPECT_NEAR((e.minX + e.maxX) / 2.0, 31.5, 1.0);
+        EXPECT_NEAR((e.minY + e.maxY) / 2.0, 31.5, 1.0);
+
+        const compat::TileExtent extent = Extent(path, 256);
+        EXPECT_GT(extent.zooms.min, 0);
+        EXPECT_LE(extent.zooms.min, 30);
+        EXPECT_EQ(extent.zooms.max, extent.zooms.min + 5);
+        auto cloud = tiler::Cloud::Get(path);
+        const auto [x, tmsRow] = TilesAround(*cloud, extent.zooms.min, 256, 0).front();
+        TileRequest t;
+        t.path = path;
+        t.z = extent.zooms.min, t.x = x, t.y = tmsRow, t.tms = false, t.noCache = true;
+        std::vector<uint8_t> tile;
+        RenderRgba(*cloud, t, tile, &info);
+        EXPECT_GT(Opaque(tile), 0u);
+    }
 }
 
 }  // namespace

@@ -802,7 +802,13 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
 
     // The area drawn: the footprint in EPSG:3857, else the header bounds in the cloud's x, y
     const bool mercator = cloud->crsError().empty() && cloud->footprint().has_value();
-    const Rect area = mercator ? *cloud->footprint() : Rect{h.min[0], h.min[1], h.max[0], h.max[1]};
+    // A cloud of no extent in x and y (one point, points on a vertical line) is drawn at the centre
+    // of a square of kPointCloudLengthOfNoExtent
+    Rect area = mercator ? *cloud->footprint() : Rect{h.min[0], h.min[1], h.max[0], h.max[1]};
+    if (area.maxX == area.minX && area.maxY == area.minY) {
+        const double half = tile::compat::kPointCloudLengthOfNoExtent / 2;
+        area = Rect{area.minX - half, area.minY - half, area.maxX + half, area.maxY + half};
+    }
     const double width = area.maxX - area.minX, height = area.maxY - area.minY;
     if (!(std::max(width, height) > 0) || !std::isfinite(width) || !std::isfinite(height))
         throw TileError(TileErrorCode::kException, "Cannot calculate length: point cloud has zero extent");
