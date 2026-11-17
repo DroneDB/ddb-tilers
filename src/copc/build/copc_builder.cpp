@@ -90,7 +90,8 @@ struct TaskRef {
     uint32_t task;
 };
 
-/// Bounds, counts and colour seen by the scatter pass (merged from the tasks).
+/// Bounds, counts and colour seen by the scatter pass (merged from the tasks). The largest red,
+/// green or blue and the largest near infrared: 0 when no point has any (ChooseWrittenFormat).
 struct ScatterStats {
     std::array<int32_t, 3> minI{INT32_MAX, INT32_MAX, INT32_MAX};
     std::array<int32_t, 3> maxI{INT32_MIN, INT32_MIN, INT32_MIN};
@@ -98,6 +99,7 @@ struct ScatterStats {
     double gpsMin = std::numeric_limits<double>::infinity();
     double gpsMax = -std::numeric_limits<double>::infinity();
     uint16_t maxColor = 0;
+    uint16_t maxNir = 0;
     uint64_t points = 0;
     bool outside = false;
 
@@ -110,6 +112,7 @@ struct ScatterStats {
         gpsMin = std::min(gpsMin, o.gpsMin);
         gpsMax = std::max(gpsMax, o.gpsMax);
         maxColor = std::max(maxColor, o.maxColor);
+        maxNir = std::max(maxNir, o.maxNir);
         points += o.points;
         outside = outside || o.outside;
     }
@@ -258,7 +261,7 @@ public:
         keys_.resize(n);
         m_.KeysOfRecords(b.records, rs, n, keys_.data(), st_.outside);
         touched_.clear();
-        const bool rgb = spec_.format >= 7;
+        const bool rgb = spec_.format >= 7, nir = spec_.format == 8;
         const int shift = 3 * (kKeyBits - kHistDepth);
         for (size_t i = 0; i < n; ++i) {
             const uint8_t* r = b.records + i * rs;
@@ -275,9 +278,10 @@ public:
             st_.gpsMin = std::min(st_.gpsMin, g);
             st_.gpsMax = std::max(st_.gpsMax, g);
             if (rgb) {
-                const uint16_t c = std::max({LoadLE<uint16_t>(r + 30), LoadLE<uint16_t>(r + 32), LoadLE<uint16_t>(r + 34)});
-                st_.maxColor = std::max(st_.maxColor, c);
+                const uint8_t* c = r + readers::rec::kRgb;
+                st_.maxColor = std::max({st_.maxColor, LoadLE<uint16_t>(c), LoadLE<uint16_t>(c + 2), LoadLE<uint16_t>(c + 4)});
             }
+            if (nir) st_.maxNir = std::max(st_.maxNir, LoadLE<uint16_t>(r + readers::rec::kNir));
             const uint32_t bin = binOfCell_[keys_[i] >> shift];
             binIdx_[i] = bin;
             if (counts_[bin]++ == 0) touched_.push_back(bin);
@@ -378,6 +382,7 @@ public:
             store_.reset();
         }
         if (stats_.points == 0) return InvalidArgument("the input holds no points");
+        ChooseWrittenFormat();
         // The plan's tables are no longer needed; give the scatter's freed buffers back.
         std::vector<uint32_t>().swap(binOfCell_);
         std::vector<double>().swap(probeSample_);
@@ -465,6 +470,18 @@ private:
         for (const auto& r : readers_) n += r->Info().pointCount;
         expectedPoints_ = n;
         return Status();
+    }
+
+    /// The point format written (fields_.format): the records' (spec_.format), or 6 when no point
+    /// has a colour, every red, green, blue and near-infrared value 0. PDAL writes a cloud without
+    /// colour in format 7 or 8 with colours of 0 when it is asked for that format (a reprojection
+    /// written as format 7), and a reader that takes them as real draws the cloud black; written
+    /// colourless, it is drawn by elevation, as its source is. The scatter pass, which reads every
+    /// point, finds it, so the records keep their colour fields until EncodeNode drops them. A
+    /// near infrared of any point keeps the format (no LAS format has it without colour).
+    void ChooseWrittenFormat() {
+        const bool colourless = stats_.maxColor == 0 && stats_.maxNir == 0;
+        fields_.format = colourless ? 6 : spec_.format;
     }
 
     /// The CRS written: the first one an input states, or the target, to which each input's points
@@ -668,11 +685,15 @@ private:
                 spec_.offset[a] = off;
             }
         }
-        // Every coordinate must fit an int32.
+        // Every coordinate must fit an int32, as QuantizeXyz stores it: the bounds' integers, not
+        // their quotients. A source's own scale and offset are kept with no room to spare (its
+        // integers are copied as they are, up to the full int32 range), and its header bounds,
+        // computed back from those integers, may then fall a rounding error past +-(2^31 - 1).
+        // A scale and offset chosen above leave room (at most 2e9 steps from the offset), so a
+        // point at a bound, transformed to a target CRS or not, still quantises inside.
         for (size_t a = 0; a < 3; ++a) {
-            const double lo = (bounds_.min[a] - spec_.offset[a]) / spec_.scale[a];
-            const double hi = (bounds_.max[a] - spec_.offset[a]) / spec_.scale[a];
-            if (!(lo >= -2147483648.0 && hi <= 2147483647.0))
+            if (!readers::QuantizeCoordinate(bounds_.min[a], spec_.scale[a], spec_.offset[a]) ||
+                !readers::QuantizeCoordinate(bounds_.max[a], spec_.scale[a], spec_.offset[a]))
                 return OutOfRange("the bounds do not fit the LAS scale / offset");
         }
         fields_.scale = spec_.scale;
@@ -932,6 +953,11 @@ private:
         NodePoints root;
     };
 
+    /// The chunk of a node's records, in the point format written.
+    Status Encode(const uint8_t* records, size_t count, std::vector<uint8_t>& chunk) const {
+        return EncodeNode(fields_.format, spec_.format, spec_.extraBytes, records, count, chunk);
+    }
+
     Status ProcessPartition(size_t i, PartResult& out) {
         const Partition& p = partitions_[i];
         const size_t rs = spec_.RecordSize();
@@ -955,10 +981,9 @@ private:
                 entries.push_back({key, rec});
             }
         }
-        const int format = spec_.format, eb = spec_.extraBytes;
         EmitFn emit = [&](int d, uint64_t prefix, const uint8_t* recs, uint32_t count) -> Status {
             Emitted e{d, prefix, count, {}};
-            if (count) DDBT_TRY(EncodeNode(format, eb, recs, count, e.chunk));
+            if (count) DDBT_TRY(Encode(recs, count, e.chunk));
             out.emitted.push_back(std::move(e));
             return Status();
         };
@@ -1031,7 +1056,7 @@ private:
                     p->done.store(true, std::memory_order_release);
                 } else {
                     encodes.Spawn([p, this] {
-                        p->status = EncodeNode(spec_.format, spec_.extraBytes, p->records.data(), p->count, p->chunk);
+                        p->status = Encode(p->records.data(), p->count, p->chunk);
                         std::vector<uint8_t>().swap(p->records);
                         p->done.store(true, std::memory_order_release);
                     });
@@ -1168,7 +1193,7 @@ private:
         DDBT_TRY(flush(true));
         NodePoints& root = rootIsPartition_ ? partRoot[0] : topPoints.back();
         std::vector<uint8_t> chunk;
-        DDBT_TRY(EncodeNode(spec_.format, spec_.extraBytes, root.records.data(), root.size(), chunk));
+        DDBT_TRY(Encode(root.records.data(), root.size(), chunk));
         DDBT_TRY(w.AddNode(0, 0, static_cast<uint32_t>(root.size()), chunk));
 
         CopcFinalInfo fin;
@@ -1190,7 +1215,7 @@ private:
         r_.nodes = ws.nodes;
         r_.maxDepth = ws.maxDepth;
         r_.fileSize = ws.fileSize;
-        r_.format = spec_.format;
+        r_.format = fields_.format;
         r_.extraBytes = spec_.extraBytes;
         r_.scale = spec_.scale;
         r_.offset = spec_.offset;
@@ -1213,8 +1238,8 @@ private:
         in.min = final_.min;
         in.max = final_.max;
         in.wkt = fields_.wkt;
-        in.format = spec_.format;
-        in.color = spec_.format >= 7;
+        in.format = fields_.format;
+        in.color = fields_.format >= 7;
         in.color16 = r_.color16;
         in.spacing = r_.spacing;
         in.cube = cube_;

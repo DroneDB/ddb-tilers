@@ -3,7 +3,8 @@
 // The COPC builder:
 //
 //   1. Plan: open the inputs (LAS / LAZ / PLY / E57 / XYZ / PTS), choose the output point
-//      format (8 with NIR, 7 with colour, 6 otherwise: a colourless cloud stays colourless),
+//      format of the records (8 with NIR, 7 with colour, 6 otherwise: a colourless cloud stays
+//      colourless; format 6 is written when every colour the scatter reads is 0),
 //      the scale / offset (a single LAS input keeps its own), the cube (from the header bounds
 //      of LAS inputs, else from a bounds pass), then estimate the point density from a sample
 //      (the first points of every LAZ chunk, strided LAS records, the bounds pass) as a Morton

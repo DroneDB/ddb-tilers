@@ -57,11 +57,9 @@ Status QuantizeXyz(const OutputSpec& spec, const double* xyz, size_t count, uint
     const size_t rs = spec.RecordSize();
     for (size_t i = 0; i < count; ++i, records += rs) {
         for (size_t a = 0; a < 3; ++a) {
-            // As PDAL's LAS writer: round((v - offset) / scale).
-            const double v = std::round((xyz[3 * i + a] - spec.offset[a]) / spec.scale[a]);
-            if (!(v >= -2147483648.0 && v <= 2147483647.0))
-                return OutOfRange("coordinate " + std::to_string(xyz[3 * i + a]) + " does not fit the LAS scale / offset");
-            StoreLE<int32_t>(records + 4 * a, static_cast<int32_t>(v));
+            const std::optional<int32_t> v = QuantizeCoordinate(xyz[3 * i + a], spec.scale[a], spec.offset[a]);
+            if (!v) return OutOfRange("coordinate " + std::to_string(xyz[3 * i + a]) + " does not fit the LAS scale / offset");
+            StoreLE<int32_t>(records + 4 * a, *v);
         }
     }
     return Status();

@@ -14,8 +14,13 @@
 
 namespace ddbt::copc::build {
 
-/// Compresses `count` records (format 6, 7 or 8, `extraBytes` each, contiguous) into `out`
-/// (cleared first). Thread-safe (a compressor per call, or the calling thread's).
-Status EncodeNode(int format, int extraBytes, const uint8_t* records, size_t count, std::vector<uint8_t>& out);
+/// Compresses `count` records (point format `recordFormat`, 6, 7 or 8, then `extraBytes` bytes;
+/// contiguous) into `out` (cleared first) as point format `format`, 6 to `recordFormat`. A lower
+/// format keeps the fields the formats share, which lead every record (formats 6, 7 and 8 differ
+/// only by the colour and the near infrared after them), and the extra bytes: a cloud whose
+/// records were read with colour can be written without it. Thread-safe (a compressor per call,
+/// or the calling thread's).
+Status EncodeNode(int format, int recordFormat, int extraBytes, const uint8_t* records, size_t count,
+                  std::vector<uint8_t>& out);
 
 }  // namespace ddbt::copc::build
