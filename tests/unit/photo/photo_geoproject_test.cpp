@@ -161,7 +161,7 @@ TEST_P(PhotoGeoproject, IsGdalsWarpOfThePhoto) {
     if (!c.chunks.empty()) {
         auto src = OpenBuildSource(Fixture(c.photo), options);
         ASSERT_TRUE(src.ok()) << src.status().message();
-        const warp::WarpSettings ws = WarpSettingsOf(options);
+        const warp::WarpSettings ws = WarpSettingsOf(options, **src);
         auto plan = warp::WarpPlan(**src, ws);
         ASSERT_TRUE(plan.ok()) << plan.status().message();
         auto chunks = warp::GdalWarpChunks(**src, *plan, ws);

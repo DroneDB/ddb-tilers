@@ -65,8 +65,13 @@ struct SourceSpec {
     std::optional<double> nodata;  // source nodata (per band and unified validity)
     bool unifiedOnly = false;      // UNIFIED_SRC_NODATA=YES: no per-band validity
     bool dstAlpha = false;
+    /// The destination alpha is the output's internal mask, not an alpha band, whatever the codec
+    bool dstMask = false;
     std::optional<double> dstNodata;
     bool NoMasks() const { return alpha < 0 && !mask && !nodata; }
+    /// The output has an alpha band: a destination alpha that is not the mask (a JPEG output turns it
+    /// into its mask, WarpPlan)
+    bool AlphaBandOut() const { return dstAlpha && !dstMask; }
 };
 
 // GDAL's SetAlphaMax (gdalwarpoperation.cpp): the SRC_ALPHA_MAX / DST_ALPHA_MAX of an alpha band,
@@ -115,6 +120,12 @@ SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
         if (std::isfinite(v) && std::fabs(v) < 1e30) {
             s.dstNodata = v;
             s.unifiedOnly = true;
+            // The mask of the pixels the warp writes: those where not every band is at nodata (a
+            // source alpha band stays the output's alpha band)
+            if (s.alpha < 0 && build::NodataNeedsMask(static_cast<int>(s.warped.size()))) {
+                s.dstAlpha = true;
+                s.dstMask = true;
+            }
         } else {
             s.dstAlpha = true;
         }
@@ -123,6 +134,15 @@ SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
         s.dstAlpha = true;
     }
     if (s.alpha >= 0) s.dstAlpha = true;
+    if (!s.dstAlpha && !s.dstNodata) {
+        // A source without a nodata, mask or alpha (gdalwarp -dstalpha, as the COG driver's ADD_ALPHA
+        // does): the output covers whole tiles of its grid, so the pixels outside the source are not
+        // written, and the internal mask keeps them out of the map and of the statistics (an alpha
+        // band would change the band count, and GDAL's readers take one as the mask of 8 and 16-bit
+        // integers only)
+        s.dstAlpha = true;
+        s.dstMask = true;
+    }
     return s;
 }
 
@@ -189,6 +209,7 @@ public:
         work_ = plan_.type;
         workSize_ = tiff::SampleTypeSize(work_);
         workPixelBytes_ = workSize_ * static_cast<size_t>(src_.Bands());
+        for (const int b : spec_.warped) warpedOffsets_.push_back(static_cast<size_t>(b) * workSize_);
         if (const auto& sgt = geo_.GeoTransform(); sgt && !settings_.grid) {
             const auto& g = *sgt;
             srcPixel_ = std::min(std::hypot(g[1], g[4]), std::hypot(g[2], g[5]));
@@ -741,20 +762,7 @@ private:
             for (size_t i = 0; i < np; ++i) win.valid[i] = win.mask[i] != 0;
         } else if (spec_.nodata) {
             win.valid.resize(np + kWindowPadding);
-            const double nodata = *spec_.nodata;
-            VisitSampleType(work_, [&]<typename T>() {
-                for (size_t i = 0; i < np; ++i) {
-                    const uint8_t* const pixel = win.px.data() + i * win.pb;
-                    bool any = false;
-                    for (int b : spec_.warped) {
-                        if (!IsNodata<T>(pixel + static_cast<size_t>(b) * ss, nodata)) {
-                            any = true;
-                            break;
-                        }
-                    }
-                    win.valid[i] = any;
-                }
-            });
+            UnifiedValidity(work_, win.px.data(), win.pb, np, warpedOffsets_, *spec_.nodata, 1, win.valid.data());
         } else {
             win.valid.clear();
         }
@@ -799,7 +807,7 @@ private:
         KernelParams& p = params_;
         p.nearest = settings_.resampling == Resampling::kNearest;
         const int nWarped = static_cast<int>(spec_.warped.size());
-        const int nOut = plan_.MaskOut() ? 3 : nWarped;  // a JPEG output keeps the colour bands
+        const int nOut = nWarped;  // the alpha band, when the output has one, is written by Finish
         p.type = work_;
         p.sourceWidth = W_;
         p.sourceHeight = H_;
@@ -836,6 +844,7 @@ private:
     std::optional<RowApproximator> rows_;
     tiff::SampleType work_ = tiff::SampleType::kU8;  // the working type of the warp (the plan's)
     size_t workSize_ = 1, workPixelBytes_ = 1;
+    std::vector<size_t> warpedOffsets_;  // the byte offsets of the warped bands in a window pixel
     mutable std::mutex scratchMutex_;
     mutable std::vector<std::unique_ptr<Scratch>> freeScratch_;
     std::vector<WarpChunk> chunks_;
@@ -926,8 +935,8 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
         p.photometric = tiff::photometric::kYCbCr;
         p.transparency = spec.dstAlpha ? Transparency::kMask : Transparency::kNone;
     } else {
-        p.bands = static_cast<int>(spec.warped.size()) + (spec.dstAlpha ? 1 : 0);
-        if (spec.dstAlpha) {
+        p.bands = static_cast<int>(spec.warped.size()) + (spec.AlphaBandOut() ? 1 : 0);
+        if (spec.AlphaBandOut()) {
             interps.emplace_back("Alpha");
             p.alphaBand = p.bands - 1;
         }
@@ -944,9 +953,13 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
         if (!p.complex) p.predictor = build::IsFloatType(p.type) ? 3 : 2;
         p.level = settings.level;
         if (spec.dstNodata) {
-            p.transparency = Transparency::kNoData;
             p.nodata = spec.dstNodata;
             p.nodataText = src.NoDataText();
+        }
+        if (spec.dstMask) {
+            p.transparency = Transparency::kMask;
+        } else if (spec.dstNodata) {
+            p.transparency = Transparency::kNoData;
         } else if (spec.dstAlpha) {
             p.transparency = Transparency::kAlpha;
             p.alphaMasksOverviews = build::AlphaMaskRule(p.bands, p.alphaBand, p.type);

@@ -348,18 +348,21 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, int colorBands,
     samples.resize(pixels * ss * bands.size());
 
     bool bandsRead = false;
-    const bool needBand1ForMask = view.AlphaBand() == 0 &&
+    const bool needBandsForMask = view.AlphaBand() == 0 &&
                                   (src.Mask() == MaskKind::kNodata ||
                                    (view.NodataOverride() && src.Mask() != MaskKind::kPerDataset));
     if (ms == MaskSummary::kAllOne) {
         std::memset(alpha.data(), 255, pixels);
-    } else if (needBand1ForMask && !bands.empty() && bands[0] == 1) {
+    } else if (needBandsForMask && !bands.empty() && bands[0] == 1) {
         GatherBands(view, plan, bands, samples.data(), pixels * ss);
         bandsRead = true;
-        GatherAlpha(view, plan, alpha.data(), samples.data());
+        // The bands read from band 1 on, for the nodata mask
+        int leading = 0;
+        while (static_cast<size_t>(leading) < bands.size() && bands[static_cast<size_t>(leading)] == leading + 1) ++leading;
+        GatherAlpha(view, plan, alpha.data(), samples.data(), leading, pixels * ss);
     } else {
         GatherAlpha(view, plan, alpha.data());
-        if (!needBand1ForMask && kernels::AllBytesEqual(alpha.data(), pixels, 0))
+        if (!needBandsForMask && kernels::AllBytesEqual(alpha.data(), pixels, 0))
             return BlankTile(size, colorBands, c.req.format);  // nothing visible: no imagery decode
     }
     if (!bandsRead) GatherBands(view, plan, bands, samples.data(), pixels * ss);
@@ -453,10 +456,8 @@ void ReadPhysicalBands(const RasterView& view, const ViewNodata& nd, const std::
         GatherDatasetMask(view, plan, masked.data());
         for (size_t i = 0; i < pixels; ++i) masked[i] = masked[i] == 0 ? 1 : 0;
     }
-    // A warped view off the source (inside the COG grid): the built COG's transparency.
-    const bool warpTransparent =
-        src.AlphaBand() > 0 || src.Mask() != MaskKind::kAllValid || view.NodataOverride().has_value();
-    if (plan.pointwise && warpTransparent)
+    // A warped view off the source (inside the COG grid): masked, as the built COG masks it.
+    if (plan.pointwise)
         for (size_t i = 0; i < pixels; ++i)
             if (plan.sx[i] == -2) masked[i] = 1;
     std::vector<uint8_t> raw;

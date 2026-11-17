@@ -602,6 +602,19 @@ void WarpRow(const KernelParams& p, const Window& win, const double* fx, const d
     VisitSampleType(p.type, [&]<typename T>() { WarpRowT<T>(p, win, fx, fy, n, out, mask, path, chunk); });
 }
 
+void UnifiedValidity(tiff::SampleType type, const uint8_t* pixels, size_t pixelBytes, size_t count,
+                     const std::vector<size_t>& bandOffsets, double nodata, uint8_t valid, uint8_t* out) {
+    VisitSampleType(type, [&]<typename T>() {
+        for (size_t i = 0; i < count; ++i) {
+            const uint8_t* const pixel = pixels + i * pixelBytes;
+            out[i] = std::any_of(bandOffsets.begin(), bandOffsets.end(),
+                                 [&](size_t o) { return !IsNodata<T>(pixel + o, nodata); })
+                         ? valid
+                         : 0;
+        }
+    });
+}
+
 void IndexValidity(Window& win) {
     if (win.valid.empty() && win.density.empty()) {
         win.flags.clear();

@@ -34,6 +34,8 @@ struct SynthSpec {
     std::function<float(int band0, uint32_t x, uint32_t y)> value = [](int, uint32_t, uint32_t) { return 1.0f; };
     /// The bits of each sample, when set (64-bit integers, which a float does not hold)
     std::function<uint64_t(int band0, uint32_t x, uint32_t y)> raw;
+    /// A palette image: the ColorMap (red, green and blue entries, 3 x 2^bits)
+    std::vector<uint16_t> colorMap;
 };
 
 inline SynthSpec Spec(uint32_t size, int bands, int bytes = 4) {
@@ -82,7 +84,7 @@ inline void WriteSynth(const std::filesystem::path& path, const SynthSpec& s) {
         t.Long(257, {s.height}),
         t.Short(258, std::vector<uint16_t>(bands, static_cast<uint16_t>(s.bytes * 8))),
         t.Short(259, {1}),
-        t.Short(262, {1}),
+        t.Short(262, {static_cast<uint16_t>(s.colorMap.empty() ? 1 : 3)}),
         t.Short(277, {static_cast<uint16_t>(s.bands)}),
         t.Short(284, {static_cast<uint16_t>(s.planar ? 2 : 1)}),
         t.Long(322, {tw}),
@@ -99,6 +101,7 @@ inline void WriteSynth(const std::filesystem::path& path, const SynthSpec& s) {
     }
     if (s.bands > 1) e.push_back(t.Short(338, std::vector<uint16_t>(bands - 1, 0)));
     if (s.nodata) e.push_back(t.Ascii(42113, *s.nodata));
+    if (!s.colorMap.empty()) e.push_back(t.Short(320, s.colorMap));
     t.AddIfd(e);
     std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char*>(t.bytes().data()),
                                                  static_cast<std::streamsize>(t.bytes().size()));

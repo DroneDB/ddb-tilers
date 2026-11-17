@@ -5,12 +5,19 @@
 //   - A source that is already an optimized COG (EPSG:3857, square 256 / 512 tiles, overviews:
 //     DroneDB's isOptimizedCogDataset) is encoded again at its own grid (GDALTranslate -of COG
 //     BLOCKSIZE=<source> OVERVIEWS=IGNORE_EXISTING): same pixels, overviews regenerated; JPEG at
-//     the source's quality for a 3-band 8-bit JPEG source, LZW + predictor otherwise.
+//     the source's quality for a 3-band 8-bit JPEG source, LZW + predictor otherwise; the nodata of
+//     several bands comes with an internal mask of the pixels where not every band is at nodata
+//     (the source's mask when it has one).
 //   - Any other GeoTIFF is warped to EPSG:3857 on the GoogleMapsCompatible grid of the COG driver
-//     (gdalwarp -of COG -r bilinear, ZOOM_LEVEL_STRATEGY=UPPER): JPEG q75 YCbCr for 8-bit RGB(A)
+//     (gdalwarp -of COG -r bilinear, ZOOM_LEVEL_STRATEGY=UPPER; by nearest neighbour for a source
+//     with a colour table, as the COG driver reprojects one): JPEG q75 YCbCr for 8-bit RGB(A)
 //     without nodata (the alpha becomes a 1-bit mask), LZW + predictor otherwise; transparency as
-//     cog.cpp: a finite nodata is kept as the destination nodata, a NaN / infinite / huge nodata
-//     or a stand-alone mask becomes an alpha band, a source alpha is kept (a mask for JPEG).
+//     cog.cpp: a finite nodata is kept as the destination nodata (of several bands: with an
+//     internal mask of the pixels where not every band is at nodata), a NaN / infinite / huge nodata
+//     or a stand-alone mask becomes an alpha band, a source alpha is kept (a mask for JPEG); a
+//     source without any of them gets an internal mask of the pixels the warp writes (gdalwarp
+//     -dstalpha as the COG driver's ADD_ALPHA, the band count kept), so the pixels outside the
+//     source are transparent and out of the statistics.
 //   - A photo georeferenced by GCPs (BuildOptions::photo) is warped as libddb geoprojects it
 //     (gdalwarp -dstalpha from the photo with the GCPs): to the EPSG:3857 COG above in one warp
 //     (bilinear; JPEG for 8-bit RGB, with the pixels outside the photo, its alpha, mask or nodata
@@ -168,8 +175,8 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
 /// says.
 Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options);
 
-/// The warp a build makes of a source that is not an optimized COG.
-warp::WarpSettings WarpSettingsOf(const BuildOptions& options);
+/// The warp a build makes of `source` when it is not an optimized COG.
+warp::WarpSettings WarpSettingsOf(const BuildOptions& options, const RasterSource& source);
 
 /// Builds `output` (a COG) from `input` (a raster OpenRasterSource reads; a photo with
 /// options.photo). The output appears atomically (temporary + rename); on failure nothing is left
