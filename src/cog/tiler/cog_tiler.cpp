@@ -332,8 +332,57 @@ void PlaceRgba(Image& im, const Placement& at, const uint8_t* rgba) {
     }
 }
 
+/// What a band tile draws: the bands of its colour channels (a channel past them stays 0) and
+/// how. Byte bands as they are, others stretched (`selected`: each band over mean +- 2.33 sigma of
+/// its statistics, readSelectedBands), or a palette band through its colour table.
+struct TileBands {
+    int colorBands = 1;
+    std::vector<int> bands;
+    bool selected = false;
+    const std::vector<std::array<uint8_t, 4>>* palette = nullptr;
+};
+
+/// The bands of the plain tile (and of a vis tile without a band choice): dataBandCount's first
+/// three; by default, a palette band through its colour table (DroneDB 2.4.1 drew its indices as
+/// grey levels).
+TileBands PlainTileBands(const Ctx& c, const RasterView& view) {
+    TileBands t;
+    if (c.mode == SamplingMode::kDefault && view.Interp(1) == ColorInterp::kPalette && view.Source().ColorTable() &&
+        (view.Type() == PixelType::kU8 || view.Type() == PixelType::kU16)) {
+        t.colorBands = 3;
+        t.bands = {1};
+        t.palette = view.Source().ColorTable();
+        return t;
+    }
+    t.colorBands = std::max(1, std::min(3, view.DataBandCount()));
+    for (int b = 1; b <= t.colorBands; ++b) t.bands.push_back(b);
+    return t;
+}
+
+/// The colour planes of a row of palette indices (Byte or UInt16 samples), and its alpha lowered
+/// to the alpha of their entries (an index past the table is transparent black, as GDAL's
+/// expansion of a palette makes it).
+void ExpandPaletteRow(const std::vector<std::array<uint8_t, 4>>& table, PixelType type, const uint8_t* indices,
+                      size_t w, uint8_t* const planes[3], uint8_t* alpha) {
+    static constexpr std::array<uint8_t, 4> kNone{0, 0, 0, 0};
+    for (size_t i = 0; i < w; ++i) {
+        size_t index = indices[i];
+        if (type != PixelType::kU8) {
+            uint16_t v;
+            std::memcpy(&v, indices + i * 2, 2);
+            index = v;
+        }
+        const std::array<uint8_t, 4>& e = index < table.size() ? table[index] : kNone;
+        planes[0][i] = e[0];
+        planes[1][i] = e[1];
+        planes[2][i] = e[2];
+        alpha[i] = std::min(alpha[i], e[3]);
+    }
+}
+
 /// GDALTiler::readBands + readAlpha (the plain tile; also the vis tile without a band choice).
-encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, int colorBands, const std::vector<int>* selected) {
+encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, const TileBands& tb) {
+    const int colorBands = tb.colorBands;
     const int size = c.req.tileSize;
     SamplePlan plan;
     Placement at;
@@ -347,10 +396,7 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, int colorBands,
     const PixelType type = src.Type();
     const size_t ss = PixelTypeSize(type);
     const size_t pixels = static_cast<size_t>(at.w) * static_cast<size_t>(at.h);
-    std::vector<int> bands;
-    if (selected) bands = *selected;
-    else
-        for (int b = 1; b <= colorBands; ++b) bands.push_back(b);
+    const std::vector<int>& bands = tb.bands;
     RequireRequestMemory(pixels * (ss * bands.size() + 2) + ImageBytes(size, colorBands));
     std::vector<uint8_t>& alpha = ThreadScratch().alpha;
     std::vector<uint8_t>& samples = ThreadScratch().samples;
@@ -378,8 +424,8 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, int colorBands,
     const bool full = at.x == 0 && at.y == 0 && at.w == size && at.h == size;
     Image im = MakeImage(size, colorBands, !full);
     std::vector<std::pair<double, double>> ranges;
-    if (type != PixelType::kU8) {
-        if (selected) {
+    if (type != PixelType::kU8 && tb.palette == nullptr) {
+        if (tb.selected) {
             // readSelectedBands: each band over mean +- 2.33 sigma of its statistics.
             for (const int b : bands) ranges.push_back(StretchRange(GetBandStatistics(src, b, view.NodataOverride())));
         } else {
@@ -395,14 +441,19 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, int colorBands,
     plane.assign(w * (colours + 1), 0);
     const uint8_t* rowPlanes[4];
     for (size_t j = 0; j < static_cast<size_t>(at.h); ++j) {
-        for (size_t b = 0; b < colours; ++b) {
+        if (tb.palette != nullptr) {
+            uint8_t* const planes[3] = {plane.data(), plane.data() + w, plane.data() + 2 * w};
+            ExpandPaletteRow(*tb.palette, type, samples.data() + j * w * ss, w, planes, alpha.data() + j * w);
+            for (size_t b = 0; b < colours; ++b) rowPlanes[b] = planes[b];
+        }
+        for (size_t b = 0; b < colours && tb.palette == nullptr; ++b) {
             if (b >= bands.size()) {
                 rowPlanes[b] = plane.data() + colours * w;  // the zero row
             } else if (type == PixelType::kU8) {
                 rowPlanes[b] = samples.data() + b * pixels + j * w;
             } else {
                 StretchSamples(type, samples.data() + (b * pixels + j * w) * ss, w, ranges[b].first,
-                               ranges[b].second, selected != nullptr, plane.data() + b * w, 1);
+                               ranges[b].second, tb.selected, plane.data() + b * w, 1);
                 rowPlanes[b] = plane.data() + b * w;
             }
         }
@@ -652,9 +703,7 @@ encode::ByteBuffer FormulaTile(Ctx& c, const RasterView& view, const VisParams& 
 
 encode::ByteBuffer PlainTile(Ctx& c) {
     const RasterView view(*c.src);
-    const int nBands = view.DataBandCount();
-    const int colorBands = std::max(1, std::min(3, nBands));
-    return ReadBandsTile(c, view, colorBands, nullptr);
+    return ReadBandsTile(c, view, PlainTileBands(c, view));
 }
 
 encode::ByteBuffer VisTile(Ctx& c, const VisParams& vis) {
@@ -671,11 +720,13 @@ encode::ByteBuffer VisTile(Ctx& c, const VisParams& vis) {
     if (!vis.formula.empty()) return FormulaTile(c, view, vis);
 
     const std::vector<int> selected = ResolveVisBands(*c.src, vis, nBands);
-    const int outBands = std::max(1, std::min(3, selected.empty() ? nBands : static_cast<int>(selected.size())));
-    if (selected.empty()) return ReadBandsTile(c, view, outBands, nullptr);
+    if (selected.empty()) return ReadBandsTile(c, view, PlainTileBands(c, view));
     // readSelectedBands: Byte bands as they are, others over mean +- 2.33 sigma.
-    const std::vector<int> chosen(selected.begin(), selected.begin() + outBands);
-    return ReadBandsTile(c, view, outBands, &chosen);
+    TileBands chosen;
+    chosen.colorBands = std::min(3, static_cast<int>(selected.size()));
+    chosen.bands.assign(selected.begin(), selected.begin() + chosen.colorBands);
+    chosen.selected = true;
+    return ReadBandsTile(c, view, chosen);
 }
 
 }  // namespace

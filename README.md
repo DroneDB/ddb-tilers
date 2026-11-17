@@ -118,10 +118,15 @@ or uses less memory.
 | Peak memory | 0.30x to 0.56x | 0.35x to 0.55x (1.2x to 1.4x on one cloud at 1 thread) |
 
 With `DDBT_TILER_MODE=compat`, raster tiles are pixel-identical to DroneDB 2.4.1's on the test
-rasters (DroneDB re-encodes JPEG COGs, so those differ within JPEG noise). By default each tile
-pixel shows the pixel of the overview under its centre, where GDAL draws it: DroneDB 2.4.1's
-read window, rounded to whole pixels, moved a raster off the tile grid by up to a pixel of the
-level it read. The COGs pass GDAL's COG validator and have DroneDB's
+rasters (DroneDB re-encodes JPEG COGs, so those differ within JPEG noise). By default the
+tiles are drawn without the known defects of DroneDB 2.4.1's:
+
+- each tile pixel shows the pixel of the overview under its centre, where GDAL draws it (2.4.1's
+  read window, rounded to whole pixels, moved a raster off the tile grid by up to a pixel of the
+  level it read, and was empty 9 zooms above the resolution of the raster);
+- a palette band is drawn in the colours of its table (2.4.1 drew its indices as grey).
+
+The COGs pass GDAL's COG validator and have DroneDB's
 grid. WebP tiles use libwebp method 1 (DroneDB uses 2): 12-41 % more
 tiles per second, a slightly higher PSNR, at most 8 % more bytes.
 

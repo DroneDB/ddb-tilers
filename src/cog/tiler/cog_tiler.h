@@ -43,6 +43,7 @@ enum class SamplingMode : uint8_t {
     kCompat,
     /// The overview from the zoom and the pixel under each tile pixel's centre, on the file and on
     /// the warped grid alike: tiles where GDAL draws them, no seams, enlarged pixels at any zoom.
+    /// The plain tile draws a palette band in the colours of its table.
     kDefault,
 };
 

@@ -5,6 +5,7 @@
 // pixel from the level pixel under its centre, where GDAL draws it.
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -158,4 +159,57 @@ TEST(CogTilerRender, TilesKeepDrawingFarAboveTheResolution) {
             }
         }
     }
+}
+
+namespace {
+
+/// The colour of entry i of the test palette (16-bit TIFF values: v * 257).
+std::array<uint8_t, 3> PaletteColour(int i) {
+    return {static_cast<uint8_t>(i), static_cast<uint8_t>(255 - i), static_cast<uint8_t>((i * 7) % 256)};
+}
+
+}  // namespace
+
+TEST(CogTilerRender, PaletteBandsAreDrawnInTheirColours) {
+    // A palette band (index = column / 4, 0 to 249) with NoData 7, whose colour table entry is then
+    // transparent: each tile pixel takes the colour of the index under its centre. DroneDB 2.4.1
+    // drew the indices as grey levels.
+    TempDir dir;
+    const fs::path tif = dir.path() / "palette.tif";
+    SynthSpec s = Spec(kW, 1, 1);
+    s.height = kH;
+    s.tile = 256;
+    s.photometric = 3;
+    s.nodata = "7";
+    s.value = [](int, uint32_t x, uint32_t) { return static_cast<float>(x / 4); };
+    s.colorMap.resize(3 * 256);
+    for (int i = 0; i < 256; ++i) {
+        const auto c = PaletteColour(i);
+        for (size_t k = 0; k < 3; ++k) s.colorMap[k * 256 + static_cast<size_t>(i)] = static_cast<uint16_t>(c[k] * 257);
+    }
+    WriteSynth(tif, s);
+    const int z = 20;  // 0.149 m tile pixels over 0.25 m pixels
+    const auto [tx, ty] = TileOf(kOriginX + 7.5, kOriginY - 20, z);  // over column 30 (index 7)
+    const auto rgba = RenderRgba(tif.string(), z, tx, ty);
+    const double span = TileSpan(z), res = span / 256, minX = -kWorld + tx * span, maxY = kWorld - ty * span;
+    int bad = 0, transparent = 0, coloured = 0;
+    for (int j = 0; j < 256; ++j)
+        for (int i = 0; i < 256; ++i) {
+            const double col = (minX + (i + 0.5) * res - kOriginX) / kPixel;
+            const double row = (kOriginY - (maxY - (j + 0.5) * res)) / kPixel;
+            if (col < 0 || col >= kW || row < 0 || row >= kH) continue;
+            const int index = static_cast<int>(col) / 4;
+            const uint8_t* p = rgba.data() + (static_cast<size_t>(j) * 256 + static_cast<size_t>(i)) * 4;
+            if (index == 7) {
+                transparent++;
+                bad += p[3] != 0;
+                continue;
+            }
+            const auto c = PaletteColour(index);
+            coloured++;
+            bad += p[0] != c[0] || p[1] != c[1] || p[2] != c[2] || p[3] != 255;
+        }
+    EXPECT_EQ(bad, 0);
+    EXPECT_GT(transparent, 0);
+    EXPECT_GT(coloured, 10000);
 }
