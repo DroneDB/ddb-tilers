@@ -89,6 +89,8 @@ struct SamplePlan {
     std::vector<int32_t> sx, sy;
     /// Every buffer pixel has a sample.
     bool AllInside() const noexcept;
+    /// A buffer pixel has a sample (of the view: on the warped grid, maybe off the source).
+    bool AnySample() const noexcept;
 };
 
 /// GDALBandGetBestOverviewLevel(2): index into `levels` (0 = full resolution) of the level GDAL

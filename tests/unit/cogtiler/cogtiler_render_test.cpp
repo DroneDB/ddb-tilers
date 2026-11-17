@@ -137,3 +137,25 @@ TEST(CogTilerRender, TilePixelsShowTheLevelPixelUnderTheirCentre) {
         }
     }
 }
+
+TEST(CogTilerRender, TilesKeepDrawingFarAboveTheResolution) {
+    // 0.25 m pixels (z19), drawn up to z30 (tile pixels of 0.15 mm): the tiles around a pixel
+    // corner show the enlarged pixels on each side of it. geoQuery's window, rounded to whole
+    // pixels, became empty where a tile covers less than half a pixel (z29 here, z20 for a COG at
+    // z11), and those tiles were blank.
+    TempDir dir;
+    const fs::path tif = dir.path() / "where.tif";
+    WriteSynth(tif, WhereSpec());
+    const double cx = kOriginX + 400 * kPixel, cy = kOriginY - 300 * kPixel;
+    for (int z = 20; z <= 30; ++z) {
+        const auto [tx, ty] = TileOf(cx, cy, z);
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const auto rgba = RenderRgba(tif.string(), z, tx + dx, ty + dy);
+                int drawn = 0;
+                EXPECT_EQ(MisplacedPixels(rgba, z, tx + dx, ty + dy, drawn), 0) << "z" << z << " " << dx << "," << dy;
+                EXPECT_EQ(drawn, 256 * 256) << "z" << z << " " << dx << "," << dy;
+            }
+        }
+    }
+}

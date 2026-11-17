@@ -42,7 +42,7 @@ enum class SamplingMode : uint8_t {
     /// the tile grid, zooms below the smallest overview) and seams tiles.
     kCompat,
     /// The overview from the zoom and the pixel under each tile pixel's centre, on the file and on
-    /// the warped grid alike: tiles where GDAL draws them, no seams.
+    /// the warped grid alike: tiles where GDAL draws them, no seams, enlarged pixels at any zoom.
     kDefault,
 };
 

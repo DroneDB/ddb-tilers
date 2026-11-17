@@ -360,6 +360,13 @@ bool SamplePlan::AllInside() const noexcept {
     return true;
 }
 
+bool SamplePlan::AnySample() const noexcept {
+    const auto any = [](const std::vector<int32_t>& v) {
+        return std::any_of(v.begin(), v.end(), [](int32_t i) { return i >= 0; });
+    };
+    return any(cols) && any(rows);
+}
+
 int BestLevel(const std::vector<std::pair<int, int>>& levels, double desired, double threshold) {
     // GDALBandGetBestOverviewLevel: index -1 is the full resolution (returned as 0 here).
     int best = -1;

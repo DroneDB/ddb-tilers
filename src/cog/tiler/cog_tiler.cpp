@@ -298,20 +298,30 @@ struct Ctx {
     SamplingMode mode = SamplingMode::kCompat;
 };
 
+/// The tile is within the bounds of getMinMaxCoordsForZ.
+bool InTileBounds(const Ctx& c) {
+    const auto box = tile::compat::MinMaxCoordsForZ(c.tiling.mercator, c.tiling.bounds.oMinX, c.tiling.bounds.oMinY,
+                                                    c.tiling.bounds.oMaxX, c.tiling.bounds.oMaxY, c.req.z);
+    return box.Contains(c.req.x, c.row);
+}
+
 /// The read of a tile: the window and its placement (compat: geoQuery; default: the whole
 /// tile, on the file or on the warped grid). False when the tile has nothing to read (blank).
 bool TileRead(Ctx& c, const RasterView& view, SamplePlan& plan, Placement& at) {
-    GQResult g;
-    if (!tile::compat::TileWindow(c.tiling, c.req.z, c.req.x, c.row, g)) return false;
     if (c.mode == SamplingMode::kCompat) {
+        // geoQuery's window is empty where the tile covers less than half a pixel of the raster
+        // (9 zooms above its resolution): 2.4.1 drew those tiles blank
+        GQResult g;
+        if (!tile::compat::TileWindow(c.tiling, c.req.z, c.req.x, c.row, g)) return false;
         plan = PlanRead(view, g.r.x, g.r.y, g.r.xsize, g.r.ysize, g.w.xsize, g.w.ysize);
         at = {g.w.x, g.w.y, g.w.xsize, g.w.ysize};
-    } else {
-        const auto b = c.tiling.mercator.tileBounds(c.req.x, c.row, c.req.z);
-        plan = PlanTile(view, b.min.x, b.min.y, b.max.x, b.max.y, c.req.tileSize);
-        at = {0, 0, c.req.tileSize, c.req.tileSize};
+        return true;
     }
-    return true;
+    if (!InTileBounds(c)) return false;
+    const auto b = c.tiling.mercator.tileBounds(c.req.x, c.row, c.req.z);
+    plan = PlanTile(view, b.min.x, b.min.y, b.max.x, b.max.y, c.req.tileSize);
+    at = {0, 0, c.req.tileSize, c.req.tileSize};
+    return plan.AnySample();
 }
 
 void PlaceRgba(Image& im, const Placement& at, const uint8_t* rgba) {
@@ -649,9 +659,7 @@ encode::ByteBuffer PlainTile(Ctx& c) {
 
 encode::ByteBuffer VisTile(Ctx& c, const VisParams& vis) {
     const bool plain = vis.Plain();
-    const auto box = tile::compat::MinMaxCoordsForZ(c.tiling.mercator, c.tiling.bounds.oMinX, c.tiling.bounds.oMinY,
-                                                    c.tiling.bounds.oMaxX, c.tiling.bounds.oMaxY, c.req.z);
-    if (!box.Contains(c.req.x, c.row)) {
+    if (!InTileBounds(c)) {
         if (!plain) Fail("Out of bounds");
         return PlainTile(c);
     }
