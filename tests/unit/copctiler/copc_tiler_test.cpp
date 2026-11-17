@@ -577,6 +577,46 @@ TEST_F(CopcTilerTest, SplatModesUseAFitAndStayWithinTheResidual) {
     }
 }
 
+// A modern tile reads the levels down to one whose points the 13-pixel disc draws without gaps:
+// on a flat cloud whose levels 0..d form a square grid of pitch spacing / 2^d, every pixel inside
+// the grid is drawn. The cube is sized so that the spacing at z19 (and of depth 1 at z20) is
+// 3.6 px in EPSG:3857 (UTM 33N at 45 N: 1.417 Mercator metres per metre); the depth limit of
+// res(z - 2) stopped there, the discs of points 4 px apart left a hole between them.
+TEST_F(CopcTilerTest, ModernTilesHaveNoHolesWhereTheCloudHasPoints) {
+    CloudSpec s;
+    s.nestedGrid = true;
+    s.halfSize = 48.5;
+    s.center[0] = 500000 + s.halfSize;
+    s.center[1] = 5000000 + s.halfSize;
+    const std::string path = Cloud("nested-grid", s);
+    auto cloud = tiler::Cloud::Get(path);
+    const compat::GlobalMercator m(256);
+    // Pixels at least one root spacing inside the grid (its border pixels are partly drawn).
+    const double margin = 2 * s.halfSize / 128;
+    for (const int z : {19, 20}) {
+        size_t inside = 0, holes = 0;
+        for (const auto& [x, tmsRow] : TilesAround(*cloud, z, 256, 0)) {
+            RenderInfo info;
+            const auto rgba = Render(path, z, x, compat::FlipRow(tmsRow, z), 256, Mode::kModern, &info);
+            EXPECT_EQ(info.depthEnd, z - 19 + 2) << "z" << z;  // one level more than res(z - 2)
+            const auto tb = m.tileBounds(x, tmsRow, z);
+            const double res = m.resolution(z);
+            for (int py = 0; py < 256; ++py)
+                for (int px = 0; px < 256; ++px) {
+                    double cx = tb.min.x + (px + 0.5) * res, cy = tb.max.y - (py + 0.5) * res;
+                    ASSERT_TRUE(cloud->toCloud().TransformPoint(cx, cy));
+                    if (std::fabs(cx - s.center[0]) > s.halfSize - margin ||
+                        std::fabs(cy - s.center[1]) > s.halfSize - margin)
+                        continue;
+                    ++inside;
+                    holes += rgba[(static_cast<size_t>(py) * 256 + static_cast<size_t>(px)) * 4 + 3] == 0;
+                }
+        }
+        EXPECT_GT(inside, 20000u) << "z" << z;
+        EXPECT_EQ(holes, 0u) << "z" << z << ": " << holes << " of " << inside << " pixels inside the grid";
+    }
+}
+
 TEST_F(CopcTilerTest, GeocentricCloudsTileInHybridAndModernModes) {
     // A cloud in EPSG:4978 near (lon 15, lat 45): the baseline has no footprint (heights beyond
     // +-30 km), the hybrid and modern modes tile it.

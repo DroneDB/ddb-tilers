@@ -630,6 +630,15 @@ void DrawSplatNode(const CompactNode& node, const SplatDraw& d, Scratch& s, Rend
     }
 }
 
+// The resolution that sets the depth limit of a modern tile of `res` metres per pixel: the levels
+// are read down to the first whose spacing is at most kGaplessSpacing pixels (1.41 to 2.83 px).
+// The baseline's limit, res(z - 2), stops at a spacing of 2 to 4 px, where the 13-pixel disc
+// leaves holes that the deeper levels fill (pinholes, and rectangles where the last level read
+// is sparser than its neighbours): up to 7 % of the pixels of a tile that the full cloud covers.
+// At the zooms where the spacing of the baseline's last level is above kGaplessSpacing (about
+// half of them), one level more is read: about twice the points decoded, within the budget.
+double ModernLodResolution(double res) { return res * SplatRasterizer::kGaplessSpacing; }
+
 // hybrid and modern differ in the depth limit, the ramp range, the disc and where it is anchored
 // (see copc_tiler.h); the window, the transform, the colours and the z-test are the same.
 void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int tz, int tx, int tmsRow, int tileSize,
@@ -693,7 +702,8 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
 
     // Level of detail. hybrid: the baseline's (the spacing in the cloud's units against
     // res(z - 2), the resolution passed through readers.copc's option text for colourless
-    // clouds). modern: the spacing projected to EPSG:3857 (sqrt |det J| at the window centre).
+    // clouds). modern: the spacing projected to EPSG:3857 (sqrt |det J| at the window centre)
+    // against the widest spacing the disc draws without gaps (ModernLodResolution).
     double scale = 1.0;
     if (!hybrid && !geo) {
         const double cx = (window.minX + window.maxX) / 2, cy = (window.minY + window.maxY) / 2;
@@ -709,7 +719,7 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
         scale = std::cosh(((tb.min.y + tb.max.y) / 2) / 6378137.0);
     }
     const bool colored = cloud.hasColor();
-    double lodResolution = m.resolution(tz - ResolutionOffset());
+    double lodResolution = hybrid ? m.resolution(tz - ResolutionOffset()) : ModernLodResolution(res);
     if (hybrid && !colored) lodResolution = PdalOptionDouble(lodResolution);
     SelectQuery q;
     q.box = Box3::Xy(window.minX, window.minY, window.maxX, window.maxY);
