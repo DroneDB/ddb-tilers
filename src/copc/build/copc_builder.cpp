@@ -668,11 +668,15 @@ private:
                 spec_.offset[a] = off;
             }
         }
-        // Every coordinate must fit an int32.
+        // Every coordinate must fit an int32, as QuantizeXyz stores it: the bounds' integers, not
+        // their quotients. A source's own scale and offset are kept with no room to spare (its
+        // integers are copied as they are, up to the full int32 range), and its header bounds,
+        // computed back from those integers, may then fall a rounding error past +-(2^31 - 1).
+        // A scale and offset chosen above leave room (at most 2e9 steps from the offset), so a
+        // point at a bound, transformed to a target CRS or not, still quantises inside.
         for (size_t a = 0; a < 3; ++a) {
-            const double lo = (bounds_.min[a] - spec_.offset[a]) / spec_.scale[a];
-            const double hi = (bounds_.max[a] - spec_.offset[a]) / spec_.scale[a];
-            if (!(lo >= -2147483648.0 && hi <= 2147483647.0))
+            if (!readers::QuantizeCoordinate(bounds_.min[a], spec_.scale[a], spec_.offset[a]) ||
+                !readers::QuantizeCoordinate(bounds_.max[a], spec_.scale[a], spec_.offset[a]))
                 return OutOfRange("the bounds do not fit the LAS scale / offset");
         }
         fields_.scale = spec_.scale;

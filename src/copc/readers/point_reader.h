@@ -20,9 +20,11 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -134,8 +136,18 @@ struct ReaderOptions {
 /// extension (.xyz, .pts, .txt).
 Expected<std::unique_ptr<PointReader>> OpenReader(const std::string& path, const ReaderOptions& options = {});
 
-/// Writes one output record's attributes from double coordinates `xyz` (quantised with `spec`).
-/// Fails with OutOfRange when a coordinate does not fit an int32 after quantisation.
+/// The integer that stores coordinate `v` in a record of `scale` and `offset`, as PDAL's LAS writer
+/// computes it: round((v - offset) / scale). None when it does not fit an int32. A coordinate
+/// computed back from a stored integer (int * scale + offset) may land a rounding error beyond
+/// it, so the integer, not the quotient, decides whether a coordinate fits.
+inline std::optional<int32_t> QuantizeCoordinate(double v, double scale, double offset) noexcept {
+    const double q = std::round((v - offset) / scale);
+    if (!(q >= -2147483648.0 && q <= 2147483647.0)) return std::nullopt;
+    return static_cast<int32_t>(q);
+}
+
+/// Writes one output record's attributes from double coordinates `xyz` (quantised with `spec`:
+/// QuantizeCoordinate). Fails with OutOfRange when a coordinate does not fit an int32.
 Status QuantizeXyz(const OutputSpec& spec, const double* xyz, size_t count, uint8_t* records);
 
 }  // namespace ddbt::copc::readers

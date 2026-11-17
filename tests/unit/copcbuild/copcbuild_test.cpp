@@ -754,6 +754,59 @@ TEST(CopcBuildExtraBytes, TheWriterRefusesAnArrayDescriptor) {
     EXPECT_TRUE(CheckHeaderFields(f).ok());
 }
 
+// RealityCapture stores a cloud's coordinates over the whole int32 range (-(2^31 - 1) to 2^31 - 1)
+// with a scale and offset of its own, and writes header bounds computed back from those integers
+// (int * scale + offset): divided again, one is a rounding error past 2^31 - 1 ((max - offset) /
+// scale = 2147483647.0000002 for X). The scale, offset and bounds below are those of such a file.
+// The builder keeps the scale and offset and copies the integers, so it must not refuse the
+// bounds; a header bound a whole step past the range is no rounding error, and is refused.
+TEST(CopcBuildEndToEnd, CoordinatesOverTheWholeInt32RangeKeepTheirScaleAndOffset) {
+    const std::string dir = TempDir();
+    SynthLas s;
+    s.format = 2;
+    s.scale = {3.4702614131804454e-08, 3.7597480701833696e-08, 2.5582438401816677e-09};
+    s.offset = {3.9132270813382632, 5.9943389892578125, 5.193873405456547};
+    FillRandom(s, 5000, 41, 1000000);
+    // The two corners of the range, on every axis.
+    for (int a = 0; a < 3; ++a) {
+        StoreLE<int32_t>(s.records.data() + 4 * a, INT32_MAX);
+        StoreLE<int32_t>(s.records.data() + s.RecordSize() + 4 * a, -INT32_MAX);
+    }
+    s.overrideBounds = true;
+    s.min = {-70.61006927486291, -74.74563598632812, -0.299913406372065};
+    s.max = {78.43652343753944, 86.73431396484375, 10.68766021728516};
+    ASSERT_GT((s.max[0] - s.offset[0]) / s.scale[0], 2147483647.0);  // the case: past the range by a rounding error
+    const std::string in = dir + "/full-range.las", out = dir + "/full-range.copc.laz";
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    CopcBuildOptions o;
+    o.lod.leafMax = 1000;
+    o.metadata = false;
+    CopcBuildReport rep;
+    const Status st = BuildCopc(in, out, o, &rep);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+    EXPECT_FALSE(rep.restarted);
+    EXPECT_EQ(rep.scale, s.scale);
+    EXPECT_EQ(rep.offset, s.offset);
+    auto chk = CheckCopc(out, 2);
+    ASSERT_TRUE(chk.ok());
+    EXPECT_TRUE(chk->ok()) << (chk->errors.empty() ? "" : chk->errors[0]);
+    EXPECT_EQ(chk->outside, 0u);
+    uint64_t nIn = 0, nOut = 0;
+    EXPECT_EQ(ConvertedInputHash(in, rep.format, 0, rep.scale, rep.offset, &nIn), CopcHash(out, &nOut));
+    EXPECT_EQ(nIn, s.count);
+    EXPECT_EQ(nOut, s.count);
+    auto file = CopcFile::Open(out);
+    ASSERT_TRUE(file.ok());
+    EXPECT_EQ((*file)->header().min, s.min);
+    EXPECT_EQ((*file)->header().max, s.max);
+
+    // A header that puts a point one step past the range: refused.
+    s.max[0] = MulAddUnfused(2147483648.0, s.scale[0], s.offset[0]);
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    EXPECT_EQ(BuildCopc(in, out, o, &rep).code(), StatusCode::kOutOfRange);
+    fs::remove_all(dir);
+}
+
 TEST(CopcBuildEndToEnd, SidecarAndErrors) {
     const std::string dir = TempDir();
     SynthLas s;

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -239,6 +240,22 @@ TEST(CopcReaders, PlyMagicWithTrailingSpacesReads) {
     }
     EXPECT_FALSE(PlyReader::Open(dir + "/word.ply", ReaderOptions{}).ok());
     fs::remove_all(dir);
+}
+
+// The integer of a coordinate decides whether it fits: a coordinate computed back from the
+// largest integer (int * scale + offset) divides to a rounding error past it and still fits, half
+// a step past it does not; the smallest int32 fits too.
+TEST(CopcReaders, QuantizeCoordinateFitsTheIntegersOfTheWholeInt32Range) {
+    const double scale = 3.4702614131804454e-08, offset = 3.9132270813382632;
+    const double top = 2147483647.0 * scale + offset, bottom = -2147483648.0 * scale + offset;
+    ASSERT_GT((top - offset) / scale, 2147483647.0);
+    EXPECT_EQ(QuantizeCoordinate(top, scale, offset), std::optional<int32_t>(INT32_MAX));
+    EXPECT_EQ(QuantizeCoordinate(bottom, scale, offset), std::optional<int32_t>(INT32_MIN));
+    EXPECT_EQ(QuantizeCoordinate(top + 0.6 * scale, scale, offset), std::nullopt);
+    EXPECT_EQ(QuantizeCoordinate(bottom - 0.6 * scale, scale, offset), std::nullopt);
+    EXPECT_EQ(QuantizeCoordinate(2.5, 1, 0), std::optional<int32_t>(3));  // half away from zero, as PDAL rounds
+    EXPECT_EQ(QuantizeCoordinate(-2.5, 1, 0), std::optional<int32_t>(-3));
+    EXPECT_EQ(QuantizeCoordinate(std::nan(""), 0.01, 0), std::nullopt);
 }
 
 TEST(CopcReaders, XyzDetectionAsDroneDb) {
