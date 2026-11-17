@@ -160,5 +160,36 @@ TEST(WarpTransparency, ThePixelsOfAnRgbWithNodataAreMaskedWhenEveryBandIsAtNodat
     EXPECT_GT(empty, 150u * 150u);  // the empty quarter and the padding
 }
 
+// A raster of one pixel-interleaved RGB pixel (in a strip of one pixel) is read whole: its COG (lossless)
+// holds the pixel's three values in the pixels it covers, the only ones its mask keeps; a JPEG COG of it holds
+// what the JPEG codec makes of a lone pixel (grey, as GDAL's: the 2 x 2 chroma subsampling averages
+// its colour with black, and the block around it rings).
+TEST(WarpTransparency, AOnePixelRgbIsReadWhole) {
+    TempDir dir;
+    syn::SynthSpec spec = syn::Spec(1, 3, 1);
+    spec.value = [](int b, uint32_t, uint32_t) { return b == 0 ? 170.0f : b == 1 ? 211.0f : 223.0f; };
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    syn::WriteSynth(in, spec);
+    BuildOptions o;
+    o.noJpeg = true;
+    const Status s = BuildCog(in, out, o);
+    ASSERT_TRUE(s.ok()) << s.message();
+    const Output r = ReadOutput(out);
+    ASSERT_EQ(r.bands.size(), 3u);
+    ASSERT_FALSE(r.mask.empty());
+    size_t kept = 0;
+    for (size_t i = 0; i < r.mask.size(); ++i) {
+        if (r.mask[i] == 0) {
+            ASSERT_TRUE(r.bands[0][i] == 0 && r.bands[1][i] == 0 && r.bands[2][i] == 0) << i;
+            continue;
+        }
+        ++kept;
+        EXPECT_EQ(r.bands[0][i], 170);
+        EXPECT_EQ(r.bands[1][i], 211);
+        EXPECT_EQ(r.bands[2][i], 223);
+    }
+    EXPECT_GE(kept, 1u);  // the output pixels the source pixel covers (the grid of the next zoom is finer)
+}
+
 }  // namespace
 }  // namespace ddbt::cog::build
