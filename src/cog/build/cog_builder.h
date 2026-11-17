@@ -9,7 +9,8 @@
 //     several bands comes with an internal mask of the pixels where not every band is at nodata
 //     (the source's mask when it has one).
 //   - Any other GeoTIFF is warped to EPSG:3857 on the GoogleMapsCompatible grid of the COG driver
-//     (gdalwarp -of COG -r bilinear, ZOOM_LEVEL_STRATEGY=UPPER): JPEG q75 YCbCr for 8-bit RGB(A)
+//     (gdalwarp -of COG -r bilinear, ZOOM_LEVEL_STRATEGY=UPPER; by nearest neighbour for a source
+//     with a colour table, as the COG driver reprojects one): JPEG q75 YCbCr for 8-bit RGB(A)
 //     without nodata (the alpha becomes a 1-bit mask), LZW + predictor otherwise; transparency as
 //     cog.cpp: a finite nodata is kept as the destination nodata (of several bands: with an
 //     internal mask of the pixels where not every band is at nodata), a NaN / infinite / huge nodata
@@ -174,8 +175,8 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
 /// says.
 Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options);
 
-/// The warp a build makes of a source that is not an optimized COG.
-warp::WarpSettings WarpSettingsOf(const BuildOptions& options);
+/// The warp a build makes of `source` when it is not an optimized COG.
+warp::WarpSettings WarpSettingsOf(const BuildOptions& options, const RasterSource& source);
 
 /// Builds `output` (a COG) from `input` (a raster OpenRasterSource reads; a photo with
 /// options.photo). The output appears atomically (temporary + rename); on failure nothing is left

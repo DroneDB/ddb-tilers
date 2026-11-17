@@ -1361,7 +1361,7 @@ Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input
     return GeoreferencePhoto(std::move(*src), *options.photo);
 }
 
-warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
+warp::WarpSettings WarpSettingsOf(const BuildOptions& options, const RasterSource& source) {
     warp::WarpSettings ws;
     ws.losslessCodec = options.losslessCodec == Codec::kJpeg ? Codec::kLzw : options.losslessCodec;
     ws.level = options.level;
@@ -1378,6 +1378,11 @@ warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
             // The grid of libddb's COG of the photo (its geoprojection, then the COG of that).
             ws.target = warp::Target::kWebMercatorThroughSourceCrs;
         }
+    } else if (source.ColorTable()) {
+        // The values of a palette band are indices into its colour table, which no interpolation
+        // keeps (gdalwarp -r bilinear averages them into other colours): the COG driver reprojects a
+        // source with a colour table by nearest neighbour, and resamples its overviews so as well
+        ws.resampling = warp::Resampling::kNearest;
     }
     return ws;
 }
@@ -1458,7 +1463,7 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         plan = std::move(*p);
         producer = std::make_unique<OwnGridProducer>(source, plan);
     } else {
-        const warp::WarpSettings ws = WarpSettingsOf(options);
+        const warp::WarpSettings ws = WarpSettingsOf(options, source);
         if (ws.target == warp::Target::kSourceCrs) {
             // The output is in the source's CRS.
             auto keys = writer::GeoKeysOf(*source.Georef().crs);

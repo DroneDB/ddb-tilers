@@ -191,5 +191,30 @@ TEST(WarpTransparency, AOnePixelRgbIsReadWhole) {
     EXPECT_GE(kept, 1u);  // the output pixels the source pixel covers (the grid of the next zoom is finer)
 }
 
+// The values of a palette band are indices into its colour table: the warp keeps them (nearest
+// neighbour, as the COG driver reprojects a source with a colour table) instead of interpolating
+// them into indices of other colours.
+TEST(WarpTransparency, APaletteIsWarpedByNearestNeighbour) {
+    TempDir dir;
+    syn::SynthSpec spec = syn::Spec(64, 1, 1);
+    spec.colorMap.assign(3 * 256, 0);
+    for (size_t i = 0; i < 256; ++i) spec.colorMap[i] = static_cast<uint16_t>(i * 257);  // a grey ramp
+    // A checkerboard of 3 x 3 pixel squares of indices 10 and 200
+    spec.value = [](int, uint32_t x, uint32_t y) { return ((x / 3 + y / 3) % 2) != 0 ? 200.0f : 10.0f; };
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    syn::WriteSynth(in, spec);
+    const Status s = BuildCog(in, out, {});
+    ASSERT_TRUE(s.ok()) << s.message();
+    const Output o = ReadOutput(out);
+    ASSERT_EQ(o.bands.size(), 1u);
+    size_t inside = 0;
+    for (size_t i = 0; i < o.bands[0].size(); ++i) {
+        if (!o.mask.empty() && o.mask[i] == 0) continue;
+        ++inside;
+        ASSERT_TRUE(o.bands[0][i] == 10 || o.bands[0][i] == 200) << "index " << int{o.bands[0][i]} << " at " << i;
+    }
+    EXPECT_GT(inside, 64u * 64u);
+}
+
 }  // namespace
 }  // namespace ddbt::cog::build
