@@ -1206,11 +1206,11 @@ TEST_F(CopcTilerTest, AGeographicCrsOnCoordinatesItCannotHoldGivesNoTiles) {
         EXPECT_EQ(e.code(), ddbt::cog::tiler::TileErrorCode::kInvalidArgs);
         EXPECT_EQ(std::string(e.what()), "Cannot tile " + path + ": footprint unavailable: the coordinates do not fit WGS 84");
     }
-    EXPECT_EQ(BoundsMisfit(cloud->crs(), 200, 45, 200.001, 45.001), "the coordinates do not fit WGS 84");
-    EXPECT_EQ(BoundsMisfit(cloud->crs(), -180, -90, 180, 90), "");
-    EXPECT_EQ(BoundsMisfit(cloud->crs(), 15, 45, 15.1, 91), "the coordinates do not fit WGS 84");
+    EXPECT_EQ(ddbt::crs::BoundsMisfit(cloud->crs(), 200, 45, 200.001, 45.001), "the coordinates do not fit WGS 84");
+    EXPECT_EQ(ddbt::crs::BoundsMisfit(cloud->crs(), -180, -90, 180, 90), "");
+    EXPECT_EQ(ddbt::crs::BoundsMisfit(cloud->crs(), 15, 45, 15.1, 91), "the coordinates do not fit WGS 84");
     // A projected CRS takes any value
-    EXPECT_EQ(BoundsMisfit(ddbt::crs::Crs::FromWkt(test::kUtm33Wkt), 500000, 5000000, 500100, 5000100), "");
+    EXPECT_EQ(ddbt::crs::BoundsMisfit(ddbt::crs::Crs::FromWkt(test::kUtm33Wkt), 500000, 5000000, 500100, 5000100), "");
 }
 
 }  // namespace

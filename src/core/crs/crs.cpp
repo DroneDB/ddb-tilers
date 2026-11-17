@@ -247,7 +247,13 @@ std::string BoundsMisfit(const Crs& c, double minX, double minY, double maxX, do
     return "the coordinates do not fit " + (name.empty() ? std::string("the geographic CRS of the file") : name);
 }
 
-Crs Crs::HorizontalPart() const { return IsCompound() ? CompoundPart(*this, 0) : *this; }
+// A compound CRS whose parts PROJ cannot split keeps itself as its horizontal part, so a caller can
+// still transform its x, y
+Crs Crs::HorizontalPart() const {
+    if (!IsCompound()) return *this;
+    Crs part = CompoundPart(*this, 0);
+    return part.Valid() ? part : *this;
+}
 Crs Crs::VerticalPart() const { return IsCompound() ? CompoundPart(*this, 1) : Crs(); }
 std::optional<LonLatBox> Crs::AreaOfUse() const { return Need(d_).area; }
 

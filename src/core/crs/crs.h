@@ -92,7 +92,8 @@ public:
     /// The axes of a coordinate: 2 for a horizontal CRS; 3 for a geocentric, a 3-D geographic or
     /// projected CRS and a horizontal + vertical compound CRS (a bound CRS: its source's).
     int AxisCount() const;
-    /// The horizontal part of a compound CRS; the CRS itself otherwise.
+    /// The horizontal part of a compound CRS; the CRS itself otherwise, and for a compound CRS
+    /// whose parts PROJ cannot split.
     Crs HorizontalPart() const;
     /// The vertical part of a compound CRS; an empty CRS otherwise.
     Crs VerticalPart() const;

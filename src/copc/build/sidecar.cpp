@@ -46,7 +46,7 @@ std::string SidecarJson(const SidecarInput& in) {
     if (!in.wkt.empty()) {
         try {
             const crs::Crs src = crs::Crs::FromWkt(in.wkt);
-            const crs::Crs horizontal = tiler::HorizontalCrs(src);
+            const crs::Crs horizontal = src.HorizontalPart();
             const double zToMeters = tiler::VerticalUnitInMeters(src);
             const crs::Crs dst = crs::Crs::FromEpsg(4326);
             double x0 = in.min[0], y0 = in.min[1], x1 = in.max[0], y1 = in.max[1];

@@ -211,23 +211,6 @@ std::unordered_map<std::string, std::shared_ptr<Slot>>& Registry() {
 
 }  // namespace
 
-crs::Crs HorizontalCrs(const crs::Crs& c) {
-    if (!c.Valid() || !c.IsCompound()) return c;
-    try {
-        const std::string json = c.ToProjJson();
-        if (const auto first = TopLevelArrayElement(json, "components", 0)) return crs::Crs::FromProjJson(*first);
-    } catch (const crs::CrsError&) {
-    }
-    return c;
-}
-
-std::string BoundsMisfit(const crs::Crs& c, double minX, double minY, double maxX, double maxY) {
-    if (!c.Valid() || !c.IsHorizontallyGeographic()) return "";
-    if (minX >= -180 && maxX <= 180 && minY >= -90 && maxY <= 90) return "";
-    const std::string& name = c.Name();
-    return "the coordinates do not fit " + (name.empty() ? std::string("the geographic CRS of the file") : name);
-}
-
 double VerticalUnitInMeters(const crs::Crs& c) {
     if (!c.Valid() || !c.IsCompound()) return 1.0;
     try {
@@ -347,7 +330,7 @@ std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t s
     // Coordinates that a geographic CRS cannot hold (a CRS that does not belong to them): no
     // footprint and no tiles, with the reason. The baseline tested the transformed bounds for a
     // latitude span of -90 to 90 instead, which its transform to longitude, latitude never gave.
-    if (std::string misfit = BoundsMisfit(c->crs_, h.min[0], h.min[1], h.max[0], h.max[1]); !misfit.empty()) {
+    if (std::string misfit = crs::BoundsMisfit(c->crs_, h.min[0], h.min[1], h.max[0], h.max[1]); !misfit.empty()) {
         c->footprintError_ = std::move(misfit);
         return c;
     }
@@ -357,7 +340,7 @@ std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t s
     // The baseline's footprint (pointcloud.cpp populatePointCloudFootprint): the horizontal CRS,
     // the min and max corners and the centroid, heights in metres within +-30 km.
     try {
-        const crs::Crs horizontal = HorizontalCrs(c->crs_);
+        const crs::Crs horizontal = c->crs_.HorizontalPart();
         const double zToMeters = VerticalUnitInMeters(c->crs_);
         std::shared_ptr<const crs::Transform> t;
         try {
