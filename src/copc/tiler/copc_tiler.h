@@ -43,6 +43,8 @@
 //
 // The work of one tile is bounded whatever the file (a degenerate octree whose nodes hold millions
 // of points, a COPC built elsewhere or read over HTTP), in every mode:
+//  - a tile or thumbnail whose selection holds a root of more than TileMaxPoints() points is
+//    refused (TileErrorCode::kRefused) before any node is read;
 //  - a node of more than TileMaxNodePoints() points is not read, except the root;
 //  - when the selected nodes hold more than TileMaxPoints() points, the tile reads the deepest
 //    levels of detail whose points, with those of every shallower level inside the tile window,
@@ -106,13 +108,17 @@ struct RenderInfo {
     int depthLimitedTo = -1;     // the deepest depth read when the budget cut the selection, else -1
     uint32_t nodesSkipped = 0;   // selected nodes not read: above the node limit
     uint64_t peakBatchPoints = 0;  // the most decoded points held at once (one batch of nodes)
+    uint64_t rootPoints = 0;     // points of the root node, when the render selected it
+    bool rootRefused = false;    // the root holds more points than the budget: refused, nothing read
 };
 
-/// Renders and encodes a tile. Throws cog::tiler::TileError.
+/// Renders and encodes a tile. Throws cog::tiler::TileError. An encoded tile is cached with the
+/// tile limits it was drawn under: a change of a limit drops it.
 encode::ByteBuffer RenderTile(const TileRequest& request);
 
 /// Renders a tile of `cloud` into RGBA (tileSize^2 * 4 bytes, resized), without encoding or the
-/// tile cache. Throws cog::tiler::TileError (out of bounds, transform failures).
+/// tile cache. Throws cog::tiler::TileError (out of bounds, transform failures, kRefused for a
+/// root above TileMaxPoints()); `info` is filled also when the render throws once it has started.
 void RenderRgba(const Cloud& cloud, const TileRequest& request, std::vector<uint8_t>& rgba,
                 RenderInfo* info = nullptr);
 
@@ -130,7 +136,9 @@ struct ThumbnailRequest {
 /// coloured points in their colours, others in the ramp over the header z range): in EPSG:3857
 /// (north up) when the cloud has a footprint, else in its own x, y (a cloud without a CRS, or
 /// without a transformation to EPSG:3857). Throws cog::tiler::TileError: kInvalidArgs for a
-/// bad size, kException for a cloud of zero extent or without points, like RenderTile else.
+/// bad size, kException for a cloud of zero extent or without points, kRefused for a root of more
+/// points than TileMaxPoints() (whatever pointBudget), like RenderTile else; `info` is filled also
+/// when the render throws once it has started.
 void RenderThumbnail(const ThumbnailRequest& request, std::vector<uint8_t>& rgba, RenderInfo* info = nullptr);
 
 /// The footprint and zoom range of `path` for `tileSize` px tiles in the process-wide mode, as
@@ -149,7 +157,8 @@ void SetMode(Mode mode);
 int ResolutionOffset();
 
 /// The most points one tile may read: DDBT_COPC_TILE_MAX_POINTS, default 4,000,000; 0 = no limit.
-/// Thumbnails have their own budget (ThumbnailRequest::pointBudget).
+/// Thumbnails have their own budget (ThumbnailRequest::pointBudget), but a root above this one
+/// refuses them too. Setting a limit to a new value drops the cached tiles.
 uint64_t TileMaxPoints();
 void SetTileMaxPoints(uint64_t points);
 /// The most points of a node a tile reads (the root is always read):

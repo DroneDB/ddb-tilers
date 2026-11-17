@@ -1117,24 +1117,97 @@ TEST_F(CopcTilerTest, ARenderOverTheTileBudgetIsDrawnInBatchesAsAtOnce) {
     EXPECT_LE(info.peakBatchPoints, 50000u);
 }
 
-TEST_F(CopcTilerTest, TheRootIsReadWhateverTheLimits) {
+TEST_F(CopcTilerTest, TheRootIsReadWhateverTheNodeLimitWithinTheBudget) {
     CloudSpec s;
     const std::string path = Cloud("rgb8", s);
     RenderInfo all;
     const XyzTile t = FullestTile(path, {21}, all);
     const uint64_t root = (s.points + 15) / 16;  // every 16th point
     for (const Mode mode : {Mode::kCompat, Mode::kHybrid, Mode::kModern}) {
-        const ScopedTileLimits limits(1, 1);
-        cache::NodeCache::Global().Clear();
-        RenderInfo info;
-        const auto rgba = Render(path, t.z, t.x, t.y, 256, mode, &info);
-        EXPECT_EQ(info.nodes, 1u);
-        EXPECT_EQ(info.points, root);
-        EXPECT_EQ(info.depthLimitedTo, 0);
-        EXPECT_EQ(info.nodesSkipped, all.nodes - 1);  // every node but the root is above 1 point
-        EXPECT_GT(Opaque(rgba), 0u) << ModeName(mode);
-        EXPECT_EQ(cache::NodeCache::Global().Stats().entries, 0u);  // the root is above the limit
+        {
+            // Every node but the root is above the node limit of 1 point
+            const ScopedTileLimits limits(root, 1);
+            cache::NodeCache::Global().Clear();
+            RenderInfo info;
+            const auto rgba = Render(path, t.z, t.x, t.y, 256, mode, &info);
+            EXPECT_EQ(info.nodes, 1u);
+            EXPECT_EQ(info.points, root);
+            EXPECT_EQ(info.rootPoints, root);
+            EXPECT_FALSE(info.rootRefused);
+            EXPECT_EQ(info.depthLimitedTo, -1);
+            EXPECT_EQ(info.nodesSkipped, all.nodes - 1);
+            EXPECT_GT(Opaque(rgba), 0u) << ModeName(mode);
+            EXPECT_EQ(cache::NodeCache::Global().Stats().entries, 0u);  // the root is above the limit
+        }
+        {
+            // Only the root fits the budget
+            const ScopedTileLimits limits(root, 0);
+            RenderInfo info;
+            const auto rgba = Render(path, t.z, t.x, t.y, 256, mode, &info);
+            EXPECT_EQ(info.nodes, 1u);
+            EXPECT_EQ(info.points, root);
+            EXPECT_EQ(info.depthLimitedTo, 0);
+            EXPECT_EQ(info.nodesSkipped, 0u);
+            EXPECT_GT(Opaque(rgba), 0u) << ModeName(mode);
+        }
     }
+}
+
+// A root above the point budget of a tile (a foreign or hostile COPC whose root holds tens of
+// millions of points) would be decoded whole for every tile and thumbnail: they are refused before
+// any node is read.
+TEST_F(CopcTilerTest, ARootAboveTheTileBudgetIsRefusedUnread) {
+    CloudSpec s;
+    const std::string path = Cloud("rgb8", s);
+    RenderInfo all;
+    const XyzTile t = FullestTile(path, {21}, all);
+    const uint64_t root = (s.points + 15) / 16;
+    const std::string refusal = "Cannot draw " + path + ": the root node of the cloud holds " + std::to_string(root) +
+                                " points, more than the tile budget " + std::to_string(root - 1);
+    const auto expectRefused = [&](const std::function<void()>& render, const RenderInfo& info, const char* what) {
+        SCOPED_TRACE(what);
+        cache::NodeCache::Global().Clear();
+        try {
+            render();
+            ADD_FAILURE() << "rendered";
+        } catch (const ddbt::cog::tiler::TileError& e) {
+            EXPECT_EQ(e.code(), ddbt::cog::tiler::TileErrorCode::kRefused);
+            EXPECT_EQ(std::string(e.what()), refusal);
+        }
+        EXPECT_TRUE(info.rootRefused);
+        EXPECT_EQ(info.rootPoints, root);
+        EXPECT_EQ(info.peakBatchPoints, 0u) << "nothing decoded";
+        EXPECT_EQ(cache::NodeCache::Global().Stats().entries, 0u) << "nothing decoded";
+    };
+    {
+        const ScopedTileLimits limits(root - 1, 0);
+        for (const Mode mode : {Mode::kCompat, Mode::kHybrid, Mode::kModern}) {
+            RenderInfo info;
+            expectRefused([&] { Render(path, t.z, t.x, t.y, 256, mode, &info); }, info, ModeName(mode));
+            EXPECT_EQ(info.pointsBudget, root - 1);
+        }
+        RenderInfo info;
+        ThumbnailRequest r;
+        r.path = path;
+        r.size = 256;
+        std::vector<uint8_t> rgba;
+        expectRefused([&] { RenderThumbnail(r, rgba, &info); }, info, "thumbnail");
+        uint8_t* buf = nullptr;
+        int size = 0;
+        EXPECT_EQ(ddbt::api::CopcMemoryTile(path.c_str(), t.z, t.x, t.y, &buf, &size, 256, true, true, nullptr, "png"),
+                  DDBT_ERR_REFUSED);
+        EXPECT_EQ(std::string(ddbt::LastError()), refusal);
+        EXPECT_EQ(buf, nullptr);
+        EXPECT_EQ(ddbtRenderCopcThumbnail(path.c_str(), 256, 0, &buf, &size), DDBT_ERR_REFUSED);
+        EXPECT_EQ(std::string(ddbtLastError()), refusal);
+        EXPECT_EQ(buf, nullptr);
+    }
+    // Without a budget, the root is read
+    const ScopedTileLimits none(0, 0);
+    RenderInfo info;
+    EXPECT_GT(Opaque(Render(path, t.z, t.x, t.y, 256, Mode::kModern, &info)), 0u);
+    EXPECT_FALSE(info.rootRefused);
+    EXPECT_EQ(info.rootPoints, root);
 }
 
 TEST_F(CopcTilerTest, ANodeAboveTheNodeLimitIsSkippedAndNeverCached) {
@@ -1173,6 +1246,49 @@ TEST_F(CopcTilerTest, TheHostSetsTheLimitsOfTheTiles) {
     EXPECT_EQ(info.pointsBudget, all.points / 2);
     EXPECT_LE(info.points, all.points / 2);
     EXPECT_GE(info.depthLimitedTo, 0);
+}
+
+// A tile is cached with the limits it was drawn under: once a host changes a limit, the tiles drawn
+// under the old one are no longer served; setting a limit to its value keeps them.
+TEST_F(CopcTilerTest, ATileCachedUnderOtherLimitsIsDrawnAgain) {
+    const std::string path = Cloud("dense", DenseSpec());
+    RenderInfo all;
+    const XyzTile t = FullestTile(path, {22}, all);
+    const ScopedTileLimits restore(TileMaxPoints(), TileMaxNodePoints());
+    TileRequest r;
+    r.path = path;
+    r.z = t.z, r.x = t.x, r.y = t.y, r.tms = true;
+    r.mode = Mode::kModern;
+    const auto tile = [&r](bool noCache) {
+        r.noCache = noCache;
+        const auto b = RenderTile(r);
+        return std::vector<uint8_t>(b.data(), b.data() + b.size());
+    };
+    const auto configure = [](uint64_t maxPoints, uint64_t maxNodePoints) {
+        const std::string config = "{\"copcTileMaxPoints\": " + std::to_string(maxPoints) +
+                                   ", \"copcTileMaxNodePoints\": " + std::to_string(maxNodePoints) + "}";
+        ASSERT_EQ(ddbtConfigure(config.c_str()), DDBT_ERR_NONE) << ddbtLastError();
+    };
+    ClearTileCache();
+    configure(0, 0);
+    const auto unlimited = tile(false);
+    const auto before = TileCacheStats();
+    configure(0, 0);
+    EXPECT_EQ(tile(false), unlimited);
+    EXPECT_EQ(TileCacheStats().hits - before.hits, 1u) << "the same limits keep the cached tiles";
+
+    configure(all.points / 2, 0);
+    const auto budgeted = tile(false);
+    EXPECT_EQ(budgeted, tile(true)) << "the point budget changed";
+    EXPECT_NE(budgeted, unlimited);
+
+    configure(0, 0);
+    EXPECT_EQ(tile(false), unlimited) << "the point budget changed back";
+
+    configure(0, 1);
+    const auto rootOnly = tile(false);
+    EXPECT_EQ(rootOnly, tile(true)) << "the node limit changed";
+    EXPECT_NE(rootOnly, unlimited);
 }
 
 TEST_F(CopcTilerTest, AGeographicCrsOnCoordinatesItCannotHoldGivesNoTiles) {

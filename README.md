@@ -200,7 +200,7 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | `ddbtRenderCopcThumbnail(input, size, pointBudget, outRgba, outSize)` | A square RGBA thumbnail of a whole COPC point cloud |
 | `ddbtEncodeImage(image, format, quality, outBuffer, outSize)` | PNG, JPEG or WebP of an 8-bit image (grey, grey + alpha, RGB, RGBA or palette) with the encoders and rules of the tiles |
 | `ddbtSetRemoteReader(reader)` | Range reads of the host (its HTTP client) for COPC files at http(s) URLs |
-| `ddbtConfigure(configJson)` | Process-wide settings of a host that embeds the library: `projDataDir`, `threads`, cache budgets (`blockCacheMb`, `tileCacheMb`, `copcNodeCacheMb`, `copcTileCacheMb`), `copcTilerMode`, point-cloud tile limits (`copcTileMaxPoints`, `copcTileMaxNodePoints`), `copcBuildMemMb`; they win over the environment variables |
+| `ddbtConfigure(configJson)` | Process-wide settings of a host that embeds the library: `projDataDir`, `threads`, cache budgets (`blockCacheMb`, `tileCacheMb`, `copcNodeCacheMb`, `copcTileCacheMb`), `copcTilerMode`, point-cloud tile limits (`copcTileMaxPoints`, `copcTileMaxNodePoints`; a change drops the point-cloud tiles cached under the old limits), `copcBuildMemMb`; they win over the environment variables |
 | `ddbtGetConfig(outJson)` | The settings in effect, as the JSON object `ddbtConfigure` takes |
 | `ddbtFree`, `ddbtLastError`, `ddbtVersion`, `ddbtCpuInfo` | Memory release, error message of the last call on the thread, version, CPU dispatch |
 
@@ -216,7 +216,7 @@ Environment variables (all optional):
 | `DDBT_TILE_REQUEST_MB` | 1024 | Working memory one raster tile request may use |
 | `DDBT_COPC_NODE_CACHE_MB` | 512 | Decoded-node cache of the COPC tiler |
 | `DDBT_COPC_TILE_CACHE_MB` | 64 | Encoded-tile cache of the COPC tiler |
-| `DDBT_COPC_TILE_MAX_POINTS` | 4000000 | Most points one COPC tile reads (0: no limit); past it the tile reads the deepest levels of detail that fit |
+| `DDBT_COPC_TILE_MAX_POINTS` | 4000000 | Most points one COPC tile reads (0: no limit); past it the tile reads the deepest levels of detail that fit. A tile or thumbnail of a cloud whose root node holds more points is refused (`DDBT_ERR_REFUSED`) without reading the root |
 | `DDBT_COPC_TILE_MAX_NODE_POINTS` | 1000000 | Most points of a node a COPC tile reads, the root excepted (0: no limit); larger nodes are left out and never cached |
 | `DDBT_COPC_TILER_MODE` | `hybrid` | `compat`, `hybrid` or `modern` |
 | `DDBT_COPC_BUILD_MEM_MB` | 4096 | Memory cap of the COPC builder |

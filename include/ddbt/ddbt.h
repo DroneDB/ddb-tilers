@@ -69,7 +69,8 @@ DDBT_API const char *ddbtLastError(void);
  * a remote reader: ddbtSetRemoteReader).
  * Codes: DDBT_ERR_INVALIDARGS for a bad argument (no path, NULL outputs, negative coordinates or
  * tile size, a tile size that is not a power of two, an unknown format), DDBT_ERR_NOTFOUND when
- * the input does not exist, DDBT_ERR_EXCEPTION otherwise (libddb 2.4.1's DDBMemoryTileFmt, a 1.x
+ * the input does not exist, DDBT_ERR_REFUSED for a COPC whose root node holds more points than
+ * the tile budget (copcTileMaxPoints of ddbtConfigure), DDBT_ERR_EXCEPTION otherwise (libddb 2.4.1's DDBMemoryTileFmt, a 1.x
  * export, folds the first two into DDBERR_EXCEPTION; the messages are the same).
  * @param inputPath path of the input raster (GeoTIFF / COG)
  * @param tz,tx,ty tile coordinates; ty is an XYZ row (north = 0) when tms is true, a TMS row
@@ -136,7 +137,8 @@ DDBT_API ddbtErr ddbtMemoryTileEx3(const char *inputPath, int tz, int tx, int ty
  * in their colours, a cloud without colours in the ramp over its height range). In EPSG:3857, north
  * up, when the cloud has a footprint, else in its own x, y (no CRS, or none that transforms to
  * EPSG:3857). It reads the deepest octree levels whose points, with those of every shallower level,
- * fit pointBudget (0: 2 per pixel), at least the root. A COPC at an http(s) URL is read through the
+ * fit pointBudget (0: 2 per pixel), at least the root; a root of more points than the tile budget
+ * (copcTileMaxPoints of ddbtConfigure) is DDBT_ERR_REFUSED, not read. A COPC at an http(s) URL is read through the
  * remote reader (ddbtSetRemoteReader).
  * Codes: DDBT_ERR_INVALIDARGS for a bad argument (no path, NULL outputs, a size outside 1..16384)
  * or a file that is not a COPC, DDBT_ERR_NOTFOUND, DDBT_ERR_NOT_IMPLEMENTED (a remote path without
@@ -384,10 +386,13 @@ DDBT_API ddbtErr ddbtBuildCopc2(const char *inputPath, const char *outputPath, c
  *                  tiler (MiB, 0 = no cache)
  *   "copcTileMaxPoints": the most points one point-cloud tile reads (default 4000000,
  *                  DDBT_COPC_TILE_MAX_POINTS; 0 = no limit); past it, the tile reads the deepest
- *                  levels of detail inside its window that fit (at least the root)
+ *                  levels of detail inside its window that fit (at least the root). A tile or
+ *                  thumbnail of a cloud whose root node holds more points is DDBT_ERR_REFUSED,
+ *                  the root not read
  *   "copcTileMaxNodePoints": the most points of a node a point-cloud tile reads, the root
  *                  excepted (default 1000000, DDBT_COPC_TILE_MAX_NODE_POINTS; 0 = no limit);
- *                  larger nodes are left out and never cached
+ *                  larger nodes are left out and never cached. A change of either limit drops
+ *                  the point-cloud tiles cached under the old one
  *   "copcTilerMode": "compat" (DroneDB 2.4.1's tiles), "hybrid" or "modern"
  *   "copcBuildMemMb": memory cap of COPC builds that do not give one (0 = the default:
  *                  DDBT_COPC_BUILD_MEM_MB, else 4 GiB, at most half the memory)

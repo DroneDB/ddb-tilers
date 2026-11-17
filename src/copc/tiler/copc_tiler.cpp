@@ -82,6 +82,14 @@ std::atomic<uint64_t>& TileMaxNodePointsSetting() {
     return v;
 }
 
+// Counts the changes of the tile limits. A cached tile is keyed by the count read before it was
+// drawn, so a tile drawn under limits that changed since is never served; clearing the cache alone
+// would not do, as a render in flight during the change stores its tile after the clear.
+std::atomic<uint64_t>& TileLimitsGeneration() {
+    static std::atomic<uint64_t> v{0};
+    return v;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Encoded-tile cache
 
@@ -89,6 +97,7 @@ struct TileCacheKey {
     uint64_t cloud = 0;
     int z = 0, x = 0, y = 0, size = 0;
     uint8_t format = 0, mode = 0;
+    uint64_t limits = 0;  // TileLimitsGeneration() before the tile was drawn
     friend bool operator==(const TileCacheKey&, const TileCacheKey&) = default;
 };
 
@@ -96,7 +105,7 @@ struct TileCacheKeyHash {
     size_t operator()(const TileCacheKey& k) const noexcept {
         uint64_t h = k.cloud * 0x9E3779B97F4A7C15ull;
         for (const uint64_t v : {uint64_t(uint32_t(k.z)), uint64_t(uint32_t(k.x)), uint64_t(uint32_t(k.y)),
-                                 uint64_t(uint32_t(k.size)), uint64_t(k.format) << 8 | k.mode}) {
+                                 uint64_t(uint32_t(k.size)), uint64_t(k.format) << 8 | k.mode, k.limits}) {
             h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
         }
         h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
@@ -333,14 +342,30 @@ uint64_t PointsOf(std::span<const HierarchyNode* const> nodes) {
     return points;
 }
 
-// The limits of a tile applied to its selection (the order is kept): the nodes above the node
-// limit are left out (not the root), then, when the others hold more points than the budget, the
-// depths below the deepest that fits it inside the window. Within the limits nothing changes. It
-// costs no read (the counts come from the hierarchy), and a selection of fewer points than a
-// limit is not even scanned for it.
-void LimitSelection(Selection& sel, RenderInfo& info) {
+// Refuses a render whose selection holds a root of more points than the point budget of a tile
+// (the root is read whatever the limits, so such a root, from a COPC built elsewhere or a hostile
+// one, would be decoded whole for every tile and thumbnail). No node is read before.
+void RefuseARootAboveTheBudget(const Cloud& cloud, const Selection& sel, uint64_t budget, RenderInfo& info) {
+    const auto root = std::find_if(sel.nodes.begin(), sel.nodes.end(),
+                                   [](const HierarchyNode* n) { return n->key.d == 0; });
+    if (root == sel.nodes.end()) return;
+    info.rootPoints = static_cast<uint64_t>((*root)->pointCount);
+    if (budget == 0 || info.rootPoints <= budget) return;
+    info.rootRefused = true;
+    cog::tiler::FailRefused("Cannot draw " + cloud.path() + ": the root node of the cloud holds " +
+                            std::to_string(info.rootPoints) + " points, more than the tile budget " +
+                            std::to_string(budget));
+}
+
+// The limits of a tile applied to its selection (the order is kept): a root above the budget is
+// refused, the nodes above the node limit are left out (not the root), then, when the others hold
+// more points than the budget, the depths below the deepest that fits it inside the window. Within
+// the limits nothing changes. It costs no read (the counts come from the hierarchy), and a
+// selection of fewer points than a limit is not scanned for that limit.
+void LimitSelection(const Cloud& cloud, Selection& sel, RenderInfo& info) {
     const uint64_t maxNode = TileMaxNodePoints(), budget = TileMaxPoints();
     info.pointsBudget = budget;
+    RefuseARootAboveTheBudget(cloud, sel, budget, info);
     if (maxNode > 0 && sel.points > maxNode) {
         const size_t before = sel.nodes.size();
         std::erase_if(sel.nodes, [maxNode](const HierarchyNode* n) {
@@ -422,7 +447,7 @@ void RenderCompat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int
     q.depthEnd = DepthEndForResolution(cloud.file().spacing(), resolution);
     info.depthEnd = q.depthEnd;
     Selection sel = SelectOrThrow(cloud, q, NodeOrder::kFileOrder);
-    LimitSelection(sel, info);
+    LimitSelection(cloud, sel, info);
     s.order.assign(sel.nodes.begin(), sel.nodes.end());
     if (colored)
         DroneDbOrder(cloud, s.order);
@@ -691,7 +716,7 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
     q.depthEnd = DepthEndForResolution(cloud.file().spacing() * scale, lodResolution);
     info.depthEnd = q.depthEnd;
     Selection sel = SelectOrThrow(cloud, q, NodeOrder::kFileOrder);
-    LimitSelection(sel, info);
+    LimitSelection(cloud, sel, info);
     info.nodes = static_cast<uint32_t>(sel.nodes.size());
     info.points = sel.points;
     if (sel.nodes.empty()) return blank();
@@ -752,6 +777,22 @@ int ThumbnailDepth(const Cloud& cloud, uint64_t budget) {
     return DeepestDepthWithin(all->nodes, budget);
 }
 
+// The info of a render, given to the caller when the render returns or throws (a refused root).
+class InfoOnExit {
+public:
+    explicit InfoOnExit(RenderInfo* out) noexcept : out_(out) {}
+    ~InfoOnExit() {
+        if (out_) *out_ = info;
+    }
+    InfoOnExit(const InfoOnExit&) = delete;
+    InfoOnExit& operator=(const InfoOnExit&) = delete;
+
+    RenderInfo info;
+
+private:
+    RenderInfo* out_;
+};
+
 }  // namespace
 
 void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, RenderInfo* infoOut) {
@@ -770,7 +811,8 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
     const double offX = (r.size - width * scale) / 2, offY = (r.size - height * scale) / 2;
     const PixelMap pm{area.minX - offX / scale, area.maxY + offY / scale, scale};
 
-    RenderInfo info;
+    InfoOnExit result(infoOut);
+    RenderInfo& info = result.info;
     const uint64_t budget = r.pointBudget > 0 ? r.pointBudget
                                               : 2 * static_cast<uint64_t>(r.size) * static_cast<uint64_t>(r.size);
     SelectQuery q;
@@ -778,6 +820,7 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
     q.depthEnd = ThumbnailDepth(*cloud, budget) + 1;
     info.depthEnd = q.depthEnd;
     Selection sel = SelectOrThrow(*cloud, q, NodeOrder::kFileOrder);
+    RefuseARootAboveTheBudget(*cloud, sel, TileMaxPoints(), info);
     info.nodes = static_cast<uint32_t>(sel.nodes.size());
     info.points = sel.points;
     if (sel.points == 0) throw TileError(TileErrorCode::kException, "No points fetched from cloud, check zoom level");
@@ -816,7 +859,6 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
     rgba.resize(static_cast<size_t>(r.size) * static_cast<size_t>(r.size) * 4);
     info.opaque = s->splat.Resolve(rgba.data());
     if (info.opaque == 0) info.blank = true;
-    if (infoOut) *infoOut = info;
 }
 
 std::optional<Mode> ParseMode(std::string_view name) {
@@ -843,10 +885,20 @@ int ResolutionOffset() {
     return offset;
 }
 
+namespace {
+// A new value of a tile limit: the tiles cached under the old one are no longer served (their keys
+// hold the previous generation, which is counted after the value is stored) and are dropped.
+void SetTileLimit(std::atomic<uint64_t>& setting, uint64_t points) {
+    if (setting.exchange(points) == points) return;
+    TileLimitsGeneration().fetch_add(1);
+    EncodedTiles().Clear();
+}
+}  // namespace
+
 uint64_t TileMaxPoints() { return TileMaxPointsSetting().load(std::memory_order_relaxed); }
-void SetTileMaxPoints(uint64_t points) { TileMaxPointsSetting().store(points, std::memory_order_relaxed); }
+void SetTileMaxPoints(uint64_t points) { SetTileLimit(TileMaxPointsSetting(), points); }
 uint64_t TileMaxNodePoints() { return TileMaxNodePointsSetting().load(std::memory_order_relaxed); }
-void SetTileMaxNodePoints(uint64_t points) { TileMaxNodePointsSetting().store(points, std::memory_order_relaxed); }
+void SetTileMaxNodePoints(uint64_t points) { SetTileLimit(TileMaxNodePointsSetting(), points); }
 
 namespace {
 void RequireTileSize(int tileSize) {
@@ -894,14 +946,14 @@ void RenderRgba(const Cloud& cloud, const TileRequest& r, std::vector<uint8_t>& 
     const auto range = tile::compat::MinMaxCoordsForZ(m, f.minX, f.minY, f.maxX, f.maxY, r.z);
     if (!range.Contains(r.x, tmsRow)) throw TileError(TileErrorCode::kException, OutOfBounds(range));
 
-    RenderInfo info;
+    InfoOnExit result(infoOut);
+    RenderInfo& info = result.info;
     ScratchLease s;
     if (mode == Mode::kCompat)
         RenderCompat(cloud, m, r.z, r.x, tmsRow, r.tileSize, *s, rgba, info);
     else
         RenderSplat(cloud, m, r.z, r.x, tmsRow, r.tileSize, mode, *s, rgba, info);
     if (info.opaque == 0) info.blank = true;
-    if (infoOut) *infoOut = info;
 }
 
 encode::ByteBuffer RenderTile(const TileRequest& r) {
@@ -915,7 +967,7 @@ encode::ByteBuffer RenderTile(const TileRequest& r) {
     TileCacheKey key;
     if (useCache) {
         key = {cloud->file().id(), r.z, r.x, tile::compat::InternalRow(r.y, r.z, r.tms), r.tileSize,
-               static_cast<uint8_t>(r.format), static_cast<uint8_t>(mode)};
+               static_cast<uint8_t>(r.format), static_cast<uint8_t>(mode), TileLimitsGeneration().load()};
         if (auto hit = tiles.Get(key)) {
             encode::ByteBuffer out;
             out.assign(hit->data(), hit->size());
