@@ -35,7 +35,7 @@
 
 TEST(Api, Version) {
     const std::string v = ddbtVersion();
-    EXPECT_EQ(v, "0.12.0");
+    EXPECT_EQ(v, "0.13.0");
 }
 
 TEST(Api, LastErrorIsEmptyWhenNothingFailed) {
@@ -103,7 +103,7 @@ TEST(Api, CpuInfoIsJsonWithTheDispatchTarget) {
     EXPECT_NE(s.find("\"dispatchTarget\":\""), std::string::npos) << s;
     EXPECT_NE(s.find("\"compiledTargets\":["), std::string::npos) << s;
     EXPECT_NE(s.find("\"supportedTargets\":["), std::string::npos) << s;
-    EXPECT_NE(s.find("\"version\":\"0.12.0\""), std::string::npos) << s;
+    EXPECT_NE(s.find("\"version\":\"0.13.0\""), std::string::npos) << s;
     EXPECT_EQ(ddbtCpuInfo(nullptr), DDBT_ERR_INVALIDARGS);
 }
 
@@ -170,11 +170,16 @@ TEST(HostApi, ConfigureAppliesEverySetting) {
     const size_t blockBudget = ddbt::cog::tiler::BlockCacheBudget();
     const size_t nodeBudget = ddbt::copc::cache::NodeCache::Global().BudgetBytes();
     const std::string projDir = ddbt::crs::ProjDataDir();
+    const uint64_t maxPoints = ddbt::copc::tiler::TileMaxPoints();
+    const uint64_t maxNodePoints = ddbt::copc::tiler::TileMaxNodePoints();
 
     ASSERT_EQ(ddbtConfigure(R"({"copcTilerMode": "modern", "tileCacheMb": 3, "blockCacheMb": 5,
-                                "copcNodeCacheMb": 7, "copcTileCacheMb": 9, "copcBuildMemMb": 300})"),
+                                "copcNodeCacheMb": 7, "copcTileCacheMb": 9, "copcBuildMemMb": 300,
+                                "copcTileMaxPoints": 123456, "copcTileMaxNodePoints": 7890})"),
               DDBT_ERR_NONE)
         << ddbtLastError();
+    EXPECT_EQ(ddbt::copc::tiler::TileMaxPoints(), 123456u);
+    EXPECT_EQ(ddbt::copc::tiler::TileMaxNodePoints(), 7890u);
     EXPECT_EQ(ddbt::copc::tiler::GetMode(), ddbt::copc::tiler::Mode::kModern);
     EXPECT_EQ(ddbt::cog::tiler::TileCacheBudget(), size_t{3} << 20);
     EXPECT_EQ(ddbt::cog::tiler::BlockCacheBudget(), size_t{5} << 20);
@@ -200,6 +205,57 @@ TEST(HostApi, ConfigureAppliesEverySetting) {
     ddbt::cog::tiler::SetBlockCacheBudget(blockBudget);
     ddbt::copc::cache::NodeCache::Global().SetBudget(nodeBudget);
     ddbt::crs::SetProjDataDir(projDir);
+    ddbt::copc::tiler::SetTileMaxPoints(maxPoints);
+    ddbt::copc::tiler::SetTileMaxNodePoints(maxNodePoints);
+}
+
+json::Value GetConfig() {
+    char* out = nullptr;
+    EXPECT_EQ(ddbtGetConfig(&out), DDBT_ERR_NONE) << ddbtLastError();
+    const auto v = json::Parse(out != nullptr ? out : "");
+    ddbtFree(out);
+    return v ? *v : json::Value{};
+}
+
+TEST(HostApi, GetConfigGivesEverySettingInEffect) {
+    const uint64_t maxPoints = ddbt::copc::tiler::TileMaxPoints();
+    const uint64_t maxNodePoints = ddbt::copc::tiler::TileMaxNodePoints();
+    const size_t copcTileBudget = ddbt::copc::tiler::TileCacheBudget();
+    const size_t tileBudget = ddbt::cog::tiler::TileCacheBudget();
+    const size_t blockBudget = ddbt::cog::tiler::BlockCacheBudget();
+    const size_t nodeBudget = ddbt::copc::cache::NodeCache::Global().BudgetBytes();
+    const std::string projDir = ddbt::crs::ProjDataDir();
+    ASSERT_EQ(ddbtConfigure(R"({"copcTileMaxPoints": 100000, "copcTileMaxNodePoints": 0, "copcTileCacheMb": 11})"),
+              DDBT_ERR_NONE);
+    const json::Value c = GetConfig();
+    ASSERT_TRUE(c.IsObject());
+    for (const char* key : {"projDataDir", "threads", "copcTilerMode", "blockCacheMb", "tileCacheMb", "copcNodeCacheMb",
+                            "copcTileCacheMb", "copcBuildMemMb", "copcTileMaxPoints", "copcTileMaxNodePoints"})
+        EXPECT_NE(c.Find(key), nullptr) << key;
+    EXPECT_EQ(c.obj.size(), 10u);
+    EXPECT_EQ(c.Find("copcTileMaxPoints")->u, 100000u);
+    EXPECT_EQ(c.Find("copcTileMaxNodePoints")->u, 0u);
+    EXPECT_EQ(c.Find("copcTileCacheMb")->u, 11u);
+    EXPECT_EQ(c.Find("copcTilerMode")->str, ddbt::copc::tiler::ModeName(ddbt::copc::tiler::GetMode()));
+    EXPECT_EQ(c.Find("threads")->u, ddbt::exec::DefaultPoolThreads());
+    // What it gives is what ddbtConfigure takes (threads aside: the pool may run already)
+    json::Value back = c;
+    back.obj.erase("threads");
+    ASSERT_EQ(ddbtConfigure(json::Dump(back, 0).c_str()), DDBT_ERR_NONE) << ddbtLastError();
+    back.obj.erase("projDataDir");  // "" and a folder both read back as they are
+    json::Value again = GetConfig();
+    again.obj.erase("threads");
+    again.obj.erase("projDataDir");
+    EXPECT_EQ(json::Dump(again, 0), json::Dump(back, 0));
+    ddbt::copc::tiler::SetTileMaxPoints(maxPoints);
+    ddbt::copc::tiler::SetTileMaxNodePoints(maxNodePoints);
+    ddbt::copc::tiler::SetTileCacheBudget(copcTileBudget);
+    ddbt::cog::tiler::SetTileCacheBudget(tileBudget);
+    ddbt::cog::tiler::SetBlockCacheBudget(blockBudget);
+    ddbt::copc::cache::NodeCache::Global().SetBudget(nodeBudget);
+    ddbt::copc::build::SetDefaultCopcMemoryBudget(0);
+    ddbt::crs::SetProjDataDir(projDir);
+    EXPECT_EQ(ddbtGetConfig(nullptr), DDBT_ERR_INVALIDARGS);
 }
 
 TEST(HostApi, ConfigureRefusesBadSettingsAndChangesNothing) {
@@ -208,6 +264,7 @@ TEST(HostApi, ConfigureRefusesBadSettingsAndChangesNothing) {
     for (const char* bad : {"", "[1]", "{\"bogus\": 1}", "{\"tileCacheMb\": -1}", "{\"tileCacheMb\": 1.5}",
                             "{\"tileCacheMb\": \"3\"}", "{\"copcTilerMode\": \"fancy\"}", "{\"projDataDir\": 3}",
                             "{\"threads\": 5000}", "{\"copcBuildMemMb\": 99999999999}",
+                            "{\"copcTileMaxPoints\": -1}", "{\"copcTileMaxNodePoints\": 1099511627777}",
                             // a valid setting next to a bad one is not applied either
                             "{\"copcTilerMode\": \"modern\", \"tileCacheMb\": -1}"}) {
         EXPECT_EQ(ddbtConfigure(bad), DDBT_ERR_INVALIDARGS) << bad;
@@ -649,11 +706,11 @@ namespace {
 
 // One descriptor of a LAS extra-bytes VLR (192 bytes): data type, name, and the rest zero.
 void PutExtraBytesDescriptor(std::vector<uint8_t>& vlr, uint8_t dataType, const std::string& name) {
-    std::vector<uint8_t> d(192, 0);
-    d[2] = dataType;
-    if (dataType == 0) d[3] = 2;  // an undocumented type: `options` is its size, 2 bytes
-    std::memcpy(d.data() + 4, name.data(), std::min<size_t>(name.size(), 32));
-    vlr.insert(vlr.end(), d.begin(), d.end());
+    ddbt::copc::testing::SynthExtraBytes e;
+    e.dataType = dataType;
+    if (dataType == 0) e.options = 2;  // an undocumented type: `options` is its size, 2 bytes
+    e.name = name;
+    ddbt::copc::testing::AppendExtraBytesDescriptor(vlr, e);
 }
 
 // The summary of ddbtPointCloudInfo, parsed.
@@ -1590,5 +1647,94 @@ TEST(HostApi, BuildCopc2ReportsProgressToOne) {
     log.ExpectMonotonicTo1({"planning", "reading", "building", "writing"});
     EXPECT_TRUE(std::filesystem::exists(out));
     EXPECT_EQ(ddbtBuildCopc2("", out.c_str(), nullptr, &ProgressLog::Record, &log), DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
+TEST(HostApi, BuildCopc2TransformsToTheTargetCrsAndReportsTheOctree) {
+    namespace syn = ddbt::copc::testing;
+    const auto dir = ApiScratch("copc2-crs");
+    const std::string in = (dir / "in.las").string(), out = (dir / "out.copc.laz").string();
+    const std::string report = (dir / "report.json").string();
+    syn::SynthLas s;
+    s.format = 6;
+    s.minor = 4;
+    s.scale = {1e-7, 1e-7, 0.01};
+    s.offset = {13.84, 46.68, 650};
+    s.wkt = ddbt::crs::Crs::FromEpsg(4326).ToWkt(ddbt::crs::WktFlavor::Wkt1Gdal);
+    syn::FillRandom(s, 20000, 7, std::array<int32_t, 3>{70000, 70000, 7350});
+    ASSERT_TRUE(syn::WriteBytes(in, syn::BuildLasBytes(s)));
+    const std::string options = R"({"targetCrs": "EPSG:32633", "report": )" + JsonString(report) + "}";
+    ASSERT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), options.c_str(), nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
+    // Read through ReadBytes, which closes the file: Windows cannot remove a folder with an open file
+    const std::vector<uint8_t> bytes = syn::ReadBytes(report);
+    const std::string text(bytes.begin(), bytes.end());
+    const auto j = json::Parse(text);
+    ASSERT_TRUE(j && j->IsObject()) << text;
+    ASSERT_NE(j->Find("transformed"), nullptr);
+    EXPECT_TRUE(j->Find("transformed")->b);
+    ASSERT_NE(j->Find("sourceCrs"), nullptr);
+    EXPECT_EQ(j->Find("sourceCrs")->str, s.wkt);
+    ASSERT_NE(j->Find("transformPath"), nullptr);
+    EXPECT_EQ(j->Find("transformPath")->str, "grid");
+    ASSERT_NE(j->Find("boundsPass"), nullptr);
+    EXPECT_FALSE(j->Find("boundsPass")->b);
+    ASSERT_NE(j->Find("crs"), nullptr);
+    EXPECT_TRUE(ddbt::crs::Crs::FromWkt(j->Find("crs")->str).Equivalent(ddbt::crs::Crs::FromEpsg(32633)));
+    ASSERT_NE(j->Find("maxNodePoints"), nullptr);
+    EXPECT_TRUE(j->Find("maxNodePoints")->isUint);
+    ASSERT_NE(j->Find("warnings"), nullptr);
+    EXPECT_EQ(j->Find("warnings")->kind, json::Value::Kind::kArray);
+    const json::Value* hist = j->Find("depthHistogram");
+    ASSERT_NE(hist, nullptr);
+    ASSERT_FALSE(hist->arr.empty());
+    uint64_t points = 0;
+    for (const json::Value& level : hist->arr) {
+        ASSERT_NE(level.Find("depth"), nullptr);
+        ASSERT_NE(level.Find("nodes"), nullptr);
+        ASSERT_NE(level.Find("points"), nullptr);
+        points += level.Find("points")->u;
+    }
+    EXPECT_EQ(points, 20000u);
+    EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"targetCrs": 32633})", nullptr, nullptr), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"targetCrs": "no such crs"})", nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
+// "dropCrs": the COPC states no CRS, and the report says the CRS was dropped
+TEST(HostApi, BuildCopc2DropsTheCrsWhenAsked) {
+    namespace syn = ddbt::copc::testing;
+    const auto dir = ApiScratch("copc2-drop");
+    const std::string in = (dir / "in.las").string(), out = (dir / "out.copc.laz").string();
+    const std::string report = (dir / "report.json").string();
+    syn::SynthLas s;
+    s.format = 6;
+    s.minor = 4;
+    s.scale = {0.001, 0.001, 0.001};
+    s.offset = {62, 47, 14};
+    s.wkt = ddbt::crs::Crs::FromEpsg(4978).ToWkt(ddbt::crs::WktFlavor::Wkt1Gdal);
+    syn::FillRandom(s, 5000, 9, std::array<int32_t, 3>{150000, 142000, 26000});
+    ASSERT_TRUE(syn::WriteBytes(in, syn::BuildLasBytes(s)));
+    const std::string options = R"({"dropCrs": true, "report": )" + JsonString(report) + "}";
+    ASSERT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), options.c_str(), nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
+    // Read through ReadBytes, which closes the file: Windows cannot remove a folder with an open file
+    const std::vector<uint8_t> bytes = syn::ReadBytes(report);
+    const std::string text(bytes.begin(), bytes.end());
+    const auto j = json::Parse(text);
+    ASSERT_TRUE(j && j->IsObject()) << text;
+    ASSERT_NE(j->Find("crsDropped"), nullptr);
+    EXPECT_TRUE(j->Find("crsDropped")->b);
+    EXPECT_FALSE(j->Find("transformed")->b);
+    EXPECT_EQ(j->Find("crs")->str, "");
+    EXPECT_EQ(j->Find("sourceCrs")->str, s.wkt);
+    char* info = nullptr;
+    ASSERT_EQ(ddbtPointCloudInfo(out.c_str(), false, &info), DDBT_ERR_NONE) << ddbtLastError();
+    const auto summary = json::Parse(std::string(info));
+    ddbtFree(info);
+    ASSERT_TRUE(summary && summary->IsObject());
+    EXPECT_EQ(summary->Find("wkt")->str, "");
+    EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"dropCrs": "yes"})", nullptr, nullptr), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"dropCrs": true, "targetCrs": "EPSG:32633"})", nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
     std::filesystem::remove_all(dir);
 }

@@ -24,6 +24,7 @@
 #include "core/cache/sharded_lru.h"
 #include "core/crs/polyfit.h"
 #include "core/tile/compat.h"
+#include "core/util/env.h"
 
 namespace ddbt::copc::tiler {
 
@@ -34,6 +35,8 @@ using cache::NodeCache;
 namespace {
 
 constexpr size_t kBatch = 2048;
+constexpr uint64_t kDefaultTileMaxPoints = 4'000'000;
+constexpr uint64_t kDefaultTileMaxNodePoints = 1'000'000;
 // Below this many points in the selected nodes, transforming them exactly is cheaper than a fit.
 constexpr uint64_t kExactBelow = 1500;
 constexpr double kFitMaxResidualPx = 0.01;
@@ -67,6 +70,26 @@ std::atomic<int>& ModeSetting() {
     return m;
 }
 
+std::atomic<uint64_t>& TileMaxPointsSetting() {
+    static std::atomic<uint64_t> v{
+        EnvUnsigned("DDBT_COPC_TILE_MAX_POINTS", kDefaultTileMaxPoints, kTilePointsSettingMax)};
+    return v;
+}
+
+std::atomic<uint64_t>& TileMaxNodePointsSetting() {
+    static std::atomic<uint64_t> v{
+        EnvUnsigned("DDBT_COPC_TILE_MAX_NODE_POINTS", kDefaultTileMaxNodePoints, kTilePointsSettingMax)};
+    return v;
+}
+
+// Counts the changes of the tile limits. A cached tile is keyed by the count read before it was
+// drawn, so a tile drawn under limits that changed since is never served; clearing the cache alone
+// would not do, as a render in flight during the change stores its tile after the clear.
+std::atomic<uint64_t>& TileLimitsGeneration() {
+    static std::atomic<uint64_t> v{0};
+    return v;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Encoded-tile cache
 
@@ -74,6 +97,7 @@ struct TileCacheKey {
     uint64_t cloud = 0;
     int z = 0, x = 0, y = 0, size = 0;
     uint8_t format = 0, mode = 0;
+    uint64_t limits = 0;  // TileLimitsGeneration() before the tile was drawn
     friend bool operator==(const TileCacheKey&, const TileCacheKey&) = default;
 };
 
@@ -81,7 +105,7 @@ struct TileCacheKeyHash {
     size_t operator()(const TileCacheKey& k) const noexcept {
         uint64_t h = k.cloud * 0x9E3779B97F4A7C15ull;
         for (const uint64_t v : {uint64_t(uint32_t(k.z)), uint64_t(uint32_t(k.x)), uint64_t(uint32_t(k.y)),
-                                 uint64_t(uint32_t(k.size)), uint64_t(k.format) << 8 | k.mode}) {
+                                 uint64_t(uint32_t(k.size)), uint64_t(k.format) << 8 | k.mode, k.limits}) {
             h ^= v + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
         }
         h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
@@ -92,16 +116,7 @@ struct TileCacheKeyHash {
 using TileCache = ddbt::cache::ShardedLru<TileCacheKey, std::vector<uint8_t>, TileCacheKeyHash>;
 
 TileCache& EncodedTiles() {
-    static TileCache cache([] {
-        const char* e = std::getenv("DDBT_COPC_TILE_CACHE_MB");
-        size_t mb = 64;
-        if (e != nullptr && *e != '\0') {
-            char* end = nullptr;
-            const unsigned long long v = std::strtoull(e, &end, 10);
-            if (end != e && *end == '\0' && v <= (1ull << 20)) mb = static_cast<size_t>(v);
-        }
-        return mb << 20;
-    }());
+    static TileCache cache(static_cast<size_t>(EnvUnsigned("DDBT_COPC_TILE_CACHE_MB", 64, uint64_t{1} << 20)) << 20);
     return cache;
 }
 
@@ -146,7 +161,12 @@ public:
         s_->inUse = true;
         s_->Reserve();
     }
-    ~ScratchLease() { s_->inUse = false; }
+    // The node references go with the lease (the cache owns the nodes it keeps), also when a
+    // render throws.
+    ~ScratchLease() {
+        s_->nodes.clear();
+        s_->inUse = false;
+    }
     Scratch& operator*() const noexcept { return *s_; }
     Scratch* operator->() const noexcept { return s_; }
 
@@ -257,11 +277,108 @@ Selection SelectOrThrow(const Cloud& cloud, const SelectQuery& q, NodeOrder orde
 
 void FetchNodes(const Cloud& cloud, std::span<const HierarchyNode* const> nodes, std::vector<NodeCache::NodePtr>& out) {
     try {
-        NodeCache::Global().Fetch(cloud.file(), nodes, out);
+        NodeCache::Global().Fetch(cloud.file(), nodes, out, TileMaxNodePoints());
     } catch (const TileError&) {
         throw;
     } catch (const std::exception& e) {
         throw TileError(TileErrorCode::kException, e.what());
+    }
+}
+
+// The points of a batch of nodes: the point budget of a tile (the default one when there is none).
+// A tile within its budget is one batch (its nodes decoded in parallel); a thumbnail, or a tile
+// without a budget, holds one budget of decoded points at a time.
+uint64_t FetchBatchPoints() {
+    const uint64_t budget = TileMaxPoints();
+    return budget == 0 ? kDefaultTileMaxPoints : budget;
+}
+
+// Calls draw(node) on the nodes in their order. They are fetched in batches of at most
+// FetchBatchPoints() points (at least one node), each released before the next is fetched: a
+// render holds the decoded points of one batch, whatever its selection. draw returns false to stop.
+template <typename Draw>
+void DrawNodes(const Cloud& cloud, std::span<const HierarchyNode* const> nodes, Scratch& s, RenderInfo& info,
+               Draw&& draw) {
+    const uint64_t batchPoints = FetchBatchPoints();
+    for (size_t at = 0; at < nodes.size();) {
+        size_t end = at + 1;
+        uint64_t points = static_cast<uint64_t>(nodes[at]->pointCount);
+        while (end < nodes.size() && points + static_cast<uint64_t>(nodes[end]->pointCount) <= batchPoints)
+            points += static_cast<uint64_t>(nodes[end++]->pointCount);
+        info.peakBatchPoints = std::max(info.peakBatchPoints, points);
+        FetchNodes(cloud, nodes.subspan(at, end - at), s.nodes);
+        for (const auto& node : s.nodes)
+            if (!draw(*node)) {
+                s.nodes.clear();
+                return;
+            }
+        s.nodes.clear();
+        at = end;
+    }
+}
+
+// The deepest depth whose nodes, with those of every shallower depth, hold at most `budget`
+// points (0 when even the root exceeds it).
+int DeepestDepthWithin(std::span<const HierarchyNode* const> nodes, uint64_t budget) {
+    std::vector<uint64_t> perDepth;
+    for (const HierarchyNode* n : nodes) {
+        const auto d = static_cast<size_t>(n->key.d);
+        if (perDepth.size() <= d) perDepth.resize(d + 1, 0);
+        perDepth[d] += static_cast<uint64_t>(n->pointCount);
+    }
+    int depth = 0;
+    uint64_t cumulative = 0;
+    for (size_t d = 0; d < perDepth.size(); ++d) {
+        cumulative += perDepth[d];
+        if (cumulative > budget) break;
+        depth = static_cast<int>(d);
+    }
+    return depth;
+}
+
+uint64_t PointsOf(std::span<const HierarchyNode* const> nodes) {
+    uint64_t points = 0;
+    for (const HierarchyNode* n : nodes) points += static_cast<uint64_t>(n->pointCount);
+    return points;
+}
+
+// Refuses a render whose selection holds a root of more points than the point budget of a tile
+// (the root is read whatever the limits, so such a root, from a COPC built elsewhere or a hostile
+// one, would be decoded whole for every tile and thumbnail). No node is read before.
+void RefuseARootAboveTheBudget(const Cloud& cloud, const Selection& sel, uint64_t budget, RenderInfo& info) {
+    const auto root = std::find_if(sel.nodes.begin(), sel.nodes.end(),
+                                   [](const HierarchyNode* n) { return n->key.d == 0; });
+    if (root == sel.nodes.end()) return;
+    info.rootPoints = static_cast<uint64_t>((*root)->pointCount);
+    if (budget == 0 || info.rootPoints <= budget) return;
+    info.rootRefused = true;
+    cog::tiler::FailRefused("Cannot draw " + cloud.path() + ": the root node of the cloud holds " +
+                            std::to_string(info.rootPoints) + " points, more than the tile budget " +
+                            std::to_string(budget));
+}
+
+// The limits of a tile applied to its selection (the order is kept): a root above the budget is
+// refused, the nodes above the node limit are left out (not the root), then, when the others hold
+// more points than the budget, the depths below the deepest that fits it inside the window. Within
+// the limits nothing changes. It costs no read (the counts come from the hierarchy), and a
+// selection of fewer points than a limit is not scanned for that limit.
+void LimitSelection(const Cloud& cloud, Selection& sel, RenderInfo& info) {
+    const uint64_t maxNode = TileMaxNodePoints(), budget = TileMaxPoints();
+    info.pointsBudget = budget;
+    RefuseARootAboveTheBudget(cloud, sel, budget, info);
+    if (maxNode > 0 && sel.points > maxNode) {
+        const size_t before = sel.nodes.size();
+        std::erase_if(sel.nodes, [maxNode](const HierarchyNode* n) {
+            return n->key.d > 0 && static_cast<uint64_t>(n->pointCount) > maxNode;
+        });
+        info.nodesSkipped = static_cast<uint32_t>(before - sel.nodes.size());
+        if (info.nodesSkipped > 0) sel.points = PointsOf(sel.nodes);
+    }
+    if (budget > 0 && sel.points > budget) {
+        const int depth = DeepestDepthWithin(sel.nodes, budget);
+        std::erase_if(sel.nodes, [depth](const HierarchyNode* n) { return n->key.d > depth; });
+        sel.points = PointsOf(sel.nodes);
+        info.depthLimitedTo = depth;
     }
 }
 
@@ -330,6 +447,7 @@ void RenderCompat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int
     q.depthEnd = DepthEndForResolution(cloud.file().spacing(), resolution);
     info.depthEnd = q.depthEnd;
     Selection sel = SelectOrThrow(cloud, q, NodeOrder::kFileOrder);
+    LimitSelection(cloud, sel, info);
     s.order.assign(sel.nodes.begin(), sel.nodes.end());
     if (colored)
         DroneDbOrder(cloud, s.order);
@@ -342,7 +460,6 @@ void RenderCompat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int
         throw TileError(TileErrorCode::kException,
                         "filters.colorinterp: Specified 'minimum' value must be less than 'maximum' value.");
 
-    FetchNodes(cloud, s.order, s.nodes);
     const kernels::Scaling& sc = cloud.scaling();
     const crs::Transform& toMercator = cloud.toMercator();
 
@@ -352,33 +469,36 @@ void RenderCompat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int
         info.inWindow += n;
     };
 
+    // 8-bit cloud: the compact colours are the raw ones unless a node had values above 255; the
+    // first such node stops the drawing of the compact nodes, and the tile is drawn again from
+    // the raw colours.
+    const bool rawIfOver255 = colored && !cloud.color16();
     bool raw = false;
-    if (colored && !cloud.color16()) {
-        // 8-bit cloud: the compact colours are the raw ones unless a node had values above 255.
-        for (const auto& n : s.nodes) raw = raw || n->over255;
-    }
-    if (!raw) {
-        s.compat.Reset(tileSize, mapping, pointRadius, pointRadius);
-        for (const auto& np : s.nodes) {
-            const CompactNode& node = np->points;
-            const kernels::NodeView view = ViewOf(node);
-            for (size_t at = 0; at < node.size(); at += kBatch) {
-                const size_t end = std::min<size_t>(node.size(), at + kBatch);
-                const size_t n =
-                    kernels::DecodeCull(view, at, end, sc, window, s.xs.data(), s.ys.data(), s.zs.data(), s.idx.data());
-                if (n == 0) continue;
-                if (colored)
-                    CompactColors(node, cloud.color16(), s.idx.data(), n, s.r.data(), s.g.data(), s.b.data());
-                else
-                    RampColors(s.zs.data(), n, cloud.compatRampMin(), cloud.compatRampMax(), s.rgba.data(), s.r.data(),
-                               s.g.data(), s.b.data());
-                draw(n);
-            }
+    s.compat.Reset(tileSize, mapping, pointRadius, pointRadius);
+    DrawNodes(cloud, s.order, s, info, [&](const cache::CachedNode& np) {
+        if (rawIfOver255 && np.over255) {
+            raw = true;
+            return false;
         }
-        // A 16-bit cloud whose tile has points but none above 255: the baseline shows the low
-        // bytes, which the compact nodes do not keep.
-        raw = colored && cloud.color16() && s.compat.added() > 0 && !s.compat.sixteenBit();
-    }
+        const CompactNode& node = np.points;
+        const kernels::NodeView view = ViewOf(node);
+        for (size_t at = 0; at < node.size(); at += kBatch) {
+            const size_t end = std::min<size_t>(node.size(), at + kBatch);
+            const size_t n =
+                kernels::DecodeCull(view, at, end, sc, window, s.xs.data(), s.ys.data(), s.zs.data(), s.idx.data());
+            if (n == 0) continue;
+            if (colored)
+                CompactColors(node, cloud.color16(), s.idx.data(), n, s.r.data(), s.g.data(), s.b.data());
+            else
+                RampColors(s.zs.data(), n, cloud.compatRampMin(), cloud.compatRampMax(), s.rgba.data(), s.r.data(),
+                           s.g.data(), s.b.data());
+            draw(n);
+        }
+        return true;
+    });
+    // A 16-bit cloud whose tile has points but none above 255: the baseline shows the low
+    // bytes, which the compact nodes do not keep.
+    if (!raw) raw = colored && cloud.color16() && s.compat.added() > 0 && !s.compat.sixteenBit();
     if (raw) {
         info.rawFallback = true;
         info.inWindow = 0;
@@ -399,6 +519,7 @@ void RenderCompat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int
                 if (n > 0) draw(n);
             }
         }
+        s.raw.ReleaseIfLarge();
     }
     rgba.resize(static_cast<size_t>(tileSize) * static_cast<size_t>(tileSize) * 4);
     info.opaque = s.compat.ToRgba(rgba.data());
@@ -458,6 +579,55 @@ std::optional<crs::PolyFit> FitWindow(const crs::Transform& toMercator, const ke
         }
     }
     return std::nullopt;
+}
+
+// How the points of a node become splats: the read window, cloud -> pixel (the fit, else the exact
+// transform to EPSG:3857 then the pixel map, else the pixel map alone), the colours and the key.
+struct SplatDraw {
+    kernels::Window window;
+    const kernels::Scaling* scaling = nullptr;
+    const crs::PolyFit* fit = nullptr;
+    const crs::Transform* toMercator = nullptr;  // nullptr: the points are drawn in their own x, y
+    bool geo = false;                            // geocentric: heights come out of the transform
+    PixelMap pm{};
+    bool colored = false;
+    double rampMin = 0, rampMax = 0;
+    double zOrigin = 0;
+    double anchorBias = 0;
+};
+
+void DrawSplatNode(const CompactNode& node, const SplatDraw& d, Scratch& s, RenderInfo& info) {
+    const kernels::NodeView view = ViewOf(node);
+    const uint32_t* colors = node.rgba();
+    const int P = s.splat.PaddedSize();
+    for (size_t at = 0; at < node.size(); at += kBatch) {
+        const size_t end = std::min<size_t>(node.size(), at + kBatch);
+        const size_t n =
+            kernels::DecodeCull(view, at, end, *d.scaling, d.window, s.xs.data(), s.ys.data(), s.zs.data(), s.idx.data());
+        if (n == 0) continue;
+        info.inWindow += n;
+        if (d.colored) {
+            for (size_t i = 0; i < n; ++i) s.rgba[i] = colors[s.idx[i]];
+        } else {
+            kernels::RampRgba(s.zs.data(), n, d.rampMin, d.rampMax, s.rgba.data());
+        }
+        if (d.fit) {
+            d.fit->Eval(s.xs.data(), s.ys.data(), s.us.data(), s.vs.data(), n);
+        } else {
+            std::memcpy(s.us.data(), s.xs.data(), n * sizeof(double));
+            std::memcpy(s.vs.data(), s.ys.data(), n * sizeof(double));
+            // Geocentric: the heights come out in the z array.
+            if (d.toMercator) d.toMercator->TransformPoints(s.us.data(), s.vs.data(), d.geo ? s.zs.data() : nullptr, n);
+            d.pm.ToPixels(s.us.data(), s.vs.data(), n);
+        }
+        for (size_t i = 0; i < n; ++i) {
+            const double u = s.us[i] + d.anchorBias, v = s.vs[i] + d.anchorBias;
+            // Also rejects NaN and the HUGE_VAL of failed transforms.
+            if (!(u >= 0.0 && u < P && v >= 0.0 && v < P)) continue;
+            const float z = static_cast<float>(s.zs[i] - d.zOrigin);
+            s.splat.Add(static_cast<int>(u), static_cast<int>(v), SplatKey(z, s.rgba[i]));
+        }
+    }
 }
 
 // hybrid and modern differ in the depth limit, the ramp range, the disc and where it is anchored
@@ -546,6 +716,7 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
     q.depthEnd = DepthEndForResolution(cloud.file().spacing() * scale, lodResolution);
     info.depthEnd = q.depthEnd;
     Selection sel = SelectOrThrow(cloud, q, NodeOrder::kFileOrder);
+    LimitSelection(cloud, sel, info);
     info.nodes = static_cast<uint32_t>(sel.nodes.size());
     info.points = sel.points;
     if (sel.nodes.empty()) return blank();
@@ -572,54 +743,27 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
         rampMax = cloud.compatRampMax();
     }
 
-    FetchNodes(cloud, sel.nodes, s.nodes);
     // The disc and its anchor. modern: the 13-pixel disc on the pixel holding the point
     // (floor). hybrid: the baseline's 11-pixel stamp on the pixel whose top-left corner is the
     // pixel corner nearest the point (round, as PointRasterizer), so that the stamp's 4 x 4 box
     // is centred on the point up to half a pixel.
     s.splat.Reset(tileSize, hybrid ? SplatRasterizer::Disc::kStamp11 : SplatRasterizer::Disc::kDisc13);
-    const double anchorBias = hybrid ? 0.5 : 0.0;
-    const int P = s.splat.PaddedSize();
-    const kernels::Scaling& sc = cloud.scaling();
-    const double zOrigin = geo ? cloud.heightMin() : cloud.zMin();
-    for (const auto& np : s.nodes) {
-        const CompactNode& node = np->points;
-        const kernels::NodeView view = ViewOf(node);
-        const uint32_t* colors = node.rgba();
-        for (size_t at = 0; at < node.size(); at += kBatch) {
-            const size_t end = std::min<size_t>(node.size(), at + kBatch);
-            const size_t n =
-                kernels::DecodeCull(view, at, end, sc, window, s.xs.data(), s.ys.data(), s.zs.data(), s.idx.data());
-            if (n == 0) continue;
-            info.inWindow += n;
-            if (colored) {
-                for (size_t i = 0; i < n; ++i) s.rgba[i] = colors[s.idx[i]];
-            } else {
-                kernels::RampRgba(s.zs.data(), n, rampMin, rampMax, s.rgba.data());
-            }
-            const double* heights = s.zs.data();
-            if (fit) {
-                fit->Eval(s.xs.data(), s.ys.data(), s.us.data(), s.vs.data(), n);
-            } else {
-                std::memcpy(s.us.data(), s.xs.data(), n * sizeof(double));
-                std::memcpy(s.vs.data(), s.ys.data(), n * sizeof(double));
-                if (geo) {
-                    // Heights come out in the z array.
-                    cloud.toMercator().TransformPoints(s.us.data(), s.vs.data(), s.zs.data(), n);
-                } else {
-                    cloud.toMercator().TransformPoints(s.us.data(), s.vs.data(), nullptr, n);
-                }
-                pm.ToPixels(s.us.data(), s.vs.data(), n);
-            }
-            for (size_t i = 0; i < n; ++i) {
-                const double u = s.us[i] + anchorBias, v = s.vs[i] + anchorBias;
-                // Also rejects NaN and the HUGE_VAL of failed transforms.
-                if (!(u >= 0.0 && u < P && v >= 0.0 && v < P)) continue;
-                const float z = static_cast<float>(heights[i] - zOrigin);
-                s.splat.Add(static_cast<int>(u), static_cast<int>(v), SplatKey(z, s.rgba[i]));
-            }
-        }
-    }
+    SplatDraw d;
+    d.window = window;
+    d.scaling = &cloud.scaling();
+    d.fit = fit ? &*fit : nullptr;
+    d.toMercator = &cloud.toMercator();
+    d.geo = geo;
+    d.pm = pm;
+    d.colored = colored;
+    d.rampMin = rampMin;
+    d.rampMax = rampMax;
+    d.zOrigin = geo ? cloud.heightMin() : cloud.zMin();
+    d.anchorBias = hybrid ? 0.5 : 0.0;
+    DrawNodes(cloud, sel.nodes, s, info, [&](const cache::CachedNode& node) {
+        DrawSplatNode(node.points, d, s, info);
+        return true;
+    });
     info.opaque = s.splat.Resolve(rgba.data());
     if (info.opaque == 0) info.blank = true;
 }
@@ -630,21 +774,24 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
 int ThumbnailDepth(const Cloud& cloud, uint64_t budget) {
     auto all = cloud.file().hierarchy().All(NodeOrder::kFileOrder);
     if (!all.ok()) cog::tiler::ThrowIfError(all.status(), "Cannot read the hierarchy of " + cloud.path());
-    std::vector<uint64_t> perDepth;
-    for (const HierarchyNode* n : all->nodes) {
-        const auto d = static_cast<size_t>(n->key.d);
-        if (perDepth.size() <= d) perDepth.resize(d + 1, 0);
-        perDepth[d] += static_cast<uint64_t>(n->pointCount);
-    }
-    int depth = 0;
-    uint64_t cumulative = 0;
-    for (size_t d = 0; d < perDepth.size(); ++d) {
-        cumulative += perDepth[d];
-        if (cumulative > budget) break;
-        depth = static_cast<int>(d);
-    }
-    return depth;
+    return DeepestDepthWithin(all->nodes, budget);
 }
+
+// The info of a render, given to the caller when the render returns or throws (a refused root).
+class InfoOnExit {
+public:
+    explicit InfoOnExit(RenderInfo* out) noexcept : out_(out) {}
+    ~InfoOnExit() {
+        if (out_) *out_ = info;
+    }
+    InfoOnExit(const InfoOnExit&) = delete;
+    InfoOnExit& operator=(const InfoOnExit&) = delete;
+
+    RenderInfo info;
+
+private:
+    RenderInfo* out_;
+};
 
 }  // namespace
 
@@ -664,7 +811,8 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
     const double offX = (r.size - width * scale) / 2, offY = (r.size - height * scale) / 2;
     const PixelMap pm{area.minX - offX / scale, area.maxY + offY / scale, scale};
 
-    RenderInfo info;
+    InfoOnExit result(infoOut);
+    RenderInfo& info = result.info;
     const uint64_t budget = r.pointBudget > 0 ? r.pointBudget
                                               : 2 * static_cast<uint64_t>(r.size) * static_cast<uint64_t>(r.size);
     SelectQuery q;
@@ -672,6 +820,7 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
     q.depthEnd = ThumbnailDepth(*cloud, budget) + 1;
     info.depthEnd = q.depthEnd;
     Selection sel = SelectOrThrow(*cloud, q, NodeOrder::kFileOrder);
+    RefuseARootAboveTheBudget(*cloud, sel, TileMaxPoints(), info);
     info.nodes = static_cast<uint32_t>(sel.nodes.size());
     info.points = sel.points;
     if (sel.points == 0) throw TileError(TileErrorCode::kException, "No points fetched from cloud, check zoom level");
@@ -691,48 +840,25 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
                                           : RenderInfo::Transform::kCubic;
 
     ScratchLease s;
-    FetchNodes(*cloud, sel.nodes, s->nodes);
     s->splat.Reset(r.size, SplatRasterizer::Disc::kDisc13);
-    const int P = s->splat.PaddedSize();
-    const kernels::Scaling& sc = cloud->scaling();
-    const bool colored = cloud->hasColor();
-    const double zOrigin = geo ? cloud->heightMin() : cloud->zMin();
-    for (const auto& np : s->nodes) {
-        const CompactNode& node = np->points;
-        const kernels::NodeView view = ViewOf(node);
-        const uint32_t* colors = node.rgba();
-        for (size_t at = 0; at < node.size(); at += kBatch) {
-            const size_t end = std::min<size_t>(node.size(), at + kBatch);
-            const size_t n = kernels::DecodeCull(view, at, end, sc, window, s->xs.data(), s->ys.data(), s->zs.data(),
-                                                 s->idx.data());
-            if (n == 0) continue;
-            info.inWindow += n;
-            if (colored) {
-                for (size_t i = 0; i < n; ++i) s->rgba[i] = colors[s->idx[i]];
-            } else {
-                kernels::RampRgba(s->zs.data(), n, cloud->zMin(), cloud->zMax(), s->rgba.data());
-            }
-            if (fit) {
-                fit->Eval(s->xs.data(), s->ys.data(), s->us.data(), s->vs.data(), n);
-            } else {
-                std::memcpy(s->us.data(), s->xs.data(), n * sizeof(double));
-                std::memcpy(s->vs.data(), s->ys.data(), n * sizeof(double));
-                if (mercator) cloud->toMercator().TransformPoints(s->us.data(), s->vs.data(), geo ? s->zs.data() : nullptr, n);
-                pm.ToPixels(s->us.data(), s->vs.data(), n);
-            }
-            for (size_t i = 0; i < n; ++i) {
-                const double u = s->us[i], v = s->vs[i];
-                if (!(u >= 0.0 && u < P && v >= 0.0 && v < P)) continue;
-                s->splat.Add(static_cast<int>(u), static_cast<int>(v),
-                             SplatKey(static_cast<float>(s->zs[i] - zOrigin), s->rgba[i]));
-            }
-        }
-    }
+    SplatDraw d;
+    d.window = window;
+    d.scaling = &cloud->scaling();
+    d.fit = fit ? &*fit : nullptr;
+    d.toMercator = mercator ? &cloud->toMercator() : nullptr;
+    d.geo = geo;
+    d.pm = pm;
+    d.colored = cloud->hasColor();
+    d.rampMin = cloud->zMin();
+    d.rampMax = cloud->zMax();
+    d.zOrigin = geo ? cloud->heightMin() : cloud->zMin();
+    DrawNodes(*cloud, sel.nodes, *s, info, [&](const cache::CachedNode& node) {
+        DrawSplatNode(node.points, d, *s, info);
+        return true;
+    });
     rgba.resize(static_cast<size_t>(r.size) * static_cast<size_t>(r.size) * 4);
     info.opaque = s->splat.Resolve(rgba.data());
-    s->nodes.clear();
     if (info.opaque == 0) info.blank = true;
-    if (infoOut) *infoOut = info;
 }
 
 std::optional<Mode> ParseMode(std::string_view name) {
@@ -758,6 +884,21 @@ int ResolutionOffset() {
     static const int offset = ReadEnvInt("DDBT_PCTILE_RESOLUTION_OFFSET", 2);
     return offset;
 }
+
+namespace {
+// A new value of a tile limit: the tiles cached under the old one are no longer served (their keys
+// hold the previous generation, which is counted after the value is stored) and are dropped.
+void SetTileLimit(std::atomic<uint64_t>& setting, uint64_t points) {
+    if (setting.exchange(points) == points) return;
+    TileLimitsGeneration().fetch_add(1);
+    EncodedTiles().Clear();
+}
+}  // namespace
+
+uint64_t TileMaxPoints() { return TileMaxPointsSetting().load(std::memory_order_relaxed); }
+void SetTileMaxPoints(uint64_t points) { SetTileLimit(TileMaxPointsSetting(), points); }
+uint64_t TileMaxNodePoints() { return TileMaxNodePointsSetting().load(std::memory_order_relaxed); }
+void SetTileMaxNodePoints(uint64_t points) { SetTileLimit(TileMaxNodePointsSetting(), points); }
 
 namespace {
 void RequireTileSize(int tileSize) {
@@ -805,15 +946,14 @@ void RenderRgba(const Cloud& cloud, const TileRequest& r, std::vector<uint8_t>& 
     const auto range = tile::compat::MinMaxCoordsForZ(m, f.minX, f.minY, f.maxX, f.maxY, r.z);
     if (!range.Contains(r.x, tmsRow)) throw TileError(TileErrorCode::kException, OutOfBounds(range));
 
-    RenderInfo info;
+    InfoOnExit result(infoOut);
+    RenderInfo& info = result.info;
     ScratchLease s;
     if (mode == Mode::kCompat)
         RenderCompat(cloud, m, r.z, r.x, tmsRow, r.tileSize, *s, rgba, info);
     else
         RenderSplat(cloud, m, r.z, r.x, tmsRow, r.tileSize, mode, *s, rgba, info);
     if (info.opaque == 0) info.blank = true;
-    s->nodes.clear();  // drop the node references (the cache owns them)
-    if (infoOut) *infoOut = info;
 }
 
 encode::ByteBuffer RenderTile(const TileRequest& r) {
@@ -827,7 +967,7 @@ encode::ByteBuffer RenderTile(const TileRequest& r) {
     TileCacheKey key;
     if (useCache) {
         key = {cloud->file().id(), r.z, r.x, tile::compat::InternalRow(r.y, r.z, r.tms), r.tileSize,
-               static_cast<uint8_t>(r.format), static_cast<uint8_t>(mode)};
+               static_cast<uint8_t>(r.format), static_cast<uint8_t>(mode), TileLimitsGeneration().load()};
         if (auto hit = tiles.Get(key)) {
             encode::ByteBuffer out;
             out.assign(hit->data(), hit->size());

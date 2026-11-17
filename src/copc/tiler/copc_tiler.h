@@ -40,6 +40,20 @@
 // process-wide node cache (copc/cache/node_cache.h), per-thread scratch buffers, blank tiles
 // as cached bytes (outside the footprint, no node selected, nothing drawn), and an encoded-tile
 // cache (DDBT_COPC_TILE_CACHE_MB, default 64; 0 disables).
+//
+// The work of one tile is bounded whatever the file (a degenerate octree whose nodes hold millions
+// of points, a COPC built elsewhere or read over HTTP), in every mode:
+//  - a tile or thumbnail whose selection holds a root of more than TileMaxPoints() points is
+//    refused (TileErrorCode::kRefused) before any node is read;
+//  - a node of more than TileMaxNodePoints() points is not read, except the root;
+//  - when the selected nodes hold more than TileMaxPoints() points, the tile reads the deepest
+//    levels of detail whose points, with those of every shallower level inside the tile window,
+//    fit (at least the root);
+//  - the nodes are fetched, drawn and released in batches of at most the point budget (the
+//    default one without a budget; a node alone may be larger), so a render (a thumbnail, a tile
+//    without a budget) holds the decoded points of one batch, not of its whole selection; a node
+//    above the node limit is never cached.
+// A tile within the limits reads and draws exactly what it read without them.
 #pragma once
 
 #include "core/tile/compat.h"
@@ -82,21 +96,29 @@ struct TileRequest {
 struct RenderInfo {
     enum class Transform : uint8_t { kNone, kExact, kAffine, kQuadratic, kCubic };
     bool blank = false;          // a blank shortcut (outside the footprint, no node) or nothing drawn
-    uint32_t nodes = 0;          // nodes selected
-    uint64_t points = 0;         // points of the selected nodes
+    uint32_t nodes = 0;          // nodes read (selected, within the limits)
+    uint64_t points = 0;         // points of the nodes read
     uint64_t inWindow = 0;       // points in the read window
     uint64_t opaque = 0;         // opaque pixels
     int depthEnd = 0;
     Transform transform = Transform::kNone;
     double fitResidual = 0;      // max residual of the fit (pixels)
     bool rawFallback = false;    // compat: re-read the raw colours for the 16-bit decision
+    uint64_t pointsBudget = 0;   // the point budget of the render (0: none)
+    int depthLimitedTo = -1;     // the deepest depth read when the budget cut the selection, else -1
+    uint32_t nodesSkipped = 0;   // selected nodes not read: above the node limit
+    uint64_t peakBatchPoints = 0;  // the most decoded points held at once (one batch of nodes)
+    uint64_t rootPoints = 0;     // points of the root node, when the render selected it
+    bool rootRefused = false;    // the root holds more points than the budget: refused, nothing read
 };
 
-/// Renders and encodes a tile. Throws cog::tiler::TileError.
+/// Renders and encodes a tile. Throws cog::tiler::TileError. An encoded tile is cached with the
+/// tile limits it was drawn under: a change of a limit drops it.
 encode::ByteBuffer RenderTile(const TileRequest& request);
 
 /// Renders a tile of `cloud` into RGBA (tileSize^2 * 4 bytes, resized), without encoding or the
-/// tile cache. Throws cog::tiler::TileError (out of bounds, transform failures).
+/// tile cache. Throws cog::tiler::TileError (out of bounds, transform failures, kRefused for a
+/// root above TileMaxPoints()); `info` is filled also when the render throws once it has started.
 void RenderRgba(const Cloud& cloud, const TileRequest& request, std::vector<uint8_t>& rgba,
                 RenderInfo* info = nullptr);
 
@@ -114,7 +136,9 @@ struct ThumbnailRequest {
 /// coloured points in their colours, others in the ramp over the header z range): in EPSG:3857
 /// (north up) when the cloud has a footprint, else in its own x, y (a cloud without a CRS, or
 /// without a transformation to EPSG:3857). Throws cog::tiler::TileError: kInvalidArgs for a
-/// bad size, kException for a cloud of zero extent or without points, like RenderTile else.
+/// bad size, kException for a cloud of zero extent or without points, kRefused for a root of more
+/// points than TileMaxPoints() (whatever pointBudget), like RenderTile else; `info` is filled also
+/// when the render throws once it has started.
 void RenderThumbnail(const ThumbnailRequest& request, std::vector<uint8_t>& rgba, RenderInfo* info = nullptr);
 
 /// The footprint and zoom range of `path` for `tileSize` px tiles in the process-wide mode, as
@@ -131,6 +155,19 @@ void SetMode(Mode mode);
 /// Zoom levels between a tile and the octree level it reads (DroneDB's
 /// DDB_PCTILE_RESOLUTION_OFFSET): DDBT_PCTILE_RESOLUTION_OFFSET, default 2.
 int ResolutionOffset();
+
+/// The most points one tile may read: DDBT_COPC_TILE_MAX_POINTS, default 4,000,000; 0 = no limit.
+/// Thumbnails have their own budget (ThumbnailRequest::pointBudget), but a root above this one
+/// refuses them too. Setting a limit to a new value drops the cached tiles.
+uint64_t TileMaxPoints();
+void SetTileMaxPoints(uint64_t points);
+/// The most points of a node a tile reads (the root is always read):
+/// DDBT_COPC_TILE_MAX_NODE_POINTS, default 1,000,000; 0 = no limit. Nodes above it are never
+/// kept in the node cache.
+uint64_t TileMaxNodePoints();
+void SetTileMaxNodePoints(uint64_t points);
+/// The largest value the two settings above accept (from the environment or a host).
+inline constexpr uint64_t kTilePointsSettingMax = uint64_t{1} << 40;
 
 ::ddbt::cache::CacheStats TileCacheStats();
 void SetTileCacheBudget(size_t bytes);

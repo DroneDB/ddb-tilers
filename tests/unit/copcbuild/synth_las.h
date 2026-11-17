@@ -39,19 +39,53 @@ struct SynthLas {
     size_t RecordSize() const { return las::BaseRecordSize(format) + extraBytes; }
 };
 
+/// One descriptor of a LAS extra-bytes VLR (192 bytes). No-data, min and max hold integer values
+/// (one per element, the anytype of an integer data type); an undocumented type (0) stores its
+/// size in `options`.
+struct SynthExtraBytes {
+    uint8_t dataType = 0;
+    uint8_t options = 0;
+    std::string name;
+    std::string description;
+    std::array<int64_t, 3> noData{}, min{}, max{};
+    std::array<double, 3> scale{}, offset{};
+};
+
+inline void AppendExtraBytesDescriptor(std::vector<uint8_t>& vlr, const SynthExtraBytes& e) {
+    std::vector<uint8_t> d(192, 0);
+    d[2] = e.dataType;
+    d[3] = e.options;
+    std::memcpy(d.data() + 4, e.name.data(), std::min<size_t>(e.name.size(), 32));
+    for (size_t i = 0; i < 3; ++i) {
+        StoreLE<int64_t>(d.data() + 40 + 8 * i, e.noData[i]);
+        StoreLE<int64_t>(d.data() + 64 + 8 * i, e.min[i]);
+        StoreLE<int64_t>(d.data() + 88 + 8 * i, e.max[i]);
+        StoreLE<double>(d.data() + 112 + 8 * i, e.scale[i]);
+        StoreLE<double>(d.data() + 136 + 8 * i, e.offset[i]);
+    }
+    std::memcpy(d.data() + 160, e.description.data(), std::min<size_t>(e.description.size(), 32));
+    vlr.insert(vlr.end(), d.begin(), d.end());
+}
+
 /// Random records of `s.format` (every field varies; 16-bit colour when color16), points in a
-/// box of `extent` units of the scale around the offset, clustered so the octree has depth.
-inline void FillRandom(SynthLas& s, uint64_t count, uint32_t seed, int32_t extent = 200000, bool color16 = true) {
+/// box of extent[a] units of the scale around the offset on axis a, clustered so the octree has
+/// depth. Axes of different extents make a cloud whose units differ per axis (degrees of
+/// longitude and latitude, heights in metres).
+inline void FillRandom(SynthLas& s, uint64_t count, uint32_t seed, const std::array<int32_t, 3>& extent,
+                       bool color16 = true) {
     std::mt19937_64 rng(seed);
     const las::PointLayout L = las::LayoutOf(s.format);
     const size_t rs = s.RecordSize();
     s.count = count;
     s.records.assign(count * rs, 0);
-    std::uniform_int_distribution<int32_t> coord(-extent, extent);
-    std::normal_distribution<double> blob(0.0, extent / 20.0);
+    std::array<std::uniform_int_distribution<int32_t>, 3> coord;
+    for (size_t a = 0; a < 3; ++a) coord[a] = std::uniform_int_distribution<int32_t>(-extent[a], extent[a]);
+    // One standard normal for every axis, scaled per axis: the same draws as one distribution of
+    // the axis's deviation (it keeps the second value of each pair it draws).
+    std::normal_distribution<double> blob(0.0, 1.0);
     std::array<std::array<int32_t, 3>, 8> centres;
     for (auto& c : centres)
-        for (auto& v : c) v = coord(rng) / 2;
+        for (size_t a = 0; a < 3; ++a) c[a] = coord[a](rng) / 2;
     double gps = 1000.0;
     uint64_t waveOffset = 1u << 20;
     uint32_t waveSize = 120;
@@ -59,11 +93,12 @@ inline void FillRandom(SynthLas& s, uint64_t count, uint32_t seed, int32_t exten
         uint8_t* r = s.records.data() + i * rs;
         int32_t xyz[3];
         if (i % 3 == 0) {
-            for (int a = 0; a < 3; ++a) xyz[a] = coord(rng);
+            for (size_t a = 0; a < 3; ++a) xyz[a] = coord[a](rng);
         } else {
             const auto& c = centres[rng() % 8];
-            for (int a = 0; a < 3; ++a)
-                xyz[a] = std::clamp<int32_t>(c[static_cast<size_t>(a)] + static_cast<int32_t>(blob(rng)), -extent, extent);
+            for (size_t a = 0; a < 3; ++a)
+                xyz[a] = std::clamp<int32_t>(c[a] + static_cast<int32_t>(blob(rng) * (extent[a] / 20.0) + 0.0), -extent[a],
+                                             extent[a]);
         }
         if (i % 97 == 5 && i > 0) std::memcpy(xyz, s.records.data() + (i - 1) * rs, 12);  // duplicates
         for (int a = 0; a < 3; ++a) StoreLE<int32_t>(r + 4 * a, xyz[a]);
@@ -112,6 +147,11 @@ inline void FillRandom(SynthLas& s, uint64_t count, uint32_t seed, int32_t exten
         }
         for (size_t k = L.baseSize; k < rs; ++k) r[k] = static_cast<uint8_t>(rng() % 251);
     }
+}
+
+/// FillRandom with the same extent on every axis.
+inline void FillRandom(SynthLas& s, uint64_t count, uint32_t seed, int32_t extent = 200000, bool color16 = true) {
+    FillRandom(s, count, seed, std::array<int32_t, 3>{extent, extent, extent}, color16);
 }
 
 namespace detail {

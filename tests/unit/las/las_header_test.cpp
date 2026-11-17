@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -13,6 +14,7 @@
 #include <vector>
 
 #include "../copc/copc_test_util.h"
+#include "copc/las/dimension_names.h"
 #include "copc/las/las_crs.h"
 #include "copc/las/las_header.h"
 #include "copc/las/point_format.h"
@@ -193,6 +195,73 @@ TEST(LasExtraBytes, DescriptorsTypesSizesAndOffsets) {
     p.push_back(0);
     EXPECT_EQ(ParseExtraBytes(p, 100).code(), StatusCode::kCorrupt) << "not a multiple of 192";
     EXPECT_EQ(ParseExtraBytes(Descriptor(31, 0, "x"), 100).code(), StatusCode::kCorrupt);
+}
+
+// The scalar form of a payload: a payload without an array is kept byte for byte; an array of a
+// 32-character name is cut so that the name and its index fit 31 characters (a NUL ends the name
+// in the record); the descriptors after the array keep their record offsets.
+TEST(LasExtraBytes, ScalarFormKeepsScalarsAndFitsElementNamesInTheRecord) {
+    std::vector<uint8_t> scalars;
+    for (auto& d : {Descriptor(6, 1, "i32"), Descriptor(0, 3, "raw3"), Descriptor(10, 0, "f64")})
+        scalars.insert(scalars.end(), d.begin(), d.end());
+    EXPECT_FALSE(HasNonScalarExtraBytes(scalars));
+    EXPECT_EQ(ScalarExtraBytes(scalars), scalars);
+
+    const std::string longName = "abcdefghijklmnopqrstuvwxyz012345";  // 32 characters, no NUL
+    std::vector<uint8_t> p = Descriptor(14, 8, longName.c_str(), 2);  // 2 x short
+    Put<double>(p, 120, 4);  // scale of element 1
+    const auto tail = Descriptor(0, 3, "raw3");
+    p.insert(p.end(), tail.begin(), tail.end());
+    EXPECT_TRUE(HasNonScalarExtraBytes(p));
+    const std::vector<uint8_t> scalar = ScalarExtraBytes(p);
+    EXPECT_FALSE(HasNonScalarExtraBytes(scalar));
+    auto eb = ParseExtraBytes(scalar, 2 + 2 + 3);
+    ASSERT_TRUE(eb.ok()) << eb.status().ToString();
+    ASSERT_EQ(eb->size(), 3u);
+    EXPECT_EQ((*eb)[0].name, longName.substr(0, 30) + "0");
+    EXPECT_EQ((*eb)[1].name, longName.substr(0, 30) + "1");
+    EXPECT_EQ(scalar[4 + 31], 0) << "a NUL ends the name";
+    EXPECT_EQ((*eb)[0].dataType, 4);
+    EXPECT_EQ((*eb)[1].byteOffset, 1 * 2);
+    EXPECT_DOUBLE_EQ((*eb)[0].AnyAsDouble((*eb)[0].noData), -9999);
+    EXPECT_DOUBLE_EQ((*eb)[1].AnyAsDouble((*eb)[1].noData), 0);
+    EXPECT_DOUBLE_EQ((*eb)[0].scale[0], 2);
+    EXPECT_DOUBLE_EQ((*eb)[1].scale[0], 4);
+    EXPECT_DOUBLE_EQ((*eb)[1].scale[1], 0) << "the slots past the first are zero";
+    EXPECT_EQ((*eb)[2].name, "raw3");
+    EXPECT_EQ((*eb)[2].byteOffset, 4);
+    EXPECT_TRUE(std::equal(tail.begin(), tail.end(), scalar.end() - 192)) << "kept as stored";
+}
+
+// The element names of the scalar form are unique within the payload and fit 31 characters: an
+// element named like a descriptor kept as stored (before or after the array), or like an element
+// of another array whose name shares its first characters, takes a suffix that still fits. The
+// dimension names read from the payload are the names written.
+TEST(LasExtraBytes, ScalarFormNamesEveryElementOnceWithRoomForANul) {
+    const std::string name31 = "abcdefghijklmnopqrstuvwxyz01234";  // 31 characters
+    std::vector<uint8_t> p;
+    for (auto& d : {Descriptor(1, 0, "normals1"), Descriptor(21, 0, "normals"), Descriptor(12, 0, (name31 + "A").c_str()),
+                    Descriptor(12, 0, (name31 + "B").c_str()), Descriptor(11, 0, name31.c_str()),
+                    Descriptor(1, 0, "normals0")})
+        p.insert(p.end(), d.begin(), d.end());
+    const std::vector<uint8_t> scalar = ScalarExtraBytes(p);
+    auto eb = ParseExtraBytes(scalar, 1 + 3 + 2 + 2 + 2 + 1);
+    ASSERT_TRUE(eb.ok()) << eb.status().ToString();
+    ASSERT_EQ(eb->size(), 1u + 3 + 2 + 2 + 2 + 1);
+    std::vector<std::string> names;
+    for (const ExtraBytesDescriptor& d : *eb) names.push_back(d.name);
+    EXPECT_EQ(names[0], "normals1") << "kept as stored";
+    EXPECT_EQ(names[3], "normals2") << "PDAL's name when it is free";
+    EXPECT_EQ(names[4], name31.substr(0, 30) + "0");
+    EXPECT_EQ(names[5], name31.substr(0, 30) + "1");
+    EXPECT_EQ(names.back(), "normals0") << "kept as stored";
+    for (size_t i = 0; i < names.size(); ++i) {
+        SCOPED_TRACE(names[i]);
+        EXPECT_LE(names[i].size(), 31u);
+        EXPECT_EQ(scalar[i * kExtraBytesDescriptorSize + 4 + 31], 0) << "a NUL ends the name";
+        for (size_t j = 0; j < i; ++j) EXPECT_NE(names[i], names[j]);
+    }
+    EXPECT_EQ(PdalExtraDimensionNames(4, *eb), names);
 }
 
 // A LAS 1.4 file in memory with VLRs (WKT, GeoKeys, extra bytes, LAZ) and EVLRs.

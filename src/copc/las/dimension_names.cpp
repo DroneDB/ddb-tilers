@@ -50,7 +50,7 @@ std::vector<std::string> PdalExtraDimensionNames(int minor, const std::vector<Ex
         if (e.elements <= 1) {
             names.push_back(fix(e.name));
         } else {
-            for (uint8_t i = 0; i < e.elements; ++i) names.push_back(fix(e.name + std::to_string(i)));
+            for (size_t i = 0; i < e.elements; ++i) names.push_back(fix(ExtraBytesElementName(e.name, i)));
         }
     }
     return names;

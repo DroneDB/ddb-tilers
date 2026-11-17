@@ -89,6 +89,14 @@ public:
     bool NorthingFirst() const;
     bool IsGeocentric() const { return Type() == CrsType::Geocentric; }
     bool IsCompound() const { return Type() == CrsType::Compound; }
+    /// The axes of a coordinate: 2 for a horizontal CRS; 3 for a geocentric, a 3-D geographic or
+    /// projected CRS and a horizontal + vertical compound CRS (a bound CRS: its source's).
+    int AxisCount() const;
+    /// The horizontal part of a compound CRS; the CRS itself otherwise, and for a compound CRS
+    /// whose parts PROJ cannot split.
+    Crs HorizontalPart() const;
+    /// The vertical part of a compound CRS; an empty CRS otherwise.
+    Crs VerticalPart() const;
     /// Metres per unit of the first horizontal axis (1 for metres, 0.30480060960121924 for US
     /// survey feet); for geographic CRSs, radians per unit (0.0174532925199433 for degrees).
     double HorizontalUnitFactor() const;
@@ -123,5 +131,9 @@ private:
     static Crs FromText(std::string_view text, bool wkt);
     std::shared_ptr<const Data> d_;
 };
+
+/// Why x, y bounds cannot be coordinates of `c`, "" when they can: a CRS whose horizontal part is
+/// geographic takes x (longitude) in [-180, 180] and y (latitude) in [-90, 90], LAS order.
+std::string BoundsMisfit(const Crs& c, double minX, double minY, double maxX, double maxY);
 
 }  // namespace ddbt::crs

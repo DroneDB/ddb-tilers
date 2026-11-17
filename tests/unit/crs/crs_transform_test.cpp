@@ -88,6 +88,32 @@ TEST(Crs, NorthingFirstFollowsTheAxisOrder) {
     EXPECT_FALSE(Crs::FromUserInput("+proj=longlat +datum=WGS84 +type=crs").NorthingFirst());
 }
 
+// A transform is 3-D when either CRS has a third axis: geocentric, 3-D geographic, compound.
+TEST(Crs, AxisCountCountsTheAxesOfACoordinate) {
+    EXPECT_EQ(Crs::FromEpsg(4326).AxisCount(), 2);
+    EXPECT_EQ(Crs::FromEpsg(32633).AxisCount(), 2);
+    EXPECT_EQ(Crs::FromEpsg(4979).AxisCount(), 3);
+    EXPECT_EQ(Crs::FromEpsg(4978).AxisCount(), 3);
+    EXPECT_EQ(Crs::FromUserInput("EPSG:6318+5703").AxisCount(), 3);
+    EXPECT_EQ(Crs::FromUserInput("EPSG:32633+5773").AxisCount(), 3);
+    EXPECT_EQ(Crs::FromEpsg(5773).AxisCount(), 1);
+    // A WKT1 with TOWGS84 is a bound CRS: its source's axes.
+    const Crs bound = Crs::FromWkt(
+        "GEOGCS[\"x\",DATUM[\"d\",SPHEROID[\"Bessel 1841\",6377397.155,299.1528128],TOWGS84[577.326,90.129,463.919,"
+        "5.137,1.474,5.297,2.4232]],PRIMEM[\"Greenwich\",0],UNIT[\"degree\",0.0174532925199433]]");
+    EXPECT_EQ(bound.Type(), CrsType::Geographic2D);
+    EXPECT_EQ(bound.AxisCount(), 2);
+}
+
+TEST(Crs, PartsOfACompoundCrs) {
+    const Crs c = Crs::FromUserInput("EPSG:6318+5703");
+    EXPECT_TRUE(c.HorizontalPart().Equivalent(Crs::FromEpsg(6318)));
+    EXPECT_TRUE(c.VerticalPart().Equivalent(Crs::FromEpsg(5703)));
+    const Crs utm = Crs::FromEpsg(32633);
+    EXPECT_TRUE(utm.HorizontalPart().Equivalent(utm));
+    EXPECT_FALSE(utm.VerticalPart().Valid());
+}
+
 // The WKT GDAL reports of a dataset: WKT1 GDAL with the axes, also of a geographic CRS (which
 // PROJ's WKT1 GDAL leaves without them); WKT2 for a 3D geographic CRS
 TEST(Crs, GdalDefaultWktIsGdalsExport) {

@@ -15,6 +15,9 @@
 // - Concurrent misses on one node decode it once (the others wait, helping the pool). The misses
 //   of one Fetch are decoded in parallel on the default pool at interactive priority; the
 //   calling thread takes part.
+// - Fetch keeps no node of more than `cacheMaxPoints` points: such a node (an oversized node of a
+//   degenerate octree) is decoded for the caller alone and freed when its last reference goes,
+//   instead of taking the cache's budget or evicting the nodes that serve many tiles.
 // - Each entry also records whether a raw colour component of the node was above 255 (the
 //   compat tiler needs it to reproduce DroneDB's per-tile 16-bit decision exactly).
 #pragma once
@@ -56,8 +59,11 @@ public:
     NodePtr Get(const CopcFile& file, const HierarchyNode& node);
 
     /// The nodes of `nodes`, in the same order, into `out`. Misses are decoded in parallel on
-    /// exec::DefaultPool() (interactive priority, the calling thread helps). Throws like Get.
-    void Fetch(const CopcFile& file, std::span<const HierarchyNode* const> nodes, std::vector<NodePtr>& out);
+    /// exec::DefaultPool() (interactive priority, the calling thread helps). Nodes of more than
+    /// `cacheMaxPoints` points are decoded without being cached (0: every node is cached).
+    /// Throws like Get.
+    void Fetch(const CopcFile& file, std::span<const HierarchyNode* const> nodes, std::vector<NodePtr>& out,
+               uint64_t cacheMaxPoints = 0);
 
     /// Decodes a node (XYZ + RGB layers) into its cached form, without caching it.
     static Expected<CachedNode> Decode(const CopcFile& file, const HierarchyNode& node);
@@ -71,6 +77,10 @@ public:
     static size_t BudgetFromEnvironment();
 
 private:
+    /// Get, or for a node of more than cacheMaxPoints points (cacheMaxPoints > 0), a decode
+    /// that is not cached.
+    NodePtr Load(const CopcFile& file, const HierarchyNode& node, uint64_t cacheMaxPoints);
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

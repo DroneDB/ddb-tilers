@@ -106,8 +106,13 @@ Status DecodeLazChunk(const las::LasHeader& h, std::span<const uint8_t> chunk, u
 std::string WktOf(const las::LasMetadata& meta) {
     auto crs = las::ResolveCrs(meta);
     if (crs.ok() && crs->Valid()) {
-        std::string w = crs->ToWkt(crs::WktFlavor::Wkt1Gdal);
-        if (!w.empty()) return w;
+        try {
+            std::string w = crs->ToWkt(crs::WktFlavor::Wkt1Gdal);
+            if (!w.empty()) return w;
+        } catch (const crs::CrsError&) {
+            // WKT1 cannot express it (a 3-D projected CRS)
+            return crs->ToWkt(crs::WktFlavor::Wkt2_2019);
+        }
     }
     if (meta.wkt) return *meta.wkt;
     return {};
@@ -274,10 +279,8 @@ Expected<std::unique_ptr<LasReader>> LasReader::Open(std::shared_ptr<const io::B
         if (!std::isfinite(h.min[a]) || !std::isfinite(h.max[a]) || h.min[a] > h.max[a]) ok = false;
     }
     info.boundsKnown = ok && h.pointCount > 0;
-    if (const las::VlrRecord* eb = r->meta_.FindVlr("LASF_Spec", 4); eb != nullptr && eb->payloadKept && !r->meta_.extraBytes.empty()) {
+    if (const las::VlrRecord* eb = r->meta_.FindVlr("LASF_Spec", 4); eb != nullptr && eb->payloadKept && !r->meta_.extraBytes.empty())
         info.extraBytesVlr = eb->payload;
-        info.extraBytes = r->meta_.extraBytes;
-    }
     info.wkt = WktOf(r->meta_);
     info.statedWkt = StatedWktOf(r->meta_);
     const std::vector<std::string> extraNames = las::PdalExtraDimensionNames(h.versionMinor, r->meta_.extraBytes);
