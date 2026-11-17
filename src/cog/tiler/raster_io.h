@@ -14,9 +14,10 @@
 //    row (int)clamp((j + 0.5) * h / bufH + y + 1e-10), source column from x + 0.5 * inc + 1e-10
 //    stepped by inc (an accumulated double sum; an integer factor steps in integers and clamps
 //    only the last column), clamped to the level.
-//  - Default (DDBT_TILER_MODE unset or "compat" keeps compat; see CogTiler): the level comes
+//  - Default (DDBT_TILER_MODE unset; "compat" keeps compat, see cog_tiler.h): the level comes
 //    from the zoom, and each tile pixel takes the level pixel under its centre (no window
-//    rounding: no seams between tiles).
+//    rounding: no shift off the tile grid or below the smallest overview, no seams between
+//    tiles).
 //
 // The plan is then gathered from the decoded blocks (block_cache.h): bands as their native
 // samples, the "alpha" GDALTiler::readAlpha reads (the alpha band clamped to bytes, else the mask
@@ -88,6 +89,8 @@ struct SamplePlan {
     std::vector<int32_t> sx, sy;
     /// Every buffer pixel has a sample.
     bool AllInside() const noexcept;
+    /// A buffer pixel has a sample (of the view: on the warped grid, maybe off the source).
+    bool AnySample() const noexcept;
 };
 
 /// GDALBandGetBestOverviewLevel(2): index into `levels` (0 = full resolution) of the level GDAL
@@ -128,6 +131,9 @@ MaskSummary PlanMaskSummary(const RasterView& view, const SamplePlan& plan);
 /// GDAL's nodata mask test of a native sample (GDALNoDataMaskBand: integer types compare with
 /// the nodata cast to the type, floats with ARE_REAL_EQUAL and NaN): true = nodata.
 bool IsNodataSample(PixelType type, const uint8_t* sample, double nodata) noexcept;
+
+/// Clears the alpha of the samples that are NaN (Float16 / 32 / 64 samples; others have none).
+void TransparentWhereNaN(PixelType type, const uint8_t* samples, size_t n, uint8_t* alpha) noexcept;
 
 /// GDALCopyWords of one native sample to double / float / byte.
 double SampleToDouble(PixelType type, const uint8_t* sample) noexcept;

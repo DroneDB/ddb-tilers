@@ -94,6 +94,18 @@ ddbt::encode::ByteBuffer Render(const std::string& path, int z, int x, int y, dd
 
 std::vector<uint8_t> Bytes(const ddbt::encode::ByteBuffer& b) { return {b.data(), b.data() + b.size()}; }
 
+// The process's sampling mode set for the scope (the tests that check DroneDB 2.4.1's pixels).
+class ScopedSamplingMode {
+public:
+    explicit ScopedSamplingMode(SamplingMode mode) : old_(GetSamplingMode()) { SetSamplingMode(mode); }
+    ~ScopedSamplingMode() { SetSamplingMode(old_); }
+    ScopedSamplingMode(const ScopedSamplingMode&) = delete;
+    ScopedSamplingMode& operator=(const ScopedSamplingMode&) = delete;
+
+private:
+    SamplingMode old_;
+};
+
 // XYZ tile of a 3857 point.
 std::pair<int, int> TileOf(double mx, double my, int z) {
     const double o = 20037508.342789244;
@@ -622,7 +634,9 @@ std::pair<int, int> SamplingTile() { return TileOf(-10240777.0 + 125, 5916486.0 
 }  // namespace
 
 TEST(CogTilerTiles, GreyStretchOfAUInt16Band) {
-    // 2 bands: one data band (dataBandCount), UInt16: stretched over its exact min..max (0..999).
+    // 2 bands: one data band (dataBandCount), UInt16: stretched over its exact min..max (0..999),
+    // read through the geoQuery window as DroneDB 2.4.1 reads it (compat).
+    const ScopedSamplingMode compat(SamplingMode::kCompat);
     ClearTileCache();
     const auto [x, y] = SamplingTile();
     const auto png = Render(SamplingTif(), kZ, x, y);
@@ -712,6 +726,7 @@ TEST(CogTilerTiles, CachesAndVersionedSources) {
 }
 
 TEST(CogTilerTiles, MaskShortcutGivesBlankBytesWithoutImagery) {
+    const ScopedSamplingMode compat(SamplingMode::kCompat);  // the tiles of the geoQuery windows below
     // R6, the 3.3 Gpx JPEG COG with a mask (only its mask blocks are read here).
     const char* kR6 =
         "/mnt/data/datasets/orthos/err-mask/.ddb/build/"
@@ -754,8 +769,9 @@ TEST(CogTilerTiles, MaskShortcutGivesBlankBytesWithoutImagery) {
 
 TEST(CogTilerTiles, OutOfBoundsPlainIsBlankAndVisFails) {
     const auto [x, y] = SamplingTile();
+    // The blank RGB tile: the 2 bands of sampling.tif are drawn as red and green.
     const auto png = Bytes(Render(SamplingTif(), kZ, x + 50, y));
-    EXPECT_EQ(png, ddbt::encode::BlankTileBytes(256, 256, 1, {}));
+    EXPECT_EQ(png, ddbt::encode::BlankTileBytes(256, 256, 3, {}));
     VisParams vis;
     vis.formula = "VARI";
     TileRequest r;
@@ -774,7 +790,7 @@ TEST(CogTilerTiles, OutOfBoundsPlainIsBlankAndVisFails) {
     }
     vis = VisParams{};
     vis.colormap = "viridis";  // no parameter: the plain (blank) tile
-    EXPECT_EQ(Bytes(RenderTile(r)), ddbt::encode::BlankTileBytes(256, 256, 1, {}));
+    EXPECT_EQ(Bytes(RenderTile(r)), ddbt::encode::BlankTileBytes(256, 256, 3, {}));
 }
 
 TEST(CogTilerTiles, StyledBandAndFormulaRefusal) {

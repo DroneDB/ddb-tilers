@@ -242,17 +242,17 @@ TEST(CogTilerLimits, FormulaStillMasksNodataOfBandsItDoesNotUse) {
     const auto png = RenderTile(r);
     const auto d = ddbt::encode::testing::DecodePng(png.data(), png.size());
     ASSERT_TRUE(d.ok);
-    // Tile pixels over raster columns 0..63 and 64..255 of the first raster row in the tile.
-    ddbt::tile::compat::RasterTiling t(256, std::array<double, 6>{kOriginX, kPixel, 0, kOriginY, 0, -kPixel}.data(), 256,
-                                       256);
+    // Tile pixels over raster columns 0..63 and 64..255: the raster pixel under each one's centre.
     const auto [x, y] = SynthTile();
-    ddbt::tile::compat::GQResult g;
-    ASSERT_TRUE(ddbt::tile::compat::TileWindow(t, kSynthZ, x, ddbt::tile::compat::InternalRow(y, kSynthZ, true), g));
+    const ddbt::tile::compat::GlobalMercator m(256);
+    const auto b = m.tileBounds(x, ddbt::tile::compat::InternalRow(y, kSynthZ, true), kSynthZ);
+    const double res = (b.max.x - b.min.x) / 256;
     int masked = 0, shown = 0;
-    for (int j = g.w.y; j < g.w.y + g.w.ysize; ++j)
-        for (int i = g.w.x; i < g.w.x + g.w.xsize; ++i) {
-            // The raster column of tile pixel i (nearest, no overview: 256 px tile over ~153 px).
-            const double col = g.r.x + (i - g.w.x + 0.5) * g.r.xsize / g.w.xsize;
+    for (int j = 0; j < 256; ++j)
+        for (int i = 0; i < 256; ++i) {
+            const double col = (b.min.x + (i + 0.5) * res - kOriginX) / kPixel;
+            const double row = (kOriginY - (b.max.y - (j + 0.5) * res)) / kPixel;
+            if (row < 0 || row >= 256 || col < 0 || col >= 256) continue;
             const uint8_t a = d.rgba[(static_cast<size_t>(j) * 256 + static_cast<size_t>(i)) * 4 + 3];
             if (col < 63.5) {
                 EXPECT_EQ(a, 0) << i << "," << j;

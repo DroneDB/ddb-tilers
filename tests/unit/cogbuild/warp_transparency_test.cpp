@@ -197,6 +197,7 @@ TEST(WarpTransparency, AOnePixelRgbIsReadWhole) {
 TEST(WarpTransparency, APaletteIsWarpedByNearestNeighbour) {
     TempDir dir;
     syn::SynthSpec spec = syn::Spec(64, 1, 1);
+    spec.photometric = 3;  // palette
     spec.colorMap.assign(3 * 256, 0);
     for (size_t i = 0; i < 256; ++i) spec.colorMap[i] = static_cast<uint16_t>(i * 257);  // a grey ramp
     // A checkerboard of 3 x 3 pixel squares of indices 10 and 200
