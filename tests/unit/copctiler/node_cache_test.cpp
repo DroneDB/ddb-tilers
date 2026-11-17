@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 // NodeCache: decoded nodes equal a direct decode, hits after the first fetch, single flight
-// under concurrent fetches, the byte budget, a zero budget, the per-node "above 255" flag, and
-// decode errors reported without caching.
+// under concurrent fetches, the byte budget, a zero budget, the per-node "above 255" flag,
+// decode errors reported without caching, and nodes above the cache limit decoded but not kept.
+// The decode buffers of a thread are released after a large node.
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -12,6 +13,7 @@
 
 #include "copc/cache/node_cache.h"
 #include "copc/copc/copc_file.h"
+#include "copc/copc/node_decoder.h"
 #include "synth_cloud.h"
 
 namespace {
@@ -133,6 +135,52 @@ TEST_F(CopcNodeCacheTest, DecodeErrorsAreThrownAndNotCached) {
     NodeCache cache(64 << 20);
     EXPECT_THROW(cache.Get(*file, broken), std::runtime_error);
     EXPECT_EQ(cache.Stats().entries, 0u);
+}
+
+TEST_F(CopcNodeCacheTest, NodesAboveTheCacheLimitAreDecodedButNotKept) {
+    auto file = CopcFile::Open(*rgb8_).value();
+    const auto all = file->hierarchy().All().value();
+    // The synthetic cloud: the root and the depth-1 nodes hold about 3 000 points, the depth-2
+    // nodes fewer than 2 000.
+    constexpr uint64_t kLimit = 2000;
+    size_t small = 0, large = 0;
+    for (const HierarchyNode* n : all.nodes) (static_cast<uint64_t>(n->pointCount) > kLimit ? large : small)++;
+    ASSERT_GT(small, 0u);
+    ASSERT_GT(large, 0u);
+
+    NodeCache cache(64 << 20);
+    std::vector<NodeCache::NodePtr> nodes;
+    cache.Fetch(*file, all.nodes, nodes, kLimit);
+    NodeDecoder dec(file);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        ASSERT_NE(nodes[i], nullptr) << i;
+        EXPECT_TRUE(SameNode(nodes[i]->points, *dec.DecodeCompact(*all.nodes[i]))) << i;
+    }
+    EXPECT_EQ(cache.Stats().entries, small);
+    // The large nodes are decoded again on each fetch, the small ones served from the cache.
+    std::vector<NodeCache::NodePtr> again;
+    cache.Fetch(*file, all.nodes, again, kLimit);
+    for (size_t i = 0; i < nodes.size(); ++i)
+        EXPECT_EQ(again[i].get() == nodes[i].get(), static_cast<uint64_t>(all.nodes[i]->pointCount) <= kLimit) << i;
+    EXPECT_EQ(cache.Stats().entries, small);
+    // No limit: every node is kept.
+    cache.Fetch(*file, all.nodes, again);
+    EXPECT_EQ(cache.Stats().entries, all.nodes.size());
+}
+
+TEST(CopcRawPoints, TheBuffersOfALargeNodeAreReleasedAndThoseOfANormalNodeKept) {
+    RawPoints p;
+    p.x.resize(kKeptDecodePoints);
+    p.y.resize(kKeptDecodePoints);
+    p.r.resize(kKeptDecodePoints);
+    p.ReleaseIfLarge();
+    EXPECT_EQ(p.x.capacity(), kKeptDecodePoints);
+    EXPECT_EQ(p.r.capacity(), kKeptDecodePoints);
+    p.x.resize(kKeptDecodePoints + 1);
+    p.ReleaseIfLarge();
+    EXPECT_EQ(p.x.capacity(), 0u);
+    EXPECT_EQ(p.y.capacity(), 0u);
+    EXPECT_EQ(p.r.capacity(), 0u);
 }
 
 }  // namespace

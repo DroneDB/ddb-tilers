@@ -77,6 +77,7 @@ Status DecodeNodeRaw(const CopcFile& file, const HierarchyNode& node, uint32_t l
     }
     o.nir = nir ? out.nir.data() : nullptr;
     Status s = dec->DecodeSoa(chunk, static_cast<uint32_t>(n), o);
+    if (n > kKeptDecodePoints) std::vector<uint8_t>().swap(scratch);
     if (!s.ok()) return s.WithContext(NodeName(node));
     return Status();
 }
@@ -91,8 +92,14 @@ Expected<CompactNode> NodeDecoder::DecodeCompact(const HierarchyNode& node) cons
         DDBT_ASSIGN_OR_RETURN(color16, file_->Uses16BitColor());
     }
     thread_local RawPoints raw;
-    DDBT_TRY(DecodeNodeRaw(*file_, node, laz::kLayersXyzRgb, raw));
-    return CompactNode::FromRaw(raw, color16);
+    const Status s = DecodeNodeRaw(*file_, node, laz::kLayersXyzRgb, raw);
+    if (!s.ok()) {
+        raw.ReleaseIfLarge();
+        return s;
+    }
+    CompactNode c = CompactNode::FromRaw(raw, color16);
+    raw.ReleaseIfLarge();
+    return c;
 }
 
 CompactNode CompactNode::FromRaw(const RawPoints& raw, bool color16) {

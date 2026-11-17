@@ -119,13 +119,14 @@ Expected<bool> CopcFile::Uses16BitColor() const {
         if (i > firstDecisive.load(std::memory_order_relaxed)) return;
         thread_local RawPoints raw;
         Status s = DecodeNodeRaw(*this, *nodes[i], laz::kLayerXY | laz::kLayerRgb, raw);
+        bool sixteen = false;
+        for (size_t k = 0; s.ok() && k < raw.size() && !sixteen; ++k)
+            sixteen = raw.r[k] > 255 || raw.g[k] > 255 || raw.b[k] > 255;
+        raw.ReleaseIfLarge();
         if (!s.ok()) {
             outcome[i] = kError;
             errors[i] = std::move(s);
         } else {
-            bool sixteen = false;
-            for (size_t k = 0; k < raw.size() && !sixteen; ++k)
-                sixteen = raw.r[k] > 255 || raw.g[k] > 255 || raw.b[k] > 255;
             if (!sixteen) return;
             outcome[i] = kSixteenBit;
         }

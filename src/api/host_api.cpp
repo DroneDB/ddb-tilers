@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MPL-2.0
-// The exports a host library uses to run ddbt inside itself: ddbtConfigure (process-wide
-// settings the host owns: where proj.db is, threads, cache budgets, the COPC tile mode and build
-// memory), ddbtTileInfo (the bounds and zoom range of an input, which the host's tilers expose),
-// ddbtReleaseSources and ddbtSetRemoteReader (the host's range reads of remote inputs).
+// The exports a host library uses to run ddbt inside itself: ddbtConfigure and ddbtGetConfig
+// (process-wide settings the host owns: where proj.db is, threads, cache budgets, the COPC tile
+// mode and limits, build memory), ddbtTileInfo (the bounds and zoom range of an input, which the
+// host's tilers expose), ddbtReleaseSources and ddbtSetRemoteReader (the host's range reads of
+// remote inputs).
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <optional>
 #include <string>
 
@@ -34,11 +37,44 @@ using ddbt::api::GuardedCall;
 // Sizes are given in MiB; this bound keeps the byte count far from overflowing.
 constexpr uint64_t kMaxMiB = uint64_t{1} << 24;
 
+size_t Bytes(uint64_t mib) { return static_cast<size_t>(mib << 20); }
+uint64_t MiB(uint64_t bytes) { return bytes >> 20; }
+
+// A setting whose value is a whole number from 0 to `max`: how ddbtConfigure applies it and how
+// ddbtGetConfig reads it back.
+struct CountSetting {
+    const char* key;
+    uint64_t max;
+    void (*apply)(uint64_t);
+    uint64_t (*current)();
+};
+
+const CountSetting kCountSettings[] = {
+    {"blockCacheMb", kMaxMiB, [](uint64_t v) { ddbt::cog::tiler::SetBlockCacheBudget(Bytes(v)); },
+     [] { return MiB(ddbt::cog::tiler::BlockCacheBudget()); }},
+    {"tileCacheMb", kMaxMiB, [](uint64_t v) { ddbt::cog::tiler::SetTileCacheBudget(Bytes(v)); },
+     [] { return MiB(ddbt::cog::tiler::TileCacheBudget()); }},
+    {"copcNodeCacheMb", kMaxMiB, [](uint64_t v) { ddbt::copc::cache::NodeCache::Global().SetBudget(Bytes(v)); },
+     [] { return MiB(ddbt::copc::cache::NodeCache::Global().BudgetBytes()); }},
+    {"copcTileCacheMb", kMaxMiB, [](uint64_t v) { ddbt::copc::tiler::SetTileCacheBudget(Bytes(v)); },
+     [] { return MiB(ddbt::copc::tiler::TileCacheBudget()); }},
+    {"copcBuildMemMb", kMaxMiB, [](uint64_t v) { ddbt::copc::build::SetDefaultCopcMemoryBudget(v << 20); },
+     [] {
+         const auto budget = ddbt::copc::build::DefaultCopcMemoryBudget();
+         return budget.ok() ? MiB(*budget) : uint64_t{0};
+     }},
+    {"copcTileMaxPoints", ddbt::copc::tiler::kTilePointsSettingMax, ddbt::copc::tiler::SetTileMaxPoints,
+     ddbt::copc::tiler::TileMaxPoints},
+    {"copcTileMaxNodePoints", ddbt::copc::tiler::kTilePointsSettingMax, ddbt::copc::tiler::SetTileMaxNodePoints,
+     ddbt::copc::tiler::TileMaxNodePoints},
+};
+constexpr size_t kCountSettingCount = std::size(kCountSettings);
+
 struct Config {
     std::optional<std::string> projDataDir;
     std::optional<uint64_t> threads;
-    std::optional<uint64_t> blockCacheMb, tileCacheMb, copcNodeCacheMb, copcTileCacheMb, copcBuildMemMb;
     std::optional<ddbt::copc::tiler::Mode> copcTilerMode;
+    std::array<std::optional<uint64_t>, kCountSettingCount> counts;  // by index in kCountSettings
 };
 
 // Parses and checks every setting; returns an error message, "" when fine. Nothing is applied.
@@ -49,31 +85,30 @@ std::string Parse(const char* text, Config& c) {
         if (key == "projDataDir") {
             if (val.kind != json::Value::Kind::kString) return "Invalid configJson: projDataDir must be a string";
             c.projDataDir = val.str;
-        } else if (key == "copcTilerMode") {
+            continue;
+        }
+        if (key == "copcTilerMode") {
             const auto mode = val.kind == json::Value::Kind::kString ? ddbt::copc::tiler::ParseMode(val.str)
                                                                      : std::nullopt;
             if (!mode) return "Invalid configJson: copcTilerMode must be \"compat\", \"hybrid\" or \"modern\"";
             c.copcTilerMode = *mode;
-        } else if (key == "threads") {
+            continue;
+        }
+        if (key == "threads") {
             if (!val.isUint || val.u > 4096) return "Invalid configJson: threads must be an integer from 0 to 4096";
             c.threads = val.u;
-        } else if (key == "blockCacheMb" || key == "tileCacheMb" || key == "copcNodeCacheMb" ||
-                   key == "copcTileCacheMb" || key == "copcBuildMemMb") {
-            if (!val.isUint || val.u > kMaxMiB)
-                return "Invalid configJson: " + key + " must be an integer from 0 to " + std::to_string(kMaxMiB);
-            if (key == "blockCacheMb") c.blockCacheMb = val.u;
-            if (key == "tileCacheMb") c.tileCacheMb = val.u;
-            if (key == "copcNodeCacheMb") c.copcNodeCacheMb = val.u;
-            if (key == "copcTileCacheMb") c.copcTileCacheMb = val.u;
-            if (key == "copcBuildMemMb") c.copcBuildMemMb = val.u;
-        } else {
-            return "Invalid configJson: unknown setting " + key;
+            continue;
         }
+        size_t i = 0;
+        while (i < kCountSettingCount && key != kCountSettings[i].key) ++i;
+        if (i == kCountSettingCount) return "Invalid configJson: unknown setting " + key;
+        if (!val.isUint || val.u > kCountSettings[i].max)
+            return "Invalid configJson: " + key + " must be an integer from 0 to " +
+                   std::to_string(kCountSettings[i].max);
+        c.counts[i] = val.u;
     }
     return "";
 }
-
-size_t Bytes(uint64_t mib) { return static_cast<size_t>(mib << 20); }
 
 // A host callback's code and reason as a Status of the remote reader.
 ddbt::Status CallbackStatus(ddbtErr code, const char* error, const std::string& what) {
@@ -125,13 +160,22 @@ ddbtErr ddbtConfigure(const char* configJson) {
         if (c.threads && !ddbt::exec::SetDefaultPoolThreads(static_cast<size_t>(*c.threads)))
             return Fail(DDBT_ERR_EXCEPTION, "Cannot set threads: the thread pool is already running");
         if (c.projDataDir) ddbt::crs::SetProjDataDir(*c.projDataDir);
-        if (c.blockCacheMb) ddbt::cog::tiler::SetBlockCacheBudget(Bytes(*c.blockCacheMb));
-        if (c.tileCacheMb) ddbt::cog::tiler::SetTileCacheBudget(Bytes(*c.tileCacheMb));
-        if (c.copcNodeCacheMb) ddbt::copc::cache::NodeCache::Global().SetBudget(Bytes(*c.copcNodeCacheMb));
-        if (c.copcTileCacheMb) ddbt::copc::tiler::SetTileCacheBudget(Bytes(*c.copcTileCacheMb));
         if (c.copcTilerMode) ddbt::copc::tiler::SetMode(*c.copcTilerMode);
-        if (c.copcBuildMemMb) ddbt::copc::build::SetDefaultCopcMemoryBudget(*c.copcBuildMemMb << 20);
+        for (size_t i = 0; i < kCountSettingCount; ++i)
+            if (c.counts[i]) kCountSettings[i].apply(*c.counts[i]);
         return DDBT_ERR_NONE;
+    });
+}
+
+ddbtErr ddbtGetConfig(char** outJson) {
+    return GuardedCall([&]() -> ddbtErr {
+        if (outJson == nullptr) return Fail(DDBT_ERR_INVALIDARGS, "Invalid outJson: NULL");
+        json::Value j = json::Object();
+        j.obj["projDataDir"] = json::String(ddbt::crs::ProjDataDir());
+        j.obj["threads"] = json::Unsigned(ddbt::exec::DefaultPoolThreads());
+        j.obj["copcTilerMode"] = json::String(ddbt::copc::tiler::ModeName(ddbt::copc::tiler::GetMode()));
+        for (const CountSetting& s : kCountSettings) j.obj[s.key] = json::Unsigned(s.current());
+        return ddbt::api::CopyOut(json::Dump(j, 0), outJson);
     });
 }
 

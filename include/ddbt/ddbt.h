@@ -382,12 +382,25 @@ DDBT_API ddbtErr ddbtBuildCopc2(const char *inputPath, const char *outputPath, c
  *   "blockCacheMb", "tileCacheMb": decoded-block and encoded-tile caches of the raster tiler
  *   "copcNodeCacheMb", "copcTileCacheMb": decoded-node and encoded-tile caches of the point-cloud
  *                  tiler (MiB, 0 = no cache)
+ *   "copcTileMaxPoints": the most points one point-cloud tile reads (default 4000000,
+ *                  DDBT_COPC_TILE_MAX_POINTS; 0 = no limit); past it, the tile reads the deepest
+ *                  levels of detail inside its window that fit (at least the root)
+ *   "copcTileMaxNodePoints": the most points of a node a point-cloud tile reads, the root
+ *                  excepted (default 1000000, DDBT_COPC_TILE_MAX_NODE_POINTS; 0 = no limit);
+ *                  larger nodes are left out and never cached
  *   "copcTilerMode": "compat" (DroneDB 2.4.1's tiles), "hybrid" or "modern"
  *   "copcBuildMemMb": memory cap of COPC builds that do not give one (0 = the default:
  *                  DDBT_COPC_BUILD_MEM_MB, else 4 GiB, at most half the memory)
  * These settings win over the DDBT_* environment variables.
  * @return DDBT_ERR_INVALIDARGS for a malformed or unknown setting */
 DDBT_API ddbtErr ddbtConfigure(const char *configJson);
+
+/** The process-wide settings in effect, as the JSON object ddbtConfigure takes, with every
+ * setting: those the host set, else those of the environment or the defaults ("threads" the
+ * workers of the shared pool, "copcBuildMemMb" the memory cap in effect, the cache budgets in
+ * whole MiB).
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree */
+DDBT_API ddbtErr ddbtGetConfig(char **outJson);
 
 /** The bounds and zoom range of a tile input, as DroneDB's tilers compute them when they open
  * it: {"type": "raster" | "pointcloud", "minX", "minY", "maxX", "maxY" (EPSG:3857 metres),

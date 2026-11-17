@@ -170,11 +170,16 @@ TEST(HostApi, ConfigureAppliesEverySetting) {
     const size_t blockBudget = ddbt::cog::tiler::BlockCacheBudget();
     const size_t nodeBudget = ddbt::copc::cache::NodeCache::Global().BudgetBytes();
     const std::string projDir = ddbt::crs::ProjDataDir();
+    const uint64_t maxPoints = ddbt::copc::tiler::TileMaxPoints();
+    const uint64_t maxNodePoints = ddbt::copc::tiler::TileMaxNodePoints();
 
     ASSERT_EQ(ddbtConfigure(R"({"copcTilerMode": "modern", "tileCacheMb": 3, "blockCacheMb": 5,
-                                "copcNodeCacheMb": 7, "copcTileCacheMb": 9, "copcBuildMemMb": 300})"),
+                                "copcNodeCacheMb": 7, "copcTileCacheMb": 9, "copcBuildMemMb": 300,
+                                "copcTileMaxPoints": 123456, "copcTileMaxNodePoints": 7890})"),
               DDBT_ERR_NONE)
         << ddbtLastError();
+    EXPECT_EQ(ddbt::copc::tiler::TileMaxPoints(), 123456u);
+    EXPECT_EQ(ddbt::copc::tiler::TileMaxNodePoints(), 7890u);
     EXPECT_EQ(ddbt::copc::tiler::GetMode(), ddbt::copc::tiler::Mode::kModern);
     EXPECT_EQ(ddbt::cog::tiler::TileCacheBudget(), size_t{3} << 20);
     EXPECT_EQ(ddbt::cog::tiler::BlockCacheBudget(), size_t{5} << 20);
@@ -200,6 +205,57 @@ TEST(HostApi, ConfigureAppliesEverySetting) {
     ddbt::cog::tiler::SetBlockCacheBudget(blockBudget);
     ddbt::copc::cache::NodeCache::Global().SetBudget(nodeBudget);
     ddbt::crs::SetProjDataDir(projDir);
+    ddbt::copc::tiler::SetTileMaxPoints(maxPoints);
+    ddbt::copc::tiler::SetTileMaxNodePoints(maxNodePoints);
+}
+
+json::Value GetConfig() {
+    char* out = nullptr;
+    EXPECT_EQ(ddbtGetConfig(&out), DDBT_ERR_NONE) << ddbtLastError();
+    const auto v = json::Parse(out != nullptr ? out : "");
+    ddbtFree(out);
+    return v ? *v : json::Value{};
+}
+
+TEST(HostApi, GetConfigGivesEverySettingInEffect) {
+    const uint64_t maxPoints = ddbt::copc::tiler::TileMaxPoints();
+    const uint64_t maxNodePoints = ddbt::copc::tiler::TileMaxNodePoints();
+    const size_t copcTileBudget = ddbt::copc::tiler::TileCacheBudget();
+    const size_t tileBudget = ddbt::cog::tiler::TileCacheBudget();
+    const size_t blockBudget = ddbt::cog::tiler::BlockCacheBudget();
+    const size_t nodeBudget = ddbt::copc::cache::NodeCache::Global().BudgetBytes();
+    const std::string projDir = ddbt::crs::ProjDataDir();
+    ASSERT_EQ(ddbtConfigure(R"({"copcTileMaxPoints": 100000, "copcTileMaxNodePoints": 0, "copcTileCacheMb": 11})"),
+              DDBT_ERR_NONE);
+    const json::Value c = GetConfig();
+    ASSERT_TRUE(c.IsObject());
+    for (const char* key : {"projDataDir", "threads", "copcTilerMode", "blockCacheMb", "tileCacheMb", "copcNodeCacheMb",
+                            "copcTileCacheMb", "copcBuildMemMb", "copcTileMaxPoints", "copcTileMaxNodePoints"})
+        EXPECT_NE(c.Find(key), nullptr) << key;
+    EXPECT_EQ(c.obj.size(), 10u);
+    EXPECT_EQ(c.Find("copcTileMaxPoints")->u, 100000u);
+    EXPECT_EQ(c.Find("copcTileMaxNodePoints")->u, 0u);
+    EXPECT_EQ(c.Find("copcTileCacheMb")->u, 11u);
+    EXPECT_EQ(c.Find("copcTilerMode")->str, ddbt::copc::tiler::ModeName(ddbt::copc::tiler::GetMode()));
+    EXPECT_EQ(c.Find("threads")->u, ddbt::exec::DefaultPoolThreads());
+    // What it gives is what ddbtConfigure takes (threads aside: the pool may run already)
+    json::Value back = c;
+    back.obj.erase("threads");
+    ASSERT_EQ(ddbtConfigure(json::Dump(back, 0).c_str()), DDBT_ERR_NONE) << ddbtLastError();
+    back.obj.erase("projDataDir");  // "" and a folder both read back as they are
+    json::Value again = GetConfig();
+    again.obj.erase("threads");
+    again.obj.erase("projDataDir");
+    EXPECT_EQ(json::Dump(again, 0), json::Dump(back, 0));
+    ddbt::copc::tiler::SetTileMaxPoints(maxPoints);
+    ddbt::copc::tiler::SetTileMaxNodePoints(maxNodePoints);
+    ddbt::copc::tiler::SetTileCacheBudget(copcTileBudget);
+    ddbt::cog::tiler::SetTileCacheBudget(tileBudget);
+    ddbt::cog::tiler::SetBlockCacheBudget(blockBudget);
+    ddbt::copc::cache::NodeCache::Global().SetBudget(nodeBudget);
+    ddbt::copc::build::SetDefaultCopcMemoryBudget(0);
+    ddbt::crs::SetProjDataDir(projDir);
+    EXPECT_EQ(ddbtGetConfig(nullptr), DDBT_ERR_INVALIDARGS);
 }
 
 TEST(HostApi, ConfigureRefusesBadSettingsAndChangesNothing) {
@@ -208,6 +264,7 @@ TEST(HostApi, ConfigureRefusesBadSettingsAndChangesNothing) {
     for (const char* bad : {"", "[1]", "{\"bogus\": 1}", "{\"tileCacheMb\": -1}", "{\"tileCacheMb\": 1.5}",
                             "{\"tileCacheMb\": \"3\"}", "{\"copcTilerMode\": \"fancy\"}", "{\"projDataDir\": 3}",
                             "{\"threads\": 5000}", "{\"copcBuildMemMb\": 99999999999}",
+                            "{\"copcTileMaxPoints\": -1}", "{\"copcTileMaxNodePoints\": 1099511627777}",
                             // a valid setting next to a bad one is not applied either
                             "{\"copcTilerMode\": \"modern\", \"tileCacheMb\": -1}"}) {
         EXPECT_EQ(ddbtConfigure(bad), DDBT_ERR_INVALIDARGS) << bad;
