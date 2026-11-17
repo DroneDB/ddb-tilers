@@ -28,6 +28,7 @@
 
 #include "../test_env.h"
 #include "../encode/decode_helpers.h"
+#include "synth_raster.h"
 #include "cog/tiler/block_cache.h"
 #include "cog/tiler/cog_source.h"
 #include "cog/tiler/cog_tiler.h"
@@ -92,6 +93,18 @@ ddbt::encode::ByteBuffer Render(const std::string& path, int z, int x, int y, dd
 }
 
 std::vector<uint8_t> Bytes(const ddbt::encode::ByteBuffer& b) { return {b.data(), b.data() + b.size()}; }
+
+// The process's sampling mode set for the scope (the tests that check DroneDB 2.4.1's pixels).
+class ScopedSamplingMode {
+public:
+    explicit ScopedSamplingMode(SamplingMode mode) : old_(GetSamplingMode()) { SetSamplingMode(mode); }
+    ~ScopedSamplingMode() { SetSamplingMode(old_); }
+    ScopedSamplingMode(const ScopedSamplingMode&) = delete;
+    ScopedSamplingMode& operator=(const ScopedSamplingMode&) = delete;
+
+private:
+    SamplingMode old_;
+};
 
 // XYZ tile of a 3857 point.
 std::pair<int, int> TileOf(double mx, double my, int z) {
@@ -561,6 +574,43 @@ TEST(CogTilerStats, DefaultPassIsTheExactPass) {
     EXPECT_EQ(d[1]->mean, 349.5);
 }
 
+TEST(CogTilerStats, AnEightBitMaskLeavesOutItsZeros) {
+    // An internal mask of 8 bits a pixel (a graded one, which GDAL reads as it is): the statistics
+    // leave out the pixels where it is 0 and keep every other, as GDAL's do, in both passes. Read as
+    // packed bits, its bytes left the wrong pixels out.
+    TempDir dir;
+    const fs::path tif = dir.path() / "graded.tif";
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(1000, 1, 1);
+    spec.height = 300;
+    spec.tile = 256;
+    spec.value = [](int, uint32_t x, uint32_t y) { return static_cast<float>((x + y) % 200 + 10); };
+    // Transparent left of 300, a ramp from 1 to 255 over 300 to 554, opaque after
+    const auto alpha = [](uint32_t x) -> uint8_t { return x < 300 ? 0 : static_cast<uint8_t>(std::min(255u, x - 299)); };
+    spec.mask8 = [alpha](uint32_t x, uint32_t, int) { return alpha(x); };
+    syn::WriteSynth(tif, spec);
+    double mn = 1e9, mx = -1e9, sum = 0;
+    uint64_t n = 0;
+    for (uint32_t y = 0; y < spec.height; ++y)
+        for (uint32_t x = 0; x < spec.width; ++x) {
+            if (alpha(x) == 0) continue;
+            const double v = spec.value(0, x, y);
+            mn = std::min(mn, v);
+            mx = std::max(mx, v);
+            sum += v;
+            ++n;
+        }
+    const auto src = CogSource::Open(tif.string());
+    for (const auto mode : {ddbt::cog::stats::StatsMode::kExact, ddbt::cog::stats::StatsMode::kCompat}) {
+        const auto st = ComputeBandStatistics(*src, {1}, std::nullopt, mode);
+        ASSERT_TRUE(st[0]);
+        EXPECT_EQ(st[0]->validCount, n) << static_cast<int>(mode);
+        EXPECT_EQ(st[0]->min, mn);
+        EXPECT_EQ(st[0]->max, mx);
+        EXPECT_NEAR(st[0]->mean, sum / static_cast<double>(n), 1e-9);
+    }
+}
+
 TEST(CogTilerStats, CompatPassIndependentOfThreads) {
     const auto c = BaselineCase("R1");
     if (!c) GTEST_SKIP() << "R1 baseline build missing";
@@ -621,7 +671,9 @@ std::pair<int, int> SamplingTile() { return TileOf(-10240777.0 + 125, 5916486.0 
 }  // namespace
 
 TEST(CogTilerTiles, GreyStretchOfAUInt16Band) {
-    // 2 bands: one data band (dataBandCount), UInt16: stretched over its exact min..max (0..999).
+    // 2 bands: one data band (dataBandCount), UInt16: stretched over its exact min..max (0..999),
+    // read through the geoQuery window as DroneDB 2.4.1 reads it (compat).
+    const ScopedSamplingMode compat(SamplingMode::kCompat);
     ClearTileCache();
     const auto [x, y] = SamplingTile();
     const auto png = Render(SamplingTif(), kZ, x, y);
@@ -711,6 +763,7 @@ TEST(CogTilerTiles, CachesAndVersionedSources) {
 }
 
 TEST(CogTilerTiles, MaskShortcutGivesBlankBytesWithoutImagery) {
+    const ScopedSamplingMode compat(SamplingMode::kCompat);  // the tiles of the geoQuery windows below
     // R6, the 3.3 Gpx JPEG COG with a mask (only its mask blocks are read here).
     const char* kR6 =
         "/mnt/data/datasets/orthos/err-mask/.ddb/build/"
@@ -753,8 +806,9 @@ TEST(CogTilerTiles, MaskShortcutGivesBlankBytesWithoutImagery) {
 
 TEST(CogTilerTiles, OutOfBoundsPlainIsBlankAndVisFails) {
     const auto [x, y] = SamplingTile();
+    // The blank RGB tile: the 2 bands of sampling.tif are drawn as red and green.
     const auto png = Bytes(Render(SamplingTif(), kZ, x + 50, y));
-    EXPECT_EQ(png, ddbt::encode::BlankTileBytes(256, 256, 1, {}));
+    EXPECT_EQ(png, ddbt::encode::BlankTileBytes(256, 256, 3, {}));
     VisParams vis;
     vis.formula = "VARI";
     TileRequest r;
@@ -773,7 +827,7 @@ TEST(CogTilerTiles, OutOfBoundsPlainIsBlankAndVisFails) {
     }
     vis = VisParams{};
     vis.colormap = "viridis";  // no parameter: the plain (blank) tile
-    EXPECT_EQ(Bytes(RenderTile(r)), ddbt::encode::BlankTileBytes(256, 256, 1, {}));
+    EXPECT_EQ(Bytes(RenderTile(r)), ddbt::encode::BlankTileBytes(256, 256, 3, {}));
 }
 
 TEST(CogTilerTiles, StyledBandAndFormulaRefusal) {
@@ -806,6 +860,40 @@ TEST(CogTilerTiles, StyledBandAndFormulaRefusal) {
     } catch (const TileError& e) {
         EXPECT_EQ(e.code(), TileErrorCode::kRefused);
         EXPECT_STREQ(e.what(), "Requires bands: RN");
+    }
+}
+
+// The nodata mask of a raster of several bands: a pixel is empty when every band is at nodata (GDAL's
+// mask of the nodata values of all the bands, as the built COG's internal mask), not when band 1 is.
+TEST(CogTilerTiles, TheNodataMaskOfSeveralBandsNeedsEveryBandAtNodata) {
+    TempDir dir;
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(64, 3, 1);
+    spec.nodata = "0";
+    // Columns 0-15: no red (0 70 140); 16-31: empty; 32-47: no blue; the rest: grey
+    spec.value = [](int b, uint32_t x, uint32_t) {
+        if (x < 16) return b == 0 ? 0.0f : b == 1 ? 70.0f : 140.0f;
+        if (x < 32) return 0.0f;
+        if (x < 48) return b == 2 ? 0.0f : 90.0f;
+        return 120.0f;
+    };
+    const std::string path = dir.File("rgb_nodata.tif");
+    syn::WriteSynth(path, spec);
+    const auto src = CogSource::Open(path);
+    ASSERT_EQ(src->Mask(), MaskKind::kNodata);
+    const RasterView view(*src);
+    const SamplePlan plan = PlanLevelRead(view, 0, 0, 0, 64, 64);
+    const size_t pixels = 64 * 64;
+    std::vector<uint8_t> planes(pixels * 3);
+    const int all[3] = {1, 2, 3};
+    GatherBands(view, plan, all, planes.data(), pixels);
+    for (const int gathered : {0, 1, 3}) {
+        std::vector<uint8_t> alpha(pixels);
+        GatherAlpha(view, plan, alpha.data(), gathered ? planes.data() : nullptr, gathered, pixels);
+        for (size_t i = 0; i < pixels; ++i) {
+            const size_t x = i % 64;
+            ASSERT_EQ(alpha[i], x >= 16 && x < 32 ? 0 : 255) << "pixel " << i << ", " << gathered << " bands gathered";
+        }
     }
 }
 
@@ -845,6 +933,31 @@ TEST(CogTilerWarp, VirtualGridMatchesTheCogDroneDbBuilt) {
         ++checked;
     }
     if (checked == 0) GTEST_SKIP() << "no baseline-built COG present";
+}
+
+// A source outside EPSG:3857 without a nodata, mask or alpha is read on the grid of its COG, whose
+// internal mask makes the pixels of the grid outside the source transparent: so is the view.
+TEST(CogTilerWarp, TheGridOutsideASourceWithoutTransparencyIsTransparent) {
+    const auto src = CogSource::Open(std::string(DDBT_TEST_FIXTURES) + "/gdal/ref_byte.tif");  // EPSG:26711
+    ASSERT_NE(src->Warp(), nullptr);
+    ASSERT_EQ(src->Mask(), MaskKind::kAllValid);
+    const RasterView view(*src);
+    const SamplePlan plan = PlanLevelRead(view, 0, 0, 0, view.Width(), view.Height());
+    ASSERT_TRUE(plan.pointwise);
+    std::vector<uint8_t> alpha(plan.sx.size());
+    GatherAlpha(view, plan, alpha.data());
+    size_t outside = 0, inside = 0;
+    for (size_t i = 0; i < alpha.size(); ++i) {
+        if (plan.sx[i] < 0) {
+            ++outside;
+            EXPECT_EQ(alpha[i], 0) << i;
+        } else {
+            ++inside;
+            EXPECT_EQ(alpha[i], 255) << i;
+        }
+    }
+    EXPECT_GT(outside, 0u);
+    EXPECT_GT(inside, 0u);
 }
 
 // ------------------------------------------------------------------------------------------ API

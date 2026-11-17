@@ -26,10 +26,13 @@
 #include <vector>
 
 #include "cog/tiff/tiff_reader.h"
+#include "reference_tsv.h"
 #include "tiff_test_util.h"
 
 namespace ddbt::cog::tiff {
 namespace {
+
+using testing::SplitTsv;
 
 std::string FixturesDir() {
     const char* e = std::getenv("DDBT_TIFF_FIXTURES");
@@ -44,21 +47,6 @@ std::set<std::string> Tiers() {
     std::string t;
     while (std::getline(ss, t, ',')) out.insert(t);
     return out;
-}
-
-std::vector<std::string> Split(const std::string& line) {
-    std::vector<std::string> f;
-    std::string cur;
-    for (char c : line) {
-        if (c == '\t') {
-            f.push_back(cur);
-            cur.clear();
-        } else {
-            cur.push_back(c);
-        }
-    }
-    f.push_back(cur);
-    return f;
 }
 
 struct Window {
@@ -98,7 +86,7 @@ TEST(TiffGdalParity, DecodedWindowsMatchGdal) {
     size_t files = 0, totalWindows = 0, totalBad = 0;
     std::ostringstream report;
     while (std::getline(index, line)) {
-        const auto f = Split(line);
+        const auto f = SplitTsv(line);
         if (f.size() < 5) continue;
         const std::string& id = f[0];
         const std::string& path = f[1];
@@ -113,7 +101,7 @@ TEST(TiffGdalParity, DecodedWindowsMatchGdal) {
         std::map<Window, std::vector<Expect>> wins;
         std::string bl;
         while (std::getline(blocks, bl)) {
-            const auto g = Split(bl);
+            const auto g = SplitTsv(bl);
             if (g.size() < 10) continue;
             Window w{g[0], uint32_t(std::stoul(g[1])), uint32_t(std::stoul(g[2])), uint32_t(std::stoul(g[4])),
                      uint32_t(std::stoul(g[5])), uint32_t(std::stoul(g[6])), uint32_t(std::stoul(g[7]))};

@@ -360,6 +360,13 @@ bool SamplePlan::AllInside() const noexcept {
     return true;
 }
 
+bool SamplePlan::AnySample() const noexcept {
+    const auto any = [](const std::vector<int32_t>& v) {
+        return std::any_of(v.begin(), v.end(), [](int32_t i) { return i >= 0; });
+    };
+    return any(cols) && any(rows);
+}
+
 int BestLevel(const std::vector<std::pair<int, int>>& levels, double desired, double threshold) {
     // GDALBandGetBestOverviewLevel: index -1 is the full resolution (returned as 0 here).
     int best = -1;
@@ -585,6 +592,26 @@ bool IsNodataSample(PixelType type, const uint8_t* p, double nd) noexcept {
     return false;
 }
 
+void TransparentWhereNaN(PixelType type, const uint8_t* samples, size_t n, uint8_t* alpha) noexcept {
+    switch (type) {
+        case PixelType::kF32:
+            for (size_t i = 0; i < n; ++i)
+                if (std::isnan(Load<float>(samples + i * 4))) alpha[i] = 0;
+            return;
+        case PixelType::kF64:
+            for (size_t i = 0; i < n; ++i)
+                if (std::isnan(Load<double>(samples + i * 8))) alpha[i] = 0;
+            return;
+        case PixelType::kF16:
+            for (size_t i = 0; i < n; ++i) {
+                const uint16_t h = Load<uint16_t>(samples + i * 2);
+                if ((h & 0x7C00u) == 0x7C00u && (h & 0x03FFu) != 0) alpha[i] = 0;
+            }
+            return;
+        default: return;
+    }
+}
+
 double SampleToDouble(PixelType type, const uint8_t* p) noexcept {
     switch (type) {
         case PixelType::kU8: return Load<uint8_t>(p);
@@ -658,16 +685,40 @@ MaskSummary PlanMaskSummary(const RasterView& view, const SamplePlan& plan) {
     return all.value_or(MaskSummary::kMixed);
 }
 
-void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, const uint8_t* band1) {
+namespace {
+
+// GDAL's nodata mask of band `b` (1-based, GDALNoDataMaskBand) over its native samples: 0 where the
+// sample is at the view's nodata of the band, else 255 (all 255 without one).
+void BandNodataMask(const RasterView& view, int b, const uint8_t* samples, size_t pixels, uint8_t* out) {
+    const CogSource& src = view.Source();
+    const PixelType type = src.Type();
+    const size_t ss = PixelTypeSize(type);
+    const std::optional<double> nd = view.Nodata(b);
+    // A 64-bit integer band compares its NoData value as GDAL keeps it, not its double
+    const BandMeta& meta = src.Band(b);
+    const bool ownNodata = !view.NodataOverride().has_value();
+    if (nd && ownNodata && type == PixelType::kI64 && meta.nodataInt64) {
+        for (size_t i = 0; i < pixels; ++i) out[i] = Load<int64_t>(samples + i * ss) == *meta.nodataInt64 ? 0 : 255;
+    } else if (nd && ownNodata && type == PixelType::kU64 && meta.nodataUInt64) {
+        for (size_t i = 0; i < pixels; ++i) out[i] = Load<uint64_t>(samples + i * ss) == *meta.nodataUInt64 ? 0 : 255;
+    } else if (!nd) {
+        std::memset(out, 255, pixels);
+    } else if (type == PixelType::kF32 && !std::isnan(*nd)) {
+        // The common DEM case (same test as IsNodataSample).
+        kernels::NodataMaskF32(samples, pixels, static_cast<float>(*nd), out);
+    } else {
+        for (size_t i = 0; i < pixels; ++i) out[i] = IsNodataSample(type, samples + i * ss, *nd) ? 0 : 255;
+    }
+}
+
+}  // namespace
+
+void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, const uint8_t* gathered,
+                 int gatheredBands, size_t planeBytes) {
     const CogSource& src = view.Source();
     const size_t pixels = static_cast<size_t>(plan.bufW) * static_cast<size_t>(plan.bufH);
     const PixelType type = src.Type();
     const size_t ss = PixelTypeSize(type);
-
-    // The transparency of what the view adds outside the source (warped: the built COG's alpha /
-    // nodata, or none at all: opaque black).
-    const bool warpTransparent = !view.Warped() || src.AlphaBand() > 0 || src.Mask() != MaskKind::kAllValid ||
-                                 view.NodataOverride().has_value();
 
     if (view.AlphaBand() > 0) {
         const int b = view.AlphaBand();
@@ -686,28 +737,21 @@ void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, c
         switch (kind) {
             case MaskKind::kPerDataset: GatherDatasetMask(view, plan, out); break;
             case MaskKind::kNodata: {
-                const std::optional<double> nd = view.Nodata(1);
-                std::vector<uint8_t> own;
-                if (band1 == nullptr) {
+                std::vector<uint8_t> own, bandMask;
+                const auto samplesOf = [&](int b) -> const uint8_t* {
+                    if (gathered != nullptr && b <= gatheredBands) return gathered + static_cast<size_t>(b - 1) * planeBytes;
                     own.resize(pixels * ss);
-                    const int b = 1;
                     GatherBands(view, plan, std::span<const int>(&b, 1), own.data(), pixels * ss);
-                    band1 = own.data();
-                }
-                // A 64-bit integer band compares its NoData value as GDAL keeps it, not its double
-                const BandMeta& meta1 = src.Band(1);
-                const bool ownNodata = !view.NodataOverride().has_value();
-                if (nd && ownNodata && type == PixelType::kI64 && meta1.nodataInt64) {
-                    for (size_t i = 0; i < pixels; ++i) out[i] = Load<int64_t>(band1 + i * ss) == *meta1.nodataInt64 ? 0 : 255;
-                } else if (nd && ownNodata && type == PixelType::kU64 && meta1.nodataUInt64) {
-                    for (size_t i = 0; i < pixels; ++i) out[i] = Load<uint64_t>(band1 + i * ss) == *meta1.nodataUInt64 ? 0 : 255;
-                } else if (!nd) {
-                    std::memset(out, 255, pixels);
-                } else if (type == PixelType::kF32 && !std::isnan(*nd)) {
-                    // The common DEM case (same test as IsNodataSample).
-                    kernels::NodataMaskF32(band1, pixels, static_cast<float>(*nd), out);
-                } else {
-                    for (size_t i = 0; i < pixels; ++i) out[i] = IsNodataSample(type, band1 + i * ss, *nd) ? 0 : 255;
+                    return own.data();
+                };
+                BandNodataMask(view, 1, samplesOf(1), pixels, out);
+                // Several bands: a pixel is empty when every band is at its nodata (GDAL's mask of the
+                // nodata values of all the bands, as the warp's UNIFIED_SRC_NODATA and the internal
+                // mask of the COG built since), not when band 1 alone is
+                bandMask.resize(pixels);
+                for (int b = 2; b <= src.BandCount() && !kernels::AllBytesEqual(out, pixels, 255); ++b) {
+                    BandNodataMask(view, b, samplesOf(b), pixels, bandMask.data());
+                    for (size_t i = 0; i < pixels; ++i) out[i] |= bandMask[i];
                 }
                 break;
             }
@@ -715,13 +759,11 @@ void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, c
             case MaskKind::kAllValid: std::memset(out, 255, pixels); break;
         }
     }
-    // No sample: transparent (outside the window), or for a warped view inside its grid but off
-    // the source, what the built COG has there.
+    // No sample: transparent, outside the window as for a warped view inside its grid but off the
+    // source (the built COG masks those pixels: its alpha, its nodata, else its internal mask).
     if (plan.pointwise) {
-        for (size_t i = 0; i < pixels; ++i) {
-            if (plan.sx[i] == -1) out[i] = 0;
-            else if (plan.sx[i] == -2) out[i] = warpTransparent ? 0 : 255;
-        }
+        for (size_t i = 0; i < pixels; ++i)
+            if (plan.sx[i] < 0) out[i] = 0;
     } else {
         // Row by row: a row without a sample is cleared whole, else only its columns without one.
         const size_t w = static_cast<size_t>(plan.bufW);

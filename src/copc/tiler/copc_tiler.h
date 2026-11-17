@@ -28,7 +28,9 @@
 //  - modern fixes everything: window = 32 points of the padded tile's outline (padding = disc
 //    radius + 1 px, in doubles, so no seams at z21+), at the lowest and highest heights for a
 //    geocentric CRS; depth limit from the spacing projected to EPSG:3857 (spacing x sqrt|det J| of
-//    cloud -> EPSG:3857 at the tile centre); a polynomial fit of cloud -> pixel per tile (affine,
+//    cloud -> EPSG:3857 at the tile centre): the levels down to the first whose spacing is at most
+//    2 sqrt(2) px, the widest spacing the 13-pixel disc draws without gaps (no holes where the
+//    cloud has points, inside the point budget); a polynomial fit of cloud -> pixel per tile (affine,
 //    quadratic or cubic, max residual <= 0.01 px, else exact PROJ); colours with the per-cloud
 //    16-bit decision, the ramp over the exact header z range; the 13-pixel symmetric disc on the
 //    point's pixel with a per-pixel z-test (max key), independent of the point order:
@@ -122,7 +124,8 @@ encode::ByteBuffer RenderTile(const TileRequest& request);
 void RenderRgba(const Cloud& cloud, const TileRequest& request, std::vector<uint8_t>& rgba,
                 RenderInfo* info = nullptr);
 
-/// A thumbnail: the whole cloud fitted, centred, in a square of size x size pixels.
+/// A thumbnail: the whole cloud fitted, centred, in a square of size x size pixels, a margin of the
+/// disc's radius plus one pixel on each side (a point on the bounds is drawn whole).
 struct ThumbnailRequest {
     std::string path;
     int size = 512;
@@ -136,9 +139,10 @@ struct ThumbnailRequest {
 /// coloured points in their colours, others in the ramp over the header z range): in EPSG:3857
 /// (north up) when the cloud has a footprint, else in its own x, y (a cloud without a CRS, or
 /// without a transformation to EPSG:3857). Throws cog::tiler::TileError: kInvalidArgs for a
-/// bad size, kException for a cloud of zero extent or without points, kRefused for a root of more
-/// points than TileMaxPoints() (whatever pointBudget), like RenderTile else; `info` is filled also
-/// when the render throws once it has started.
+/// bad size, kException for a cloud of no finite extent or without points (a cloud of no extent in
+/// x and y is drawn at the centre), kRefused for a root of more points than TileMaxPoints()
+/// (whatever pointBudget), like RenderTile else; `info` is filled also when the render throws once
+/// it has started.
 void RenderThumbnail(const ThumbnailRequest& request, std::vector<uint8_t>& rgba, RenderInfo* info = nullptr);
 
 /// The footprint and zoom range of `path` for `tileSize` px tiles in the process-wide mode, as
@@ -152,8 +156,9 @@ tile::compat::TileExtent Extent(const std::string& path, int tileSize);
 Mode GetMode();
 void SetMode(Mode mode);
 
-/// Zoom levels between a tile and the octree level it reads (DroneDB's
-/// DDB_PCTILE_RESOLUTION_OFFSET): DDBT_PCTILE_RESOLUTION_OFFSET, default 2.
+/// Zoom levels between a tile and the octree level it reads in the compat and hybrid modes
+/// (DroneDB's DDB_PCTILE_RESOLUTION_OFFSET): DDBT_PCTILE_RESOLUTION_OFFSET, default 2. The modern
+/// mode takes its depth limit from its disc instead.
 int ResolutionOffset();
 
 /// The most points one tile may read: DDBT_COPC_TILE_MAX_POINTS, default 4,000,000; 0 = no limit.

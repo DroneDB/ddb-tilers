@@ -130,12 +130,23 @@ std::string StatedWktOf(const las::LasMetadata& meta) {
 
 }  // namespace
 
+// The LASzip item type of the wave packets of point formats 4, 5, 9 and 10
+constexpr uint16_t kLazWavePacket13 = 9;
+
 Expected<std::vector<LazChunk>> ReadLazChunkTable(const io::ByteSource& source, const las::LasMetadata& meta) {
     const las::LasHeader& h = meta.header;
     if (!meta.laz) return Corrupt("compressed LAS file without a LAZ VLR");
     const las::LazVlr& laz = *meta.laz;
     if (laz.compressor != 2 && laz.compressor != 3)
         return Unsupported("LAZ compressor " + std::to_string(laz.compressor) + " (only chunked LAZ is read)");
+    // LASzip 1.x wrote its items in version 1 (WAVEPACKET13 has no other): LAZperf decodes the
+    // version 2 items of the point-wise chunked compressor, and its chunks would only read as
+    // truncated
+    if (laz.compressor == 2)
+        for (const las::LazVlr::Item& item : laz.items)
+            if (item.version < 2 && item.type != kLazWavePacket13)
+                return Unsupported("LAZ item " + std::to_string(item.type) + " in version " +
+                                   std::to_string(item.version) + " (LASzip 1.x; version 2 items are read)");
     const uint64_t size = source.Size();
     if (uint64_t{h.pointDataOffset} + 8 > size) return Corrupt("LAZ file too short for its chunk table offset");
     uint8_t b8[8];

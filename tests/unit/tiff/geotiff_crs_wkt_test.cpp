@@ -8,21 +8,12 @@
 
 #include "cog/tiff/geotiff.h"
 #include "core/crs/crs.h"
+#include "geokeys_test_util.h"
 
 namespace ddbt::cog::tiff {
 namespace {
 
-GeoKeyDirectory Keys(std::initializer_list<std::pair<uint16_t, int>> shorts,
-                     std::initializer_list<std::pair<uint16_t, double>> doubles,
-                     std::initializer_list<std::pair<uint16_t, const char*>> texts) {
-    GeoKeyDirectory d;
-    d.version = 1;
-    d.revision = 1;
-    for (const auto& [id, v] : shorts) d.keys[id] = GeoKey{id, 0, {static_cast<uint16_t>(v)}, {}, {}};
-    for (const auto& [id, v] : doubles) d.keys[id] = GeoKey{id, 34736, {}, {v}, {}};
-    for (const auto& [id, v] : texts) d.keys[id] = GeoKey{id, 34737, {}, {}, v};
-    return d;
-}
+using testing::Keys;
 
 // Keys that name an EPSG geographic CRS, its datum and its ellipsoid, give the ellipsoid's axes
 // and inverse flattening again and a user-defined projection of an EPSG projected CRS (a DEM

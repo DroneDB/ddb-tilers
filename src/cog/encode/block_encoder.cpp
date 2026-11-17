@@ -334,7 +334,11 @@ void SpreadJpegEdges(uint8_t* pixels, uint32_t bw, uint32_t bh, uint32_t samples
     for (uint32_t y = vh; y < bh; ++y) std::memcpy(pixels + y * stride, pixels + (vh - 1) * stride, stride);
 }
 
-void EncodeMaskBlock(const uint8_t* mask, uint32_t width, uint32_t height, ByteBuffer& out) {
+void EncodeMaskBlock(const uint8_t* mask, uint32_t width, uint32_t height, ByteBuffer& out, uint16_t sampleBits) {
+    if (sampleBits == 8) {
+        Deflate(mask, static_cast<size_t>(width) * height, 6, out);
+        return;
+    }
     const size_t rowBytes = (width + 7) / 8;
     ByteBuffer& bits = ThreadScratch();
     bits.resize(rowBytes * height);

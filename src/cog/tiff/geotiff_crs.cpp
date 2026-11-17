@@ -17,7 +17,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "cog/tiff/geotiff.h"
@@ -426,12 +429,83 @@ Defn GetDefn(const GeoKeyDirectory& k, const Db& db) {
     return d;
 }
 
-// Citation strings ("GCS Name = ...|Datum = ...|").
+bool StartsWithNoCase(std::string_view s, std::string_view prefix) {
+    return s.size() >= prefix.size() &&
+           std::equal(prefix.begin(), prefix.end(), s.begin(), [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+           });
+}
+
+// GDAL's ImagineCitationTranslation (gt_citation.cpp): the citation an ERDAS IMAGINE writer leaves
+// ("IMAGINE GeoTIFF Support", a copyright and a version line, then "Projection Name = ...",
+// "Units = ...", "NAD = ..." lines) rewritten as "PCS Name = ...|LUnits = ...|NAD = ...|"; ""
+// for any other citation. The extents follow GDAL's pointer arithmetic, quirks included.
+std::string ImagineCitationTranslation(const std::string& s, uint16_t key) {
+    if (!StartsWithNoCase(s, "IMAGINE GeoTIFF Support")) return {};
+    static constexpr std::string_view kKeyNames[] = {"NAD = ", "Datum = ", "Ellipsoid = ", "Units = "};
+    const auto n = static_cast<long long>(s.size());
+    const auto at = [&](long long i) { return i >= 0 && i < n ? s[size_t(i)] : '\0'; };
+    const auto find = [&](std::string_view what, long long from) {
+        const size_t f = s.find(what, size_t(from));
+        return f == std::string::npos ? -1LL : static_cast<long long>(f);
+    };
+    // The end of the value at `from`: its line, or the next key name.
+    const auto valueEnd = [&](long long from) {
+        long long end = n;
+        if (const long long nl = find("\n", from); nl >= 0) end = std::min(end, nl);
+        for (std::string_view k : kKeyNames) {
+            if (const long long f = find(k, from); f >= 0) end = std::min(end, f);
+        }
+        return end;
+    };
+    // s[from, end] with the trailing blanks dropped, as GDAL trims it; "" when nothing is left.
+    const auto trimmed = [&](long long from, long long end, std::string* out) {
+        if (at(end) == '\0' || at(end) == '\n' || at(end) == ' ') --end;
+        long long last = end - 1;
+        while (last >= 0 && (at(last) == ' ' || at(last) == '\0' || at(last) == '\n')) --last;
+        if (last != end - 1) end = last;
+        if (end < from) return false;
+        *out = s.substr(size_t(from), size_t(end - from + 1));
+        return true;
+    };
+
+    std::string out;
+    long long p = find("$", 0);
+    if (p >= 0 && find("\n", p) >= 0) p = find("\n", p) + 1;
+    if (p >= 0) {
+        std::string label;
+        if (key == geokey::kPCSCitation) label = find("Projection = ", 0) >= 0 ? "PRJ Name = " : "PCS Name = ";
+        else if (key == geokey::kGTCitation) label = "PCS Name = ";
+        else if (key == geokey::kGeogCitation && find("Unable to", p) < 0) label = "GCS Name = ";
+        if (!label.empty()) {
+            const long long end = valueEnd(p);
+            if (const long long f = find("Projection Name = ", 0); f >= 0) p = f + 18;
+            if (const long long f = find("Projection = ", 0); f >= 0) p = f + 13;
+            std::string name;
+            if (trimmed(p, end, &name)) out += label + name + "|";
+        }
+    }
+    for (std::string_view k : kKeyNames) {
+        const long long f = find(k, 0);
+        if (f < 0) continue;
+        const long long from = f + static_cast<long long>(k.size());
+        const long long end = valueEnd(from);
+        std::string value;
+        if (end > from && trimmed(from, end, &value)) out += (k == "Units = " ? std::string("LUnits = ") : std::string(k)) + value + "|";
+    }
+    return out;
+}
+
+// Citation strings ("GCS Name = ...|Datum = ...|"), parsed as GDAL's CitationStringParse after
+// ImagineCitationTranslation.
 struct Citation {
     std::string pcs, projection, lunits, gcs, datum, ellipsoid, primem, aunits;
 };
 
-Citation ParseCitation(const std::string& s, bool geogKey) {
+Citation ParseCitation(const std::string& text, uint16_t key) {
+    const std::string imagine = ImagineCitationTranslation(text, key);
+    const std::string& s = imagine.empty() ? text : imagine;
+    const bool geogKey = key == geokey::kGeogCitation;
     Citation c;
     bool found = false;
     size_t pos = 0;
@@ -440,10 +514,10 @@ Citation ParseCitation(const std::string& s, bool geogKey) {
         if (bar == std::string::npos) bar = s.size();
         const std::string part = s.substr(pos, bar - pos);
         pos = bar + 1;
-        auto take = [&](const char* key, std::string& dst) {
-            const size_t at = part.find(key);
+        auto take = [&](const char* label, std::string& dst) {
+            const size_t at = part.find(label);
             if (at != std::string::npos && dst.empty()) {
-                dst = part.substr(at + std::char_traits<char>::length(key));
+                dst = part.substr(at + std::char_traits<char>::length(label));
                 found = true;
             }
         };
@@ -481,6 +555,71 @@ std::string Quote(const std::string& s) {
 std::string Authority(int code) { return code > 0 && code < kUser ? ",AUTHORITY[\"EPSG\",\"" + std::to_string(code) + "\"]" : ""; }
 
 std::string Param(const char* name, double v) { return ",PARAMETER[\"" + std::string(name) + "\"," + Num(v) + "]"; }
+
+// A linear unit: name, size in metres and EPSG code (kUser for none).
+struct LinearUnit {
+    std::string name = "unknown";
+    double metres = 1.0;
+    int epsg = kUser;
+
+    // ",UNIT[...]" of WKT1.
+    std::string Wkt() const { return ",UNIT[" + Quote(name) + "," + Num(metres) + Authority(epsg) + "]"; }
+};
+
+// The linear unit of the keys (ProjLinearUnitsGeoKey or what GTIFGetDefn derived), named as
+// GTIFGetUOMLengthInfo names it ("unknown" without an identifier when proj.db does not know it).
+LinearUnit KeysLinearUnit(const Defn& d, const Db& db) {
+    LinearUnit u;
+    u.metres = d.uomLengthInMeters;
+    if (d.uomLength != kUser && db.Uom(d.uomLength, &u.name, nullptr, nullptr)) u.epsg = d.uomLength;
+    return u;
+}
+
+// strncasecmp(a, b, n) == 0, on views (the end of a view compares as a NUL).
+bool EqualNoCaseN(std::string_view a, std::string_view b, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        const int ca = i < a.size() ? std::tolower(static_cast<unsigned char>(a[i])) : 0;
+        const int cb = i < b.size() ? std::tolower(static_cast<unsigned char>(b[i])) : 0;
+        if (ca != cb) return false;
+        if (ca == 0) return true;
+    }
+    return true;
+}
+
+// GDAL's unit names of citations (apszUnitMap of gt_citation.cpp), in its search order.
+constexpr std::pair<std::string_view, double> kCitationUnits[] = {
+    {"meters", 1.0}, {"meter", 1.0}, {"m", 1.0}, {"centimeters", 0.01}, {"centimeter", 0.01}, {"cm", 0.01},
+    {"millimeters", 0.001}, {"millimeter", 0.001}, {"mm", 0.001}, {"kilometers", 1000.0}, {"kilometer", 1000.0},
+    {"km", 1000.0}, {"us_survey_feet", 0.3048006096012192}, {"us_survey_foot", 0.3048006096012192},
+    {"feet", 0.3048006096012192}, {"foot", 0.3048006096012192}, {"ft", 0.3048006096012192},
+    {"international_feet", 0.3048}, {"international_foot", 0.3048}, {"inches", 0.0254000508001},
+    {"inch", 0.0254000508001}, {"in", 0.0254000508001}, {"yards", 0.9144}, {"yard", 0.9144}, {"yd", 0.9144},
+    {"miles", 1304.544}, {"mile", 1304.544}, {"mi", 1304.544}, {"modified_american_feet", 0.3048122530},
+    {"modified_american_foot", 0.3048122530}, {"clarke_feet", 0.3047972651}, {"clarke_foot", 0.3047972651},
+    {"indian_feet", 0.3047995142}, {"indian_foot", 0.3047995142}, {"Yard_Indian", 0.9143985307444408},
+    {"Foot_Clarke", 0.30479726540}, {"Foot_Gold_Coast", 0.3047997101815088}, {"Link_Clarke", 0.2011661951640},
+    {"Yard_Sears", 0.9143984146160287}, {"50_Kilometers", 50000.0}, {"150_Kilometers", 150000.0}};
+
+// The linear unit a citation names ("LUnits = ", or "Units = " of an IMAGINE citation), as GDAL's
+// SetCitationToSRS reads it: the first table name that equals the citation's name without its last
+// character, ignoring case (GDAL's comparison length), else ProjLinearUnitSizeGeoKey. Nothing when
+// the citation names no unit, or names one of no size.
+std::optional<LinearUnit> CitationLinearUnit(const Citation& c, const GeoKeyDirectory& keys) {
+    if (c.lunits.empty()) return std::nullopt;
+    const size_t compared = c.lunits.size() - 1;
+    LinearUnit u;
+    u.name = c.lunits;
+    u.metres = 0.0;
+    for (const auto& [name, metres] : kCitationUnits) {
+        if (EqualNoCaseN(name, c.lunits, compared)) {
+            u.metres = metres;
+            break;
+        }
+    }
+    if (u.metres == 0.0) u.metres = keys.Double(geokey::kProjLinearUnitSize).value_or(0.0);
+    if (!(u.metres > 0.0)) return std::nullopt;
+    return u;
+}
 
 // The PROJECTION and PARAMETER nodes of GDAL's projection switch. Angles in degrees on input,
 // written in `angUnitDeg` units; lengths in metres, written in `linUnitM` units.
@@ -600,6 +739,16 @@ bool ProjectionWkt(const Defn& d, double angUnitDeg, double linUnitM, std::strin
     return true;
 }
 
+// The prime meridian, in degrees, of the CRS PROJ reads from `wkt`; `fallback` when it cannot.
+double PrimeMeridianDegrees(const Db& db, const std::string& wkt, double fallback) {
+    PjPtr c = crs::detail::CreateCrs(db.ctx(), wkt);
+    if (c && proj_get_type(c.get()) == PJ_TYPE_BOUND_CRS) c.reset(proj_get_source_crs(db.ctx(), c.get()));
+    PjPtr pm(c ? proj_get_prime_meridian(db.ctx(), c.get()) : nullptr);
+    double longitude = 0, toRadians = 0;
+    if (!pm || !proj_prime_meridian_get_parameters(db.ctx(), pm.get(), &longitude, &toRadians, nullptr)) return fallback;
+    return longitude * toRadians * 180.0 / kPi;
+}
+
 bool ExistsInDb(const Db& db, int code, PJ_CATEGORY cat) { return static_cast<bool>(db.Create(code, cat)); }
 
 std::string WktOf(const Db& db, PJ* obj, PJ_WKT_TYPE type) {
@@ -648,11 +797,20 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
     if (d.model != 1 && d.model != 2 && d.model != 3) {
         if (const size_t at = pcsCitation.find(kPe); at != std::string::npos) return pcsCitation.substr(at + kPe.size());
         std::string name = !gtCitation.empty() ? gtCitation : !geogCitation.empty() ? geogCitation : "unnamed";
-        std::string unitName = "unknown";
-        if (d.uomLength != kUser) db.Uom(d.uomLength, &unitName, nullptr, nullptr);
-        return "LOCAL_CS[" + Quote(name) + ",UNIT[" + Quote(unitName) + "," + Num(d.uomLengthInMeters) +
-               Authority(d.uomLength) + "]]";
+        return "LOCAL_CS[" + Quote(name) + KeysLinearUnit(d, db).Wkt() + "]";
     }
+
+    // The linear unit of a projected CRS, as GDAL sets it: the unit a citation names (SetCitationToSRS
+    // reads the GT citation last, and the PCS citation for a user-defined PCS only), else the unit
+    // of the keys. The projection parameters are lengths in metres (GTIFFetchProjParms), so they
+    // keep their place whatever unit the coordinates are in.
+    const auto projectedUnit = [&]() {
+        if (auto u = CitationLinearUnit(ParseCitation(gtCitation, kGTCitation), keys)) return *u;
+        if (d.pcs == kUser) {
+            if (auto u = CitationLinearUnit(ParseCitation(pcsCitation, kPCSCitation), keys)) return *u;
+        }
+        return KeysLinearUnit(d, db);
+    };
 
     std::string horizontal;  // definition of the horizontal CRS
     bool horizontalIsEpsg = false;
@@ -664,18 +822,23 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
     if (onlyPcs) {
         PjPtr pcs = db.Create(d.pcs, PJ_CATEGORY_CRS);
         if (pcs && proj_get_type(pcs.get()) == PJ_TYPE_PROJECTED_CRS) {
-            // A ProjLinearUnitsGeoKey different from the EPSG unit changes the units (#6210).
+            // A linear unit (ProjLinearUnitsGeoKey, a citation) other than the EPSG one changes the
+            // unit of the coordinates and re-expresses the parameters in it, as GDAL's
+            // SetLinearUnitsAndUpdateParameters does (#6210): the same place, other numbers.
+            const LinearUnit unit = projectedUnit();
             int epsgUom = kUser;
             db.PcsInfo(d.pcs, nullptr, nullptr, &epsgUom, nullptr);
             double epsgFactor = 1.0;
             db.Uom(epsgUom, nullptr, &epsgFactor, nullptr);
-            if (std::fabs(d.uomLengthInMeters - epsgFactor) > 1e-15 * d.uomLengthInMeters) {
-                std::string unitName = "unknown";
-                if (d.uomLength != kUser) db.Uom(d.uomLength, &unitName, nullptr, nullptr);
-                const std::string code = std::to_string(d.uomLength);
-                PjPtr altered(proj_crs_alter_parameters_linear_unit(
-                    db.ctx(), pcs.get(), unitName.c_str(), d.uomLengthInMeters, d.uomLength != kUser ? "EPSG" : nullptr,
-                    d.uomLength != kUser ? code.c_str() : nullptr, 1));
+            if (std::fabs(unit.metres - epsgFactor) > 1e-15 * unit.metres) {
+                const std::string code = std::to_string(unit.epsg);
+                const char* auth = unit.epsg != kUser ? "EPSG" : nullptr;
+                const char* authCode = unit.epsg != kUser ? code.c_str() : nullptr;
+                PjPtr parameters(proj_crs_alter_parameters_linear_unit(db.ctx(), pcs.get(), unit.name.c_str(), unit.metres,
+                                                                       auth, authCode, 1));
+                PjPtr altered(parameters ? proj_crs_alter_cs_linear_unit(db.ctx(), parameters.get(), unit.name.c_str(),
+                                                                         unit.metres, auth, authCode)
+                                         : nullptr);
                 if (!altered) return Corrupt("cannot change the linear unit of EPSG:" + std::to_string(d.pcs));
                 horizontal = WktOf(db, altered.get(), PJ_WKT2_2019);
             } else {
@@ -694,7 +857,7 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
         bool namesFromCitation = false;
         std::string tmp;
         if (!(d.gcs != kUser && db.GcsInfo(d.gcs, &geogName, nullptr, nullptr, nullptr)) && !geogCitation.empty()) {
-            const Citation c = ParseCitation(geogCitation, true);
+            const Citation c = ParseCitation(geogCitation, kGeogCitation);
             geogName = c.gcs;
             datumName = c.datum;
             pmName = c.primem;
@@ -753,7 +916,7 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
         if (towgs.size() != 7) towgs.clear();
         if (gcsValid && !keysOverride && towgs.empty()) geogIsPlainEpsg = true;
 
-        std::string w = "GEOGCS[" + Quote(geogName) + ",DATUM[" + Quote(datumName.empty() ? "unknown" : datumName) +
+        std::string w = "GEOGCS[" + Quote(geogName) + ",DATUM[" + Quote(datumName.empty() ? "unnamed" : datumName) +
                         ",SPHEROID[" + Quote(spheroidName.empty() ? "unnamed" : spheroidName) + "," + Num(semiMajor) + "," +
                         Num(invFlattening) + Authority(d.ellipsoid) + "]";
         if (!towgs.empty()) {
@@ -761,11 +924,10 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
             for (size_t i = 0; i < 7; ++i) w += (i ? "," : "") + Num(towgs[i]);
             w += "]";
         }
-        // GDAL passes the prime meridian (degrees) to OGRSpatialReference::SetGeogCS together with
-        // the angular unit, then re-imports its WKT1 when that unit is not the degree (the
-        // "test_tiff_grads" normalisation): the WKT1 value ends up as offset * unit-in-degrees.
-        // OGRSpatialReference::SetGeogCS builds them through PROJ: a prime meridian of a name only,
-        // the angular unit EPSG's degree or grad by its name, else a unit without identifier
+        // OGRSpatialReference::SetGeogCS builds them through PROJ (proj_create_geographic_crs): a
+        // datum without a name is "unnamed"; a prime meridian without one is "Greenwich" at 0,
+        // else "unnamed", and has no identifier; the angular unit is EPSG's degree or grad by its
+        // name, else a unit without identifier.
         const auto unitAuthority = [](const std::string& unit) {
             const auto is = [&](std::string_view n) {
                 return unit.size() == n.size() && std::equal(unit.begin(), unit.end(), n.begin(), [](char a, char b) {
@@ -774,9 +936,26 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
             };
             return is("degree") ? Authority(9122) : is("grad") ? Authority(9105) : std::string();
         };
-        w += Authority(d.datum) + "],PRIMEM[" + Quote(pmName.empty() ? "Greenwich" : pmName) + "," +
-             Num(pmLong * angInDeg) + "],UNIT[" + Quote(angularUnits) + "," + Num(angInDeg * kDegToRad) +
-             unitAuthority(angularUnits) + "]";
+        if (pmName.empty()) pmName = pmLong == 0.0 ? "Greenwich" : "unnamed";
+        const auto withPrimeMeridian = [&](double value) {
+            return w + Authority(d.datum) + "],PRIMEM[" + Quote(pmName) + "," + Num(value) +
+                   "],UNIT[" + Quote(angularUnits) + "," + Num(angInDeg * kDegToRad) + unitAuthority(angularUnits) + "]";
+        };
+        // The prime meridian goes through GDAL's WKT1 round trips: GDAL gives it in degrees to
+        // SetGeogCS, and each export of the CRS to WKT1 (WKT1_GDAL writes PRIMEM in degrees) read
+        // back by PROJ (which reads PRIMEM in the unit of the GEOGCS) takes the value written in
+        // degrees as a value in that unit. GDAL makes such a round trip when it sets the EPSG code
+        // of the datum or of the ellipsoid (SetAuthority edits the WKT1 node tree), and again,
+        // with an angular unit other than the degree, to normalise the parameters to it (the
+        // "test_tiff_grads" export and import). The last one is the parsing of the WKT written
+        // here, so the value is written in degrees as GDAL writes it, after the first round trip
+        // when there is one. PROJ recognises some meridians written in degrees under another unit
+        // (Paris as 2.33722917 under grads), so the round trip is done by PROJ, not computed:
+        // Paris stays at 2.5969213 grad, an unrecognised meridian ends up at value * unit.
+        const bool datumOrEllipsoidCodeSet =
+            (d.datum != kUser || d.ellipsoid != kUser) && !(d.gcs != kUser && d.model != 3 && !gcsValid);
+        if (datumOrEllipsoidCodeSet && angInDeg != 1.0) pmLong = PrimeMeridianDegrees(db, withPrimeMeridian(pmLong) + "]", pmLong);
+        w = withPrimeMeridian(pmLong);
         if (gcsValid) w += Authority(d.gcs);
         w += "]";
         geogWkt = w;
@@ -794,14 +973,11 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
     // ---- Geocentric --------------------------------------------------------------------------
     if (horizontal.empty() && d.model == 3) {
         std::string name = !gtCitation.empty() ? gtCitation : !geogCitation.empty() ? geogCitation : "unnamed";
-        std::string unitName = "unknown";
-        if (d.uomLength != kUser) db.Uom(d.uomLength, &unitName, nullptr, nullptr);
         // GEOGCS[...] -> its DATUM and PRIMEM, inside a GEOCCS.
         const size_t datumAt = geogWkt.find(",DATUM[");
         const size_t unitAt = geogWkt.rfind(",UNIT[");
         if (datumAt == std::string::npos || unitAt == std::string::npos) return Corrupt("geocentric CRS");
-        horizontal = "GEOCCS[" + Quote(name) + geogWkt.substr(datumAt, unitAt - datumAt) + ",UNIT[" + Quote(unitName) + "," +
-                     Num(d.uomLengthInMeters) + Authority(d.uomLength) + "]]";
+        horizontal = "GEOCCS[" + Quote(name) + geogWkt.substr(datumAt, unitAt - datumAt) + KeysLinearUnit(d, db).Wkt() + "]";
     }
 
     // ---- Projected from keys -------------------------------------------------------------------
@@ -811,19 +987,17 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
         if (d.pcs != kUser) db.PcsInfo(d.pcs, &name, nullptr, nullptr, nullptr);
         if (name.empty() && !pcsCitation.empty()) {
             if (const size_t at = pcsCitation.find(kPe); at != std::string::npos) return pcsCitation.substr(at + kPe.size());
-            const Citation c = ParseCitation(pcsCitation, false);
+            const Citation c = ParseCitation(pcsCitation, kPCSCitation);
             if (!c.pcs.empty()) name = c.pcs;
             else if (pcsCitation.rfind("LUnits = ", 0) != 0) name = pcsCitation;
         }
         if (const size_t at = gtCitation.find(kPe); at != std::string::npos) return gtCitation.substr(at + kPe.size());
         if (name.empty() && !gtCitation.empty()) {
-            const Citation c = ParseCitation(gtCitation, false);
+            const Citation c = ParseCitation(gtCitation, kGTCitation);
             name = !c.pcs.empty() ? c.pcs : gtCitation;
         }
         if (name.empty()) name = "unnamed";
-        std::string unitName = "unknown";
-        if (d.uomLength != kUser) db.Uom(d.uomLength, &unitName, nullptr, nullptr);
-        const std::string unit = ",UNIT[" + Quote(unitName) + "," + Num(d.uomLengthInMeters) + Authority(d.uomLength) + "]";
+        const LinearUnit unit = projectedUnit();
         const bool pcsValid = d.pcs != kUser && ExistsInDb(db, d.pcs, PJ_CATEGORY_CRS);
         const double angUnitDeg = d.uomAngleInDegrees == 0 ? 1.0 : d.uomAngleInDegrees;
 
@@ -832,18 +1006,18 @@ Expected<std::string> GeoKeysToCrsDefinition(const GeoKeyDirectory& keys) {
             PjPtr conv = db.Create(d.projCode, PJ_CATEGORY_COORDINATE_OPERATION);
             PjPtr geog = crs::detail::CreateCrs(db.ctx(), geogWkt);
             if (!conv || !geog) return Unsupported("projection EPSG:" + std::to_string(d.projCode));
-            PjPtr cs(proj_create_cartesian_2D_cs(db.ctx(), PJ_CART2D_EASTING_NORTHING, unitName.c_str(), d.uomLengthInMeters));
+            PjPtr cs(proj_create_cartesian_2D_cs(db.ctx(), PJ_CART2D_EASTING_NORTHING, unit.name.c_str(), unit.metres));
             PjPtr base(proj_crs_get_geodetic_crs(db.ctx(), geog.get()));
             PjPtr pcs(proj_create_projected_crs(db.ctx(), name.c_str(), base ? base.get() : geog.get(), conv.get(), cs.get()));
             if (!pcs) return Unsupported("cannot build a projected CRS from EPSG conversion " + std::to_string(d.projCode));
             horizontal = WktOf(db, pcs.get(), PJ_WKT2_2019);
         } else {
             std::string projWkt;
-            if (!ProjectionWkt(d, angUnitDeg, d.uomLengthInMeters == 0 ? 1.0 : d.uomLengthInMeters, &projWkt)) {
+            if (!ProjectionWkt(d, angUnitDeg, unit.metres == 0 ? 1.0 : unit.metres, &projWkt)) {
                 // GDAL: an unknown transform makes a LOCAL_CS of the same name.
-                horizontal = "LOCAL_CS[" + Quote(name) + unit + "]";
+                horizontal = "LOCAL_CS[" + Quote(name) + unit.Wkt() + "]";
             } else {
-                horizontal = "PROJCS[" + Quote(name) + "," + geogWkt + projWkt + unit + (pcsValid ? Authority(d.pcs) : "") + "]";
+                horizontal = "PROJCS[" + Quote(name) + "," + geogWkt + projWkt + unit.Wkt() + (pcsValid ? Authority(d.pcs) : "") + "]";
             }
         }
     }

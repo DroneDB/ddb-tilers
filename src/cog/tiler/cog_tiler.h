@@ -13,12 +13,12 @@
 //
 // Semantics kept from DroneDB's GDAL tiler: the inverted tms flag; the bounds of
 // getMinMaxCoordsForZ (a plain tile outside them is blank, a tile with visualisation parameters
-// fails "Out of bounds"); geoQuery's windows; GDAL's overview choice and nearest sampling; the
-// data bands (dataBandCount; at most 3 shown); Byte bands as they are, other types stretched over
-// the exact statistics (one band: its minimum to maximum; several: mean +- 2.33 sigma clamped to
-// them; truncating stretchToByte, NaN shown as 255); the alpha of the alpha band or the mask; the
+// fails "Out of bounds"); GDAL's overview choice and nearest sampling; the data bands
+// (dataBandCount; at most 3 shown); Byte bands as they are, other types stretched over the exact
+// statistics (one band: its minimum to maximum; several: mean +- 2.33 sigma clamped to them;
+// truncating stretchToByte, NaN shown as 255); the alpha of the alpha band or the mask; the
 // visualisation parameters (preset, bands, formula, colormap, rescale, NoData override, a single
-// band painted with a colormap).
+// band painted with a colormap). The sampling mode (SamplingMode) says where a tile reads.
 #pragma once
 
 #include "core/tile/compat.h"
@@ -37,9 +37,14 @@ namespace ddbt::cog::tiler {
 
 /// How tile pixels are sampled.
 enum class SamplingMode : uint8_t {
-    /// GDAL's RasterIO on DroneDB's geoQuery window: the baseline's pixels (and its seams).
+    /// DroneDB 2.4.1's tiles, bit for bit: GDAL's RasterIO on the window of gdal2tiles' geoQuery,
+    /// whose integer rounding moves a tile by up to a pixel of the level it reads (a raster off
+    /// the tile grid, zooms below the smallest overview) and seams tiles.
     kCompat,
-    /// The overview from the zoom and the pixel under each tile pixel's centre: no seams.
+    /// The overview from the zoom and the pixel under each tile pixel's centre, on the file and on
+    /// the warped grid alike: tiles where GDAL draws them, no seams, enlarged pixels at any zoom.
+    /// The plain tile draws a palette band in the colours of its table, NaN transparent and two
+    /// bands (other than alpha) as red and green, with the alpha of the alpha band or the mask.
     kDefault,
 };
 
@@ -78,7 +83,7 @@ tile::compat::TileExtent Extent(const std::string& path, int tileSize);
 /// The largest working buffer the calling thread keeps between renders (tests).
 size_t TileScratchBytes();
 
-/// The process-wide sampling mode (DDBT_TILER_MODE=compat|default; compat when unset).
+/// The process-wide sampling mode (DDBT_TILER_MODE=compat|default; default when unset).
 SamplingMode GetSamplingMode();
 void SetSamplingMode(SamplingMode mode);
 

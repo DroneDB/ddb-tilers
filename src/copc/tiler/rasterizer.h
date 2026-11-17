@@ -27,6 +27,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <numbers>
 #include <vector>
 
 namespace ddbt::copc::tiler {
@@ -91,6 +92,11 @@ class SplatRasterizer {
 public:
     /// Disc radius: both discs lie within offsets -kRadius..kRadius of their anchor pixel.
     static constexpr int kRadius = 2;
+    /// The widest spacing, in pixels, of points that the 13-pixel disc draws without a gap
+    /// between them: on a square grid of pitch p, the pixel farthest from every point is at the
+    /// centre of a cell, p / sqrt(2) from its corners, so the discs meet when p <= kRadius x
+    /// sqrt(2) (2.83 px).
+    static constexpr double kGaplessSpacing = kRadius * std::numbers::sqrt2;
 
     enum class Disc : uint8_t {
         /// The 13-pixel disc dx^2 + dy^2 <= 4 (dx, dy in -2..2), symmetric around the anchor.

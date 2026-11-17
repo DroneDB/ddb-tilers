@@ -4,14 +4,16 @@
 // the skipped WAVEPACKET14 layer) and the chunk-table offset -1, PLY (ASCII, binary LE / BE),
 // XYZ / PTS detection and conversions, E57 (synthetic files: CRC-checked pages, bitpacked
 // integers split across packets, scaled integers, spherical coordinates, poses, limits), the
-// XML parser and CRC-32C.
+// XML parser and CRC-32C; LAZ items of LASzip 1.x and a PLY magic word with trailing spaces.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -21,6 +23,7 @@
 #include "copc/readers/convert.h"
 #include "copc/readers/e57_reader.h"
 #include "copc/readers/las_reader.h"
+#include "copc/readers/ply_reader.h"
 #include "copc/readers/point_reader.h"
 #include "core/simd/simd.h"
 #include "core/util/endian.h"
@@ -185,6 +188,74 @@ TEST(CopcReaders, PlyAsciiAndBinary) {
         EXPECT_EQ(recs[rec::kReturns], 0x11);  // return 1 of 1
     }
     fs::remove_all(dir);
+}
+
+TEST(CopcReaders, LazItemsOfLaszip1AreRefusedByName) {
+    // LASzip 1.x stored its items in version 1: refused as such, not read as truncated chunks
+    const std::string dir = TempDir();
+    SynthLas s;
+    s.format = 3;
+    s.minor = 2;
+    s.laz = true;
+    s.chunkSize = 100;
+    FillRandom(s, 300, 7);
+    std::vector<uint8_t> b = BuildLasBytes(s);
+    ASSERT_TRUE(WriteBytes(dir + "/v2.laz", b));
+    const char kUser[] = "laszip encoded";
+    const auto at = std::search(b.begin(), b.end(), kUser, kUser + sizeof(kUser) - 1);
+    ASSERT_NE(at, b.end());
+    // The record of the VLR follows its 54-byte header (2 reserved, 16 user, 2 + 2 + 32);
+    // its items start at byte 34: type, size and version of each
+    const size_t record = static_cast<size_t>(at - b.begin()) - 2 + 54;
+    const uint16_t items = LoadLE<uint16_t>(b.data() + record + 32);
+    ASSERT_GE(items, 3u);
+    for (uint16_t i = 0; i < items; ++i) StoreLE<uint16_t>(b.data() + record + 34 + 6 * i + 4, 1);
+    ASSERT_TRUE(WriteBytes(dir + "/v1.laz", b));
+
+    EXPECT_TRUE(LasReader::Open(dir + "/v2.laz").ok());
+    auto r = LasReader::Open(dir + "/v1.laz");
+    ASSERT_FALSE(r.ok());
+    EXPECT_NE(r.status().ToString().find("LASzip 1.x"), std::string::npos) << r.status().ToString();
+    fs::remove_all(dir);
+}
+
+TEST(CopcReaders, PlyMagicWithTrailingSpacesReads) {
+    // PDAL's simple_text.ply: "ply " then CRLF lines; any other first line is not a PLY
+    const std::string dir = TempDir();
+    const std::string body = "format ascii 1.0\r\nelement vertex 3\r\nproperty float x\r\nproperty float y\r\n"
+                             "property float z \r\nend_header\r\n-1 0 0\r\n 0 1 0\r\n 1 0 0 \r\n";
+    WriteText(dir + "/space.ply", "ply \r\n" + body);
+    WriteText(dir + "/tab.ply", "ply\t\n" + body);
+    WriteText(dir + "/word.ply", "plyx\n" + body);
+    for (const char* name : {"/space.ply", "/tab.ply"}) {
+        SCOPED_TRACE(name);
+        auto r = OpenReader(dir + name);
+        ASSERT_TRUE(r.ok()) << r.status().ToString();
+        EXPECT_EQ((*r)->Info().pointCount, 3u);
+        const OutputSpec spec = Spec(6);
+        const auto recs = ReadAll(**r, spec);
+        ASSERT_EQ(recs.size(), 3 * spec.RecordSize());
+        EXPECT_EQ(X(recs, spec, 0, 0), -1000);
+        EXPECT_EQ(X(recs, spec, 2, 0), 1000);
+    }
+    EXPECT_FALSE(PlyReader::Open(dir + "/word.ply", ReaderOptions{}).ok());
+    fs::remove_all(dir);
+}
+
+// The integer of a coordinate decides whether it fits: a coordinate computed back from the
+// largest integer (int * scale + offset) divides to a rounding error past it and still fits, half
+// a step past it does not; the smallest int32 fits too.
+TEST(CopcReaders, QuantizeCoordinateFitsTheIntegersOfTheWholeInt32Range) {
+    const double scale = 3.4702614131804454e-08, offset = 3.9132270813382632;
+    const double top = 2147483647.0 * scale + offset, bottom = -2147483648.0 * scale + offset;
+    ASSERT_GT((top - offset) / scale, 2147483647.0);
+    EXPECT_EQ(QuantizeCoordinate(top, scale, offset), std::optional<int32_t>(INT32_MAX));
+    EXPECT_EQ(QuantizeCoordinate(bottom, scale, offset), std::optional<int32_t>(INT32_MIN));
+    EXPECT_EQ(QuantizeCoordinate(top + 0.6 * scale, scale, offset), std::nullopt);
+    EXPECT_EQ(QuantizeCoordinate(bottom - 0.6 * scale, scale, offset), std::nullopt);
+    EXPECT_EQ(QuantizeCoordinate(2.5, 1, 0), std::optional<int32_t>(3));  // half away from zero, as PDAL rounds
+    EXPECT_EQ(QuantizeCoordinate(-2.5, 1, 0), std::optional<int32_t>(-3));
+    EXPECT_EQ(QuantizeCoordinate(std::nan(""), 0.01, 0), std::nullopt);
 }
 
 TEST(CopcReaders, XyzDetectionAsDroneDb) {

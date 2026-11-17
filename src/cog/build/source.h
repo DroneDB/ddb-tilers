@@ -101,7 +101,8 @@ public:
     /// BlockWidth() pixels, every band interleaved, host order. Returns the number of rows of
     /// the block (the last ones may be shorter). Safe to call concurrently.
     virtual Expected<uint32_t> ReadBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
-    /// Decodes block (col, row) of the per-dataset mask as bytes 0 / 255 (rows of BlockWidth()).
+    /// Decodes block (col, row) of the per-dataset mask as bytes (rows of BlockWidth()): 0 / 255 for a
+    /// 1-bit mask, the values of an 8-bit one.
     virtual Status ReadMaskBlock(uint32_t col, uint32_t row, uint8_t* out) const = 0;
     /// Where a source that decodes its whole image (a photo) writes it when it does not fit in
     /// memory: a scratch file "<base>.<pid>.<n>.tmp" (by default "ddbt-image" in the system's

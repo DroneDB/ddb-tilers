@@ -543,6 +543,7 @@ void CogSource::Init(const std::string& path, const std::string& canonicalPath, 
     }
     for (int b = 1; b <= n; ++b)
         if (bands_[static_cast<size_t>(b - 1)].interp == ColorInterp::kAlpha && alphaBand_ == 0) alphaBand_ = b;
+    if (bands_[0].interp == ColorInterp::kPalette) colorTable_ = tiff::GdalColorTable(main);
 
     // The mask of band 1 (GTiffRasterBand::GetMaskBand, then GDALRasterBand::GetMaskBand).
     if (l0.maskIfd) {

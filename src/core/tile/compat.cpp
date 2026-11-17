@@ -215,8 +215,11 @@ bool TileWindow(const RasterTiling& t, int tz, int tx, int ty, GQResult& g) noex
 
 ZoomRange PointCloudZoomRange(const GlobalMercator& m, double oMinX, double oMinY, double oMaxX, double oMaxY,
                               int span) noexcept {
+    const double width = oMaxX - oMinX, height = oMaxY - oMinY;
+    const double shorter = std::min(width, height), longer = std::max(width, height);
+    const double length = shorter > 0 ? shorter : longer > 0 ? longer : kPointCloudLengthOfNoExtent;
     ZoomRange z;
-    z.min = m.zoomForLength(std::min(oMaxX - oMinX, oMaxY - oMinY));
+    z.min = m.zoomForLength(length);
     z.max = z.min + static_cast<int>(std::round(std::log(static_cast<double>(span) / 4.0) / std::log(2)));
     return z;
 }

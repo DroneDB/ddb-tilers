@@ -2,9 +2,9 @@
 //
 // The decoded-block cache of the tiler: one process-wide ShardedLru (core/cache) keyed by
 // (source id, IFD, block index), byte budget (BlockCacheBudgetFor, DDBT_BLOCK_CACHE_MB), single-flight
-// loads (concurrent misses of one block decode it once). Masks (1-bit IFDs) are cached expanded
-// to bytes 0 / 255 with a summary (all 0, all 255, mixed), so a tile can tell from the summaries
-// alone that it is blank or opaque without decoding imagery.
+// loads (concurrent misses of one block decode it once). Masks are cached as bytes (a 1-bit mask
+// expanded to 0 / 255, an 8-bit one as it is) with a summary (all 0, all 255, mixed), so a tile can
+// tell from the summaries alone that it is blank or opaque without decoding imagery.
 #pragma once
 
 #include <cstddef>
@@ -21,7 +21,7 @@ class CogSource;
 enum class MaskSummary : uint8_t { kMixed, kAllZero, kAllOne };
 
 struct CachedBlock {
-    tiff::DecodedBlock block;  // for masks: one byte per pixel, 0 or 255
+    tiff::DecodedBlock block;  // for masks: one byte per pixel (0 or 255 for a 1-bit mask)
     MaskSummary summary = MaskSummary::kMixed;
     /// Sample bytes of one pixel in the buffer.
     size_t pixelBytes = 1;

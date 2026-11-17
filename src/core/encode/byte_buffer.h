@@ -68,14 +68,22 @@ public:
         append(src, n);
     }
 
+    /// Trims the allocation to the size: a buffer that is kept (an encoded block waiting to be
+    /// written) does not pin the worst-case bound its encoder reserved.
+    void shrink_to_fit() noexcept {
+        if (data_ == nullptr || size_ == capacity_) return;
+        // Shrinking realloc: on failure the original block stays valid.
+        if (void* q = std::realloc(data_, size_ == 0 ? 1 : size_)) {
+            data_ = static_cast<uint8_t*>(q);
+            capacity_ = size_ == 0 ? 1 : size_;
+        }
+    }
+
     /// Hands the bytes to the caller (free with std::free / ddbtFree); the buffer is left empty.
     /// The allocation is trimmed to the size first, so a tile does not pin its worst-case bound.
     uint8_t* release() noexcept {
+        shrink_to_fit();
         uint8_t* p = data_;
-        if (p != nullptr && size_ < capacity_) {
-            // Shrinking realloc: on failure the original block stays valid.
-            if (void* q = std::realloc(p, size_ == 0 ? 1 : size_)) p = static_cast<uint8_t*>(q);
-        }
         data_ = nullptr;
         size_ = 0;
         capacity_ = 0;

@@ -172,6 +172,25 @@ BitsSummary SummarizeBits(const uint8_t* in, size_t inRowStride, uint32_t width,
     return {any0, any1};
 }
 
+MaskBytesSummary SummarizeMaskBytes(const uint8_t* in, size_t inRowStride, uint32_t width, uint32_t rows) {
+    MaskBytesSummary s;
+    for (uint32_t r = 0; r < rows && !(s.any0 && s.any255 && s.anyBetween); ++r) {
+        const uint8_t* row = in + r * inRowStride;
+        // Branch-free over the row (vectorised): 0 and 255 counted, anything else flagged
+        bool zero = false, full = false, between = false;
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint8_t v = row[x];
+            zero |= v == 0;
+            full |= v == 255;
+            between |= static_cast<uint8_t>(v - 1) < 254;
+        }
+        s.any0 = s.any0 || zero;
+        s.any255 = s.any255 || full;
+        s.anyBetween = s.anyBetween || between;
+    }
+    return s;
+}
+
 Status TiffReader::CheckDecodable(uint32_t ifd) const {
     if (ifd >= ifds_.size()) return OutOfRange("IFD " + std::to_string(ifd) + " does not exist");
     const IfdInfo& i = ifds_[ifd];

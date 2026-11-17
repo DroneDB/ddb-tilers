@@ -146,6 +146,12 @@ public:
     /// JPEG compression (JPEG COGs: the reader decodes YCbCr to RGB).
     bool IsJpeg() const noexcept;
 
+    /// The colour table of band 1 when it is a palette band (GDALGetRasterColorTable: RGBA entries,
+    /// the entry of the NoData value transparent), else null.
+    const std::vector<std::array<uint8_t, 4>>* ColorTable() const noexcept {
+        return colorTable_ ? &*colorTable_ : nullptr;
+    }
+
     /// 1-based band whose colour interpretation is alpha (GDALTiler::FindAlphaBand), 0 if none.
     int AlphaBand() const noexcept { return alphaBand_; }
     MaskKind Mask() const noexcept { return mask_; }
@@ -197,6 +203,7 @@ private:
     PixelType type_ = PixelType::kU8;
     bool pixelInterleaved_ = true;
     int alphaBand_ = 0;
+    std::optional<std::vector<std::array<uint8_t, 4>>> colorTable_;
     MaskKind mask_ = MaskKind::kAllValid;
     bool webMercator_ = false;
     std::unique_ptr<WarpModel> warp_;

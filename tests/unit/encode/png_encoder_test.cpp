@@ -327,3 +327,19 @@ TEST(PngEncoder, ReleasedBytesAreMallocOwned) {
     EXPECT_EQ(DecodePng(p, n).ok, true);
     std::free(p);  // ddbtFree
 }
+
+TEST(ByteBuffer, ShrinkToFitKeepsTheBytesInTheirSize) {
+    // A buffer kept after encoding (a block waiting in the COG writer) holds its size, not the
+    // bound its encoder reserved
+    ByteBuffer b;
+    b.reserve(1 << 20);
+    b.assign("block", 5);
+    EXPECT_EQ(b.capacity(), size_t{1} << 20);
+    b.shrink_to_fit();
+    EXPECT_EQ(b.size(), 5u);
+    EXPECT_EQ(b.capacity(), 5u);
+    EXPECT_EQ(std::memcmp(b.data(), "block", 5), 0);
+    ByteBuffer none;
+    none.shrink_to_fit();
+    EXPECT_EQ(none.data(), nullptr);
+}

@@ -385,6 +385,15 @@ struct BitsSummary {
 };
 BitsSummary SummarizeBits(const uint8_t* in, size_t inRowStride, uint32_t width, uint32_t rows);
 
+/// Which values rows of an 8-bit mask hold, over `width` bytes of each of `rows` rows: 0
+/// (transparent), 255 (opaque) and any other (between them: a graded mask).
+struct MaskBytesSummary {
+    bool any0 = false;
+    bool any255 = false;
+    bool anyBetween = false;
+};
+MaskBytesSummary SummarizeMaskBytes(const uint8_t* in, size_t inRowStride, uint32_t width, uint32_t rows);
+
 /// The colour table GDAL gives band 1 of an image (GTiffDataset's), whatever the samples of a pixel
 /// (a palette band and an alpha band among them): its ColorMap as TIFFColorMapTagToColorTable reads
 /// it (values in [0, 255] already 8-bit, all multiples of 256 divided by 256, the others by 257; the

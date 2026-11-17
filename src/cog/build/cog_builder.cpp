@@ -25,6 +25,7 @@
 #include "cog/pyramid/average.h"
 #include "cog/pyramid/overview.h"
 #include "cog/tiff/gdal_metadata.h"
+#include "cog/warp/bilinear.h"
 #include "cog/warp/warp_producer.h"
 #include "core/exec/parallel_for.h"
 #include "core/exec/task_group.h"
@@ -179,7 +180,10 @@ Expected<Plan> OwnGridPlan(const RasterSource& src, const BuildOptions& o) {
     for (int b = 0; b < p.bands; ++b) interps.push_back(src.ColorInterp(b));
     SetPhotometric(p, interps);
     if (src.NoData()) {
-        p.transparency = Transparency::kNoData;
+        // A mask (the source's, else of the pixels where not every band is at nodata) beside the nodata
+        // of several bands
+        const bool mask = src.AlphaBand() < 0 && !src.Complex() && NodataNeedsMask(p.bands);
+        p.transparency = mask ? Transparency::kMask : Transparency::kNoData;
         p.nodata = src.NoData();
         p.nodataText = src.NoDataText();
     } else if (src.HasMask()) {
@@ -217,7 +221,11 @@ Expected<Plan> OwnGridPlan(const RasterSource& src, const BuildOptions& o) {
 
 class OwnGridProducer final : public TileProducer {
 public:
-    OwnGridProducer(const RasterSource& src, const Plan& plan) : src_(src), plan_(plan) {}
+    OwnGridProducer(const RasterSource& src, const Plan& plan) : src_(src), plan_(plan) {
+        for (int b = 0; b < plan.bands; ++b) bandOffsets_.push_back(static_cast<size_t>(b) * plan.SampleSize());
+        // The source's mask copied into a 1-bit one: is it more than transparent and opaque (an 8-bit mask)?
+        detectGraded_ = plan.MaskOut() && !plan.gradedMask && src.HasMask();
+    }
 
     void Produce(uint32_t col, Strip& s) override {
         thread_local std::vector<uint8_t> block, mask;
@@ -232,19 +240,32 @@ public:
             std::memcpy(s.Pixel(x0, y), block.data() + static_cast<size_t>(y) * bw * pb, static_cast<size_t>(vw) * pb);
         if (plan_.MaskOut()) {
             mask.resize(static_cast<size_t>(bw) * src_.BlockHeight());
-            const Status st = src_.ReadMaskBlock(col, s.row, mask.data());
-            if (!st.ok()) throw std::runtime_error(std::string(st.message()));
+            if (src_.HasMask()) {
+                const Status st = src_.ReadMaskBlock(col, s.row, mask.data());
+                if (!st.ok()) throw std::runtime_error(std::string(st.message()));
+            } else {
+                // The nodata of several bands (NodataNeedsMask)
+                warp::UnifiedValidity(src_.Type(), block.data(), pb, mask.size(), bandOffsets_, *plan_.nodata, 255,
+                                      mask.data());
+            }
             for (uint32_t y = 0; y < s.rows; ++y)
                 std::memcpy(s.MaskAt(x0, y), mask.data() + static_cast<size_t>(y) * bw, vw);
+            if (detectGraded_ && !graded_.load(std::memory_order_relaxed) &&
+                tiff::SummarizeMaskBytes(mask.data(), bw, vw, s.rows).anyBetween)
+                graded_.store(true, std::memory_order_relaxed);
         }
         decoded_.fetch_add(1, std::memory_order_relaxed);
     }
     uint64_t BlocksDecoded() const override { return decoded_.load(); }
+    bool SawGradedTransparency() const override { return graded_.load(std::memory_order_relaxed); }
 
 private:
     const RasterSource& src_;
     const Plan& plan_;
+    std::vector<size_t> bandOffsets_;  // the byte offsets of the bands in a pixel
     std::atomic<uint64_t> decoded_{0};
+    bool detectGraded_ = false;
+    std::atomic<bool> graded_{false};
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -527,6 +548,9 @@ public:
     }
 
     uint64_t PeakStripBytes() const noexcept { return peakBytes_; }
+    /// Run() stopped at a graded transparency (TileProducer::SawGradedTransparency) that the plan's
+    /// 1-bit mask would flatten: the output is incomplete, to be built again with Plan::gradedMask.
+    bool StoppedForGradedMask() const noexcept { return stoppedForGradedMask_; }
 
 private:
     struct Level {
@@ -704,7 +728,7 @@ private:
             f.jpegQuality = plan_.jpegQuality;
             if (plan_.codec == Codec::kJpeg) encode::SpreadJpegEdges(block.data(), B, B, f.samples, vw, s.rows);
             encode::EncodeBlock(f, block.data(), image);
-            if (maskOut) encode::EncodeMaskBlock(mask.data(), B, B, maskBytes);
+            if (maskOut) encode::EncodeMaskBlock(mask.data(), B, B, maskBytes, plan_.MaskBits());
         }
         if (decoded != nullptr) {
             // The pixels a reader decodes from this tile (sparse: zeros, masked out anyway).
@@ -1237,6 +1261,12 @@ private:
             auto strip = NewStrip(0, r);
             exec::ParallelFor(0, L0.blocksAcross, 1, [&](size_t c) { producer_.Produce(static_cast<uint32_t>(c), *strip); });
             producer_.EndRow(r);
+            // A graded transparency that the 1-bit mask would flatten: the pass stops (the build runs
+            // again with an 8-bit mask)
+            if (plan_.MaskOut() && !plan_.gradedMask && producer_.SawGradedTransparency()) {
+                stoppedForGradedMask_ = true;
+                break;
+            }
             if (plan_.transparency == Transparency::kAlpha && plan_.alphaMasksOverviews) AlphaToMask(*strip, 0, strip->width);
             RowJob job;
             job.row = r;
@@ -1281,6 +1311,7 @@ private:
             jobs.pop_front();
         }
         if (statsGroup) statsGroup->Wait();
+        if (stoppedForGradedMask_) return;
         for (size_t k = 0; k + 1 < levels_.size(); ++k)
             if (levels_[k].childNextY < levels_[k + 1].height)
                 throw std::runtime_error("The overviews were left incomplete at level " + std::to_string(k + 1));
@@ -1302,6 +1333,7 @@ private:
     std::atomic<uint64_t> live_{0}, peakBytes_{0};
     // paletteFromFullResolution: the rows of the chunks of the full resolution every level is computed from
     int fullResolutionChunkRows_ = 0;
+    bool stoppedForGradedMask_ = false;
 
 public:
     StatsAccumulator* Stats() { return stats_.get(); }
@@ -1339,6 +1371,36 @@ Expected<std::unique_ptr<RasterSource>> GeoreferencePhoto(std::unique_ptr<Raster
 // gdalwarp's default warp memory (-wm), which libddb's geoprojection keeps.
 constexpr double kGdalwarpDefaultMemory = 64.0 * 1024 * 1024;
 
+// The layout of the image a plan writes (its georeferencing and metadata are the caller's)
+writer::ImageSpec ImageSpecOf(const Plan& plan) {
+    writer::ImageSpec spec;
+    spec.width = plan.width;
+    spec.height = plan.height;
+    spec.blockSize = plan.blockSize;
+    spec.samples = static_cast<uint16_t>(plan.complex ? plan.bands / 2 : plan.bands);
+    spec.complex = plan.complex;
+    spec.type = plan.type;
+    spec.photometric = plan.photometric;
+    spec.extraSamples = plan.extraSamples;
+    spec.colorMap = plan.colorMap;
+    spec.codec = plan.codec;
+    spec.predictor = plan.predictor;
+    if (plan.codec == Codec::kJpeg) spec.jpegTables = encode::JpegTables(plan.jpegQuality);
+    spec.hasMask = plan.MaskOut();
+    spec.maskBits = plan.MaskBits();
+    spec.noDataText = plan.nodataText;
+    spec.overviews = plan.overviews;
+    return spec;
+}
+
+// The plan of a build of `source` and the producer of its full-resolution tiles, which reads the
+// plan (a BuildPass stays where it is made)
+struct BuildPass {
+    Plan plan;
+    std::unique_ptr<TileProducer> producer;
+    writer::GeoKeys geoKeys = writer::WebMercatorGeoKeys();
+};
+
 }  // namespace
 
 Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options) {
@@ -1348,7 +1410,7 @@ Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input
     return GeoreferencePhoto(std::move(*src), *options.photo);
 }
 
-warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
+warp::WarpSettings WarpSettingsOf(const BuildOptions& options, const RasterSource& source) {
     warp::WarpSettings ws;
     ws.losslessCodec = options.losslessCodec == Codec::kJpeg ? Codec::kLzw : options.losslessCodec;
     ws.level = options.level;
@@ -1365,6 +1427,11 @@ warp::WarpSettings WarpSettingsOf(const BuildOptions& options) {
             // The grid of libddb's COG of the photo (its geoprojection, then the COG of that).
             ws.target = warp::Target::kWebMercatorThroughSourceCrs;
         }
+    } else if (source.ColorTable()) {
+        // The values of a palette band are indices into its colour table, which no interpolation
+        // keeps (gdalwarp -r bilinear averages them into other colours): the COG driver reprojects a
+        // source with a colour table by nearest neighbour, and resamples its overviews so as well
+        ws.resampling = warp::Resampling::kNearest;
     }
     return ws;
 }
@@ -1376,19 +1443,7 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     BuildOptions o = options;
     o.statistics = false;
 
-    writer::ImageSpec spec;
-    spec.width = plan.width;
-    spec.height = plan.height;
-    spec.blockSize = plan.blockSize;
-    spec.samples = static_cast<uint16_t>(plan.bands);
-    spec.type = plan.type;
-    spec.photometric = plan.photometric;
-    spec.extraSamples = plan.extraSamples;
-    spec.colorMap = plan.colorMap;
-    spec.codec = plan.codec;
-    spec.predictor = plan.predictor;
-    spec.hasMask = plan.MaskOut();
-    spec.noDataText = plan.nodataText;
+    writer::ImageSpec spec = ImageSpecOf(plan);
     HostTiffMetadata metadata = HostMetadata(plan, raster);
     spec.gdalMetadata = std::move(metadata.gdalMetadata);
     spec.extraTags = std::move(metadata.tags);
@@ -1405,7 +1460,6 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     }
     spec.georeferenced = raster.georeferenced;
     spec.geoKeys = raster.georeferenced ? writer::WithRasterType(raster.geoKeys, pixelIsPoint) : raster.geoKeys;
-    spec.overviews = plan.overviews;
     auto w = writer::CogWriter::Create(output, spec, o.writer);
     if (!w.ok()) return w.status();
     writer::CogWriter& cw = **w;
@@ -1423,6 +1477,41 @@ Status WriteHostRaster(const HostRaster& raster, const std::string& output, cons
     return Status::Ok();
 }
 
+namespace {
+
+// `gradedMask`: the internal mask, if the plan has one, keeps 8 bits a pixel
+Expected<std::unique_ptr<BuildPass>> PlanPass(const RasterSource& source, const BuildOptions& options,
+                                              bool gradedMask) {
+    auto pass = std::make_unique<BuildPass>();
+    Plan& plan = pass->plan;
+    if (source.IsOptimizedCog()) {
+        auto p = OwnGridPlan(source, options);
+        if (!p.ok()) return p.status();
+        plan = std::move(*p);
+        plan.gradedMask = gradedMask && plan.MaskOut();
+        pass->producer = std::make_unique<OwnGridProducer>(source, plan);
+        return pass;
+    }
+    const warp::WarpSettings ws = WarpSettingsOf(options, source);
+    if (ws.target == warp::Target::kSourceCrs) {
+        // The output is in the source's CRS.
+        auto keys = writer::GeoKeysOf(*source.Georef().crs);
+        if (!keys.ok()) return keys.status();
+        pass->geoKeys = std::move(*keys);
+    }
+    auto p = warp::WarpPlan(source, ws);
+    if (!p.ok()) return p.status();
+    plan = std::move(*p);
+    plan.gradedMask = gradedMask && plan.MaskOut();
+    plan.gdalMetadata = OutputMetadata(source.GdalMetadata(), plan, true);
+    auto prod = warp::MakeWarpProducer(source, plan, ws, options.memoryBudget);
+    if (!prod.ok()) return prod.status();
+    pass->producer = std::move(*prod);
+    return pass;
+}
+
+}  // namespace
+
 Status BuildCog(const std::string& input, const std::string& output, const BuildOptions& options, BuildReport* report) {
     const auto t0 = std::chrono::steady_clock::now();
     BuildOptions sourceOptions = options;
@@ -1435,66 +1524,51 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
     if (!source.Georef().geoTransform && source.Georef().gcps.empty())
         return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no geotransform: " + input);
 
-    Plan plan;
-    std::unique_ptr<TileProducer> producer;
-    writer::GeoKeys geoKeys = writer::WebMercatorGeoKeys();
-    const bool ownGrid = source.IsOptimizedCog();
-    if (ownGrid) {
-        auto p = OwnGridPlan(source, options);
-        if (!p.ok()) return p.status();
-        plan = std::move(*p);
-        producer = std::make_unique<OwnGridProducer>(source, plan);
-    } else {
-        const warp::WarpSettings ws = WarpSettingsOf(options);
-        if (ws.target == warp::Target::kSourceCrs) {
-            // The output is in the source's CRS.
-            auto keys = writer::GeoKeysOf(*source.Georef().crs);
-            if (!keys.ok()) return keys.status();
-            geoKeys = std::move(*keys);
-        }
-        auto p = warp::WarpPlan(source, ws);
-        if (!p.ok()) return p.status();
-        plan = std::move(*p);
-        plan.gdalMetadata = OutputMetadata(source.GdalMetadata(), plan, true);
-        auto prod = warp::MakeWarpProducer(source, plan, ws, options.memoryBudget);
-        if (!prod.ok()) return prod.status();
-        producer = std::move(*prod);
-    }
+    // The progress of a second pass is reported once it is past the first one's (never backwards)
+    double reported = 0;
+    BuildOptions passOptions = options;
+    if (options.progress)
+        passOptions.progress = [&](double f, const char* phase) {
+            if (f < reported) return;
+            reported = f;
+            options.progress(f, phase);
+        };
 
-    writer::ImageSpec spec;
-    spec.width = plan.width;
-    spec.height = plan.height;
-    spec.blockSize = plan.blockSize;
-    spec.samples = static_cast<uint16_t>(plan.complex ? plan.bands / 2 : plan.bands);
-    spec.complex = plan.complex;
-    spec.type = plan.type;
-    spec.photometric = plan.photometric;
-    spec.extraSamples = plan.extraSamples;
-    spec.colorMap = plan.colorMap;
-    spec.codec = plan.codec;
-    spec.predictor = plan.predictor;
-    if (plan.codec == Codec::kJpeg) spec.jpegTables = encode::JpegTables(plan.jpegQuality);
-    spec.hasMask = plan.MaskOut();
-    spec.noDataText = plan.nodataText;
-    spec.gdalMetadata = plan.gdalMetadata;
-    spec.extraTags = source.MetadataTags();
-    spec.geoTransform = plan.geoTransform;
-    spec.geoKeys = std::move(geoKeys);
-    spec.overviews = plan.overviews;
-    auto w = writer::CogWriter::Create(output, spec, options.writer);
-    if (!w.ok()) return w.status();
-    writer::CogWriter& cw = **w;
-
-    Pipeline pipe(plan, *producer, cw, options);
-    Status s = pipe.Run();
-    if (!s.ok()) {
-        cw.Abort();
-        return s;
+    // A pass with a 1-bit mask, unless it meets a graded transparency: then a pass with an 8-bit one
+    std::unique_ptr<BuildPass> pass;
+    std::unique_ptr<writer::CogWriter> cw;
+    std::unique_ptr<Pipeline> pipe;
+    int passes = 0;
+    for (bool gradedMask : {false, true}) {
+        // The pipeline reads the writer and the pass: released in that order, before the next pass
+        // holds memory of its own
+        pipe.reset();
+        cw.reset();
+        pass.reset();
+        auto planned = PlanPass(source, options, gradedMask);
+        if (!planned.ok()) return planned.status();
+        pass = std::move(*planned);
+        const Plan& plan = pass->plan;
+        writer::ImageSpec spec = ImageSpecOf(plan);
+        spec.gdalMetadata = plan.gdalMetadata;
+        spec.extraTags = source.MetadataTags();
+        spec.geoTransform = plan.geoTransform;
+        spec.geoKeys = pass->geoKeys;
+        auto w = writer::CogWriter::Create(output, spec, options.writer);
+        if (!w.ok()) return w.status();
+        cw = std::move(*w);
+        pipe = std::make_unique<Pipeline>(plan, *pass->producer, *cw, passOptions);
+        ++passes;
+        const Status s = pipe->Run();
+        if (!s.ok() || pipe->StoppedForGradedMask()) cw->Abort();
+        if (!s.ok()) return s;
+        if (!pipe->StoppedForGradedMask()) break;
     }
-    s = cw.Finish();
+    const Plan& plan = pass->plan;
+    Status s = cw->Finish();
     if (!s.ok()) return s;
     if (options.statistics) {
-        const auto stats = pipe.Stats()->Result(static_cast<uint64_t>(plan.width) * plan.height);
+        const auto stats = pipe->Stats()->Result(static_cast<uint64_t>(plan.width) * plan.height);
         s = WriteStatsSidecar(output, stats);
         if (!s.ok()) return s;
     }
@@ -1508,10 +1582,12 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         report->codec = encode::CodecName(plan.codec);
         report->jpegQuality = plan.codec == Codec::kJpeg ? plan.jpegQuality : 0;
         report->transparency = TransparencyName(plan.transparency);
-        report->file = cw.Stats();
-        report->peakStripBytes = pipe.PeakStripBytes();
-        report->sourceBlocksDecoded = producer->BlocksDecoded();
-        report->peakSourceCacheBytes = producer->PeakCacheBytes();
+        report->maskBits = plan.MaskOut() ? plan.MaskBits() : 0;
+        report->passes = passes;
+        report->file = cw->Stats();
+        report->peakStripBytes = pipe->PeakStripBytes();
+        report->sourceBlocksDecoded = pass->producer->BlocksDecoded();
+        report->peakSourceCacheBytes = pass->producer->PeakCacheBytes();
         report->secondsTotal = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
     return Status::Ok();

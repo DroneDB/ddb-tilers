@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
-// Synthetic COPC clouds for the tiler tests: random points in a cube, distributed over a
-// 3-level octree (each point in the node of its position), written with the COPC test builder.
+// Synthetic COPC clouds for the tiler tests: random points in a cube (or a flat nested grid),
+// distributed over a 3-level octree (each point in the node of its position), written with the
+// COPC test builder.
 #pragma once
 
 #include <algorithm>
@@ -51,7 +52,15 @@ struct CloudSpec {
     double spacing = 0;  // 0: 2 * halfSize / 128
     // Dark points: all colour components below 256 in the 16-bit case for this fraction.
     double darkFraction = 0;
+    // Instead of random points: a flat square grid of kNestedGridSide points per side over the
+    // cube's x and y (at z = center), each point in the shallowest level whose grid holds it (the
+    // root every 4th point on each axis, depth 1 every 2nd, depth 2 the others), so that the
+    // levels 0..d together are a square grid of pitch spacing / 2^d. `points` and `zSpan` are
+    // not used.
+    bool nestedGrid = false;
 };
+
+inline constexpr int kNestedGridSide = 512;
 
 inline std::vector<uint8_t> RecordsOf(int format, const std::vector<SynthPoint>& pts) {
     const las::PointLayout l = las::LayoutOf(format);
@@ -71,17 +80,33 @@ inline std::vector<uint8_t> RecordsOf(int format, const std::vector<SynthPoint>&
     return v;
 }
 
-/// Builds the cloud: 1/16 of the points at the root, 1/4 at depth 1, the rest at depth 2.
+/// Builds the cloud: 1/16 of the points at the root, 1/4 at depth 1, the rest at depth 2 (random
+/// points), or the levels of the nested grid.
 inline std::vector<uint8_t> BuildCloud(const CloudSpec& spec) {
     std::mt19937 rng(spec.seed);
     const double lo[3] = {spec.center[0] - spec.halfSize, spec.center[1] - spec.halfSize,
                           spec.center[2] - spec.halfSize};
     std::uniform_real_distribution<double> ux(0.0, 2 * spec.halfSize), uz(0.0, spec.zSpan);
     std::uniform_int_distribution<int> c8(0, 255), c16(0, 65535), u01(0, 999);
-    std::vector<SynthPoint> pts(spec.points);
-    std::vector<double> pos(spec.points * 3);
-    for (size_t i = 0; i < spec.points; ++i) {
-        const double p[3] = {lo[0] + ux(rng), lo[1] + ux(rng), lo[2] + uz(rng)};
+    const size_t count = spec.nestedGrid ? size_t{kNestedGridSide} * kNestedGridSide : spec.points;
+    const double pitch = 2 * spec.halfSize / kNestedGridSide;
+    std::vector<SynthPoint> pts(count);
+    std::vector<double> pos(count * 3);
+    std::vector<int> depthOf(count);
+    for (size_t i = 0; i < count; ++i) {
+        double p[3];
+        if (spec.nestedGrid) {
+            const size_t gx = i % kNestedGridSide, gy = i / kNestedGridSide;
+            p[0] = lo[0] + (static_cast<double>(gx) + 0.5) * pitch;
+            p[1] = lo[1] + (static_cast<double>(gy) + 0.5) * pitch;
+            p[2] = spec.center[2];
+            depthOf[i] = gx % 4 == 0 && gy % 4 == 0 ? 0 : (gx % 2 == 0 && gy % 2 == 0 ? 1 : 2);
+        } else {
+            p[0] = lo[0] + ux(rng);
+            p[1] = lo[1] + ux(rng);
+            p[2] = lo[2] + uz(rng);
+            depthOf[i] = i % 16 == 0 ? 0 : (i % 4 == 0 ? 1 : 2);
+        }
         for (int a = 0; a < 3; ++a) pos[i * 3 + static_cast<size_t>(a)] = p[a];
         pts[i].x = static_cast<int32_t>(std::llround((p[0] - spec.offset[0]) / spec.scale));
         pts[i].y = static_cast<int32_t>(std::llround((p[1] - spec.offset[1]) / spec.scale));
@@ -94,8 +119,8 @@ inline std::vector<uint8_t> BuildCloud(const CloudSpec& spec) {
     }
     // Octree assignment by position.
     std::map<std::tuple<int, int, int, int>, std::vector<SynthPoint>> nodes;
-    for (size_t i = 0; i < spec.points; ++i) {
-        const int depth = i % 16 == 0 ? 0 : (i % 4 == 0 ? 1 : 2);
+    for (size_t i = 0; i < count; ++i) {
+        const int depth = depthOf[i];
         const int cells = 1 << depth;
         int k[3];
         for (int a = 0; a < 3; ++a) {

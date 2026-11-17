@@ -75,9 +75,15 @@ struct Plan {
     /// A tile whose mask is all 0 is written whole (GTiff without SPARSE_OK keeps the pixels under a
     /// mask), else left sparse (the COG driver's)
     bool keepMaskedTiles = false;
+    /// MaskOut(): the internal mask keeps 8 bits a pixel, the transparency of a source alpha (or mask)
+    /// whose values are not only transparent and opaque (a feathered or semi-transparent raster);
+    /// else 1 bit, as GDAL writes it (any value above 0 opaque)
+    bool gradedMask = false;
     std::string gdalMetadata;
 
     bool MaskOut() const noexcept { return transparency == Transparency::kMask; }
+    /// The bits of a sample of the internal mask (MaskOut())
+    uint16_t MaskBits() const noexcept { return gradedMask ? 8 : 1; }
     /// Strips carry an 8-bit mask (the 1-bit mask's values, or the alpha as GDAL's mask band).
     bool StripMask() const noexcept { return MaskOut() || (transparency == Transparency::kAlpha && alphaMasksOverviews); }
     size_t SampleSize() const noexcept { return tiff::SampleTypeSize(type); }
@@ -161,6 +167,11 @@ std::string OutputMetadata(const std::string& source, const Plan& plan, bool dro
 void SetPhotometric(Plan& p, const std::vector<std::string>& interps);
 /// GDAL's GetMaskBand alpha rule: the last band of a 2 / 4-band 8 / 16-bit raster masks the others.
 bool AlphaMaskRule(int bands, int alphaBand, tiff::SampleType t);
+/// An output that keeps a nodata value on `dataBands` bands (no alpha band) also gets an internal
+/// mask of the pixels where not every band is at nodata, when it has several: GDAL's readers take
+/// the internal mask before the nodata, which they test on each band on its own (the mask of band
+/// 1 would hide every pixel whose band 1 alone is at nodata, a dark pixel of an RGB with nodata 0).
+inline bool NodataNeedsMask(int dataBands) noexcept { return dataBands > 1; }
 
 /// Fills the full-resolution strips. Produce() is called concurrently for the columns of a row;
 /// BeginRow / EndRow on the driving thread, rows in order.
@@ -175,6 +186,10 @@ public:
     virtual uint64_t BlocksDecoded() const { return 0; }
     /// Peak bytes of decoded source blocks held (reporting).
     virtual uint64_t PeakCacheBytes() const { return 0; }
+    /// The source read so far has transparency between transparent and opaque that the plan's 1-bit
+    /// mask would flatten (an alpha value above 0 and below its maximum, a mask value above 0 and
+    /// below 255): the output needs a graded mask (Plan::gradedMask). Thread-safe.
+    virtual bool SawGradedTransparency() const { return false; }
 };
 
 }  // namespace ddbt::cog::build

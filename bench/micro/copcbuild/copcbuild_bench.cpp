@@ -141,7 +141,7 @@ void BM_EncodeNode(benchmark::State& st) {
     }
     std::vector<uint8_t> out;
     for (auto _ : st) {
-        if (!EncodeNode(format, 0, recs.data(), n, out).ok()) st.SkipWithError("encode failed");
+        if (!EncodeNode(format, format, 0, recs.data(), n, out).ok()) st.SkipWithError("encode failed");
         benchmark::DoNotOptimize(out.data());
     }
     st.SetItemsProcessed(static_cast<int64_t>(st.iterations()) * static_cast<int64_t>(n));

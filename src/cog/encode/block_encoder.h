@@ -60,9 +60,10 @@ void EncodeBlock(const BlockFormat& format, const uint8_t* pixels, ByteBuffer& o
 void SpreadJpegEdges(uint8_t* pixels, uint32_t blockWidth, uint32_t blockHeight, uint32_t samples,
                      uint32_t validWidth, uint32_t validHeight);
 
-/// A 1-bit mask block from bytes (0 = invalid, anything else = valid), width x height, rows of
-/// `width` bytes: packed MSB first, DEFLATE level 6, appended to `out`.
-void EncodeMaskBlock(const uint8_t* mask, uint32_t width, uint32_t height, ByteBuffer& out);
+/// A mask block from bytes, width x height, rows of `width` bytes, DEFLATE level 6, appended to
+/// `out`: 1 bit a pixel (0 = invalid, anything else = valid) packed MSB first, or 8 bits
+/// (`sampleBits` 8: the bytes as they are).
+void EncodeMaskBlock(const uint8_t* mask, uint32_t width, uint32_t height, ByteBuffer& out, uint16_t sampleBits = 1);
 
 /// The JPEGTables tag of JPEG YCbCr tiles of `quality`: a tables-only datastream (SOI, the
 /// luminance and chrominance quantization tables in two DQT markers, EOI), as libtiff writes it.

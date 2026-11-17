@@ -754,6 +754,128 @@ TEST(CopcBuildExtraBytes, TheWriterRefusesAnArrayDescriptor) {
     EXPECT_TRUE(CheckHeaderFields(f).ok());
 }
 
+// RealityCapture stores a cloud's coordinates over the whole int32 range (-(2^31 - 1) to 2^31 - 1)
+// with a scale and offset of its own, and writes header bounds computed back from those integers
+// (int * scale + offset): divided again, one is a rounding error past 2^31 - 1 ((max - offset) /
+// scale = 2147483647.0000002 for X). The scale, offset and bounds below are those of such a file.
+// The builder keeps the scale and offset and copies the integers, so it must not refuse the
+// bounds; a header bound a whole step past the range is no rounding error, and is refused.
+TEST(CopcBuildEndToEnd, CoordinatesOverTheWholeInt32RangeKeepTheirScaleAndOffset) {
+    const std::string dir = TempDir();
+    SynthLas s;
+    s.format = 2;
+    s.scale = {3.4702614131804454e-08, 3.7597480701833696e-08, 2.5582438401816677e-09};
+    s.offset = {3.9132270813382632, 5.9943389892578125, 5.193873405456547};
+    FillRandom(s, 5000, 41, 1000000);
+    // The two corners of the range, on every axis.
+    for (int a = 0; a < 3; ++a) {
+        StoreLE<int32_t>(s.records.data() + 4 * a, INT32_MAX);
+        StoreLE<int32_t>(s.records.data() + s.RecordSize() + 4 * a, -INT32_MAX);
+    }
+    s.overrideBounds = true;
+    s.min = {-70.61006927486291, -74.74563598632812, -0.299913406372065};
+    s.max = {78.43652343753944, 86.73431396484375, 10.68766021728516};
+    ASSERT_GT((s.max[0] - s.offset[0]) / s.scale[0], 2147483647.0);  // the case: past the range by a rounding error
+    const std::string in = dir + "/full-range.las", out = dir + "/full-range.copc.laz";
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    CopcBuildOptions o;
+    o.lod.leafMax = 1000;
+    o.metadata = false;
+    CopcBuildReport rep;
+    const Status st = BuildCopc(in, out, o, &rep);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+    EXPECT_FALSE(rep.restarted);
+    EXPECT_EQ(rep.scale, s.scale);
+    EXPECT_EQ(rep.offset, s.offset);
+    auto chk = CheckCopc(out, 2);
+    ASSERT_TRUE(chk.ok());
+    EXPECT_TRUE(chk->ok()) << (chk->errors.empty() ? "" : chk->errors[0]);
+    EXPECT_EQ(chk->outside, 0u);
+    uint64_t nIn = 0, nOut = 0;
+    EXPECT_EQ(ConvertedInputHash(in, rep.format, 0, rep.scale, rep.offset, &nIn), CopcHash(out, &nOut));
+    EXPECT_EQ(nIn, s.count);
+    EXPECT_EQ(nOut, s.count);
+    auto file = CopcFile::Open(out);
+    ASSERT_TRUE(file.ok());
+    EXPECT_EQ((*file)->header().min, s.min);
+    EXPECT_EQ((*file)->header().max, s.max);
+
+    // A header that puts a point one step past the range: refused.
+    s.max[0] = MulAddUnfused(2147483648.0, s.scale[0], s.offset[0]);
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    EXPECT_EQ(BuildCopc(in, out, o, &rep).code(), StatusCode::kOutOfRange);
+    fs::remove_all(dir);
+}
+
+// PDAL writes a cloud without colour in format 7 (or 8) when it is asked for that format, every
+// red, green and blue 0 (a reprojection of a colourless cloud, for one); a COPC of those records
+// is drawn black, its colours taken as real. When every colour of every point is 0 (with the near
+// infrared of format 8), the COPC is written without colour, in format 6, its other fields and
+// extra bytes as they are, and is drawn by elevation as a colourless cloud is. One point of
+// colour, or a near infrared, keeps the format.
+TEST(CopcBuildEndToEnd, ACloudWhoseEveryColourIsZeroIsWrittenWithoutColour) {
+    const std::string dir = TempDir();
+    struct Case {
+        int format;
+        uint16_t eb;
+        bool laz;
+        int minor;
+        bool oneBlue;  // one point has a blue of 1
+        bool nir;      // the near infrared is kept (format 8)
+        int written;
+    };
+    const std::vector<Case> cases = {{7, 3, true, 4, false, false, 6}, {8, 0, true, 4, false, false, 6},
+                                     {3, 0, false, 2, false, false, 6}, {7, 0, false, 4, true, false, 7},
+                                     {8, 2, false, 4, false, true, 8}};
+    for (const Case& c : cases) {
+        SCOPED_TRACE("format " + std::to_string(c.format) + (c.oneBlue ? " one blue" : "") + (c.nir ? " nir" : ""));
+        SynthLas s;
+        s.format = c.format;
+        s.extraBytes = c.eb;
+        s.laz = c.laz;
+        s.minor = c.minor;
+        FillRandom(s, 30000, static_cast<uint32_t>(50 + c.format));
+        const las::PointLayout L = las::LayoutOf(c.format);
+        for (uint64_t i = 0; i < s.count; ++i) {
+            uint8_t* r = s.records.data() + i * s.RecordSize();
+            std::memset(r + L.rgb, 0, 6);
+            if (L.HasNir() && !c.nir) StoreLE<uint16_t>(r + L.nir, 0);
+        }
+        if (c.oneBlue) StoreLE<uint16_t>(s.records.data() + 777 * s.RecordSize() + L.rgb + 4, 1);
+        const std::string in = dir + "/in" + std::to_string(c.format) + (c.laz ? ".laz" : ".las");
+        ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+        std::vector<uint8_t> first;
+        for (const bool spill : {false, true}) {
+            CopcBuildOptions o;
+            o.lod.leafMax = 1000;
+            o.metadata = false;
+            o.threads = spill ? 3 : 1;
+            o.forceSpill = spill;
+            o.tempDir = dir;
+            const std::string out = dir + "/out.copc.laz";
+            CopcBuildReport rep;
+            const Status st = BuildCopc(in, out, o, &rep);
+            ASSERT_TRUE(st.ok()) << st.ToString();
+            EXPECT_EQ(rep.format, c.written);
+            EXPECT_EQ(rep.extraBytes, c.eb);
+            auto file = CopcFile::Open(out);
+            ASSERT_TRUE(file.ok());
+            EXPECT_EQ((*file)->pointFormat(), c.written);
+            EXPECT_EQ((*file)->extraBytes(), c.eb);
+            auto chk = CheckCopc(out, 2);
+            ASSERT_TRUE(chk.ok());
+            EXPECT_TRUE(chk->ok()) << (chk->errors.empty() ? "" : chk->errors[0]);
+            uint64_t nIn = 0, nOut = 0;
+            EXPECT_EQ(ConvertedInputHash(in, c.written, c.eb, rep.scale, rep.offset, &nIn), CopcHash(out, &nOut));
+            EXPECT_EQ(nOut, s.count);
+            if (first.empty()) first = ReadBytes(out);
+            else EXPECT_TRUE(ReadBytes(out) == first) << "the spilled build differs";
+            fs::remove(out);
+        }
+    }
+    fs::remove_all(dir);
+}
+
 TEST(CopcBuildEndToEnd, SidecarAndErrors) {
     const std::string dir = TempDir();
     SynthLas s;

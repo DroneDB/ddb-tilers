@@ -20,8 +20,10 @@
 #include <thread>
 #include <unordered_set>
 
+#include "../copcbuild/synth_las.h"
 #include "api/copc_tile.h"
 #include "cog/tiler/tile_error.h"
+#include "copc/build/copc_builder.h"
 #include "copc/cache/node_cache.h"
 #include "copc/copc/copc_file.h"
 #include "copc/copc/node_decoder.h"
@@ -575,6 +577,46 @@ TEST_F(CopcTilerTest, SplatModesUseAFitAndStayWithinTheResidual) {
     }
 }
 
+// A modern tile reads the levels down to one whose points the 13-pixel disc draws without gaps:
+// on a flat cloud whose levels 0..d form a square grid of pitch spacing / 2^d, every pixel inside
+// the grid is drawn. The cube is sized so that the spacing at z19 (and of depth 1 at z20) is
+// 3.6 px in EPSG:3857 (UTM 33N at 45 N: 1.417 Mercator metres per metre); the depth limit of
+// res(z - 2) stopped there, the discs of points 4 px apart left a hole between them.
+TEST_F(CopcTilerTest, ModernTilesHaveNoHolesWhereTheCloudHasPoints) {
+    CloudSpec s;
+    s.nestedGrid = true;
+    s.halfSize = 48.5;
+    s.center[0] = 500000 + s.halfSize;
+    s.center[1] = 5000000 + s.halfSize;
+    const std::string path = Cloud("nested-grid", s);
+    auto cloud = tiler::Cloud::Get(path);
+    const compat::GlobalMercator m(256);
+    // Pixels at least one root spacing inside the grid (its border pixels are partly drawn).
+    const double margin = 2 * s.halfSize / 128;
+    for (const int z : {19, 20}) {
+        size_t inside = 0, holes = 0;
+        for (const auto& [x, tmsRow] : TilesAround(*cloud, z, 256, 0)) {
+            RenderInfo info;
+            const auto rgba = Render(path, z, x, compat::FlipRow(tmsRow, z), 256, Mode::kModern, &info);
+            EXPECT_EQ(info.depthEnd, z - 19 + 2) << "z" << z;  // one level more than res(z - 2)
+            const auto tb = m.tileBounds(x, tmsRow, z);
+            const double res = m.resolution(z);
+            for (int py = 0; py < 256; ++py)
+                for (int px = 0; px < 256; ++px) {
+                    double cx = tb.min.x + (px + 0.5) * res, cy = tb.max.y - (py + 0.5) * res;
+                    ASSERT_TRUE(cloud->toCloud().TransformPoint(cx, cy));
+                    if (std::fabs(cx - s.center[0]) > s.halfSize - margin ||
+                        std::fabs(cy - s.center[1]) > s.halfSize - margin)
+                        continue;
+                    ++inside;
+                    holes += rgba[(static_cast<size_t>(py) * 256 + static_cast<size_t>(px)) * 4 + 3] == 0;
+                }
+        }
+        EXPECT_GT(inside, 20000u) << "z" << z;
+        EXPECT_EQ(holes, 0u) << "z" << z << ": " << holes << " of " << inside << " pixels inside the grid";
+    }
+}
+
 TEST_F(CopcTilerTest, GeocentricCloudsTileInHybridAndModernModes) {
     // A cloud in EPSG:4978 near (lon 15, lat 45): the baseline has no footprint (heights beyond
     // +-30 km), the hybrid and modern modes tile it.
@@ -800,6 +842,52 @@ TEST_F(CopcTilerTest, AThumbnailFitsTheWholeCloudCentredInItsSquare) {
         std::vector<uint8_t> again;
         RenderThumbnail(r, again);
         EXPECT_EQ(again, rgba);
+    }
+}
+
+TEST_F(CopcTilerTest, AThumbnailDrawsThePointsOnItsBoundsWhole) {
+    // The 8 corners of a box (a wireframe cube, a cloud of a few points): 4 points in plan, each on
+    // two bounds of the thumbnail. Fitted edge to edge, their discs were cut by the edges of the
+    // image (a quarter to a half of each drawn); with a margin each is drawn whole, the 13 pixels of
+    // the disc, off the edges, in its own coordinates and in EPSG:3857.
+    for (const bool crs : {false, true}) {
+        SCOPED_TRACE(crs ? "UTM" : "no CRS");
+        ddbt::copc::testing::SynthLas las;
+        las.format = 3;
+        las.wkt = crs ? test::kUtm33Wkt : "";
+        las.offset = {500000, 5000000, 0};
+        ddbt::copc::testing::FillRandom(las, 8, 3, {1000, 1000, 1000}, false);
+        for (uint64_t i = 0; i < 8; ++i) {
+            uint8_t* rec = las.records.data() + i * las.RecordSize();
+            for (int a = 0; a < 3; ++a)
+                ddbt::StoreLE<int32_t>(rec + 4 * a, ((i >> a) & 1) != 0 ? 1000 : -1000);
+        }
+        const std::string name = crs ? "cube-utm" : "cube";
+        const std::string in = (*dir_ / (name + ".las")).string();
+        const std::string path = (*dir_ / (name + ".copc.laz")).string();
+        ASSERT_TRUE(ddbt::copc::testing::WriteBytes(in, ddbt::copc::testing::BuildLasBytes(las)));
+        build::CopcBuildOptions o;
+        o.metadata = false;
+        ASSERT_TRUE(build::BuildCopc(in, path, o).ok());
+        for (const int size : {32, 256}) {
+            ThumbnailRequest r;
+            r.path = path;
+            r.size = size;
+            std::vector<uint8_t> rgba;
+            RenderInfo info;
+            RenderThumbnail(r, rgba, &info);
+            EXPECT_EQ(info.points, 8u);
+            EXPECT_EQ(Opaque(rgba), 4u * 13u) << size;
+            const Extent2 e = OpaqueExtent(rgba, size);
+            EXPECT_GE(e.minX, 0);
+            EXPECT_GE(e.minY, 0);
+            EXPECT_LE(e.maxX, size - 1);
+            EXPECT_LE(e.maxY, size - 1);
+            // Centred, from edge to edge but the margin
+            EXPECT_NEAR((e.minX + e.maxX) / 2.0, (size - 1) / 2.0, 1.0) << size;
+            EXPECT_LE(e.minX, 2) << size;
+            EXPECT_GE(e.maxX, size - 3) << size;
+        }
     }
 }
 
@@ -1327,6 +1415,61 @@ TEST_F(CopcTilerTest, AGeographicCrsOnCoordinatesItCannotHoldGivesNoTiles) {
     EXPECT_EQ(ddbt::crs::BoundsMisfit(cloud->crs(), 15, 45, 15.1, 91), "the coordinates do not fit WGS 84");
     // A projected CRS takes any value
     EXPECT_EQ(ddbt::crs::BoundsMisfit(ddbt::crs::Crs::FromWkt(test::kUtm33Wkt), 500000, 5000000, 500100, 5000100), "");
+}
+
+
+// A cloud of no extent in x and y (one point, points on a vertical line), as the builder writes it,
+// has a thumbnail with its points at the centre and a zoom range whose tile at the first zoom draws
+// them: the thumbnail had no area to fit ("zero extent") and the zoom range came from a length of 0
+// (zoomForLength saturates, the max zoom past it overflowed into an empty range)
+TEST_F(CopcTilerTest, ACloudOfNoExtentInXAndYHasAThumbnailAndTiles) {
+    struct Case {
+        const char* name;
+        uint64_t points;
+        std::array<int32_t, 3> extent;  // in units of the scale
+    };
+    for (const Case& c : {Case{"one-point", 1, {0, 0, 0}}, Case{"vertical-line", 200, {0, 0, 2000}}}) {
+        SCOPED_TRACE(c.name);
+        ddbt::copc::testing::SynthLas las;
+        las.format = 3;
+        las.wkt = test::kUtm33Wkt;
+        las.offset = {500000, 5000000, 0};
+        ddbt::copc::testing::FillRandom(las, c.points, 7, c.extent, false);
+        const std::string in = (*dir_ / (std::string(c.name) + ".las")).string();
+        const std::string path = (*dir_ / (std::string(c.name) + ".copc.laz")).string();
+        ASSERT_TRUE(ddbt::copc::testing::WriteBytes(in, ddbt::copc::testing::BuildLasBytes(las)));
+        build::CopcBuildOptions o;
+        o.metadata = false;
+        build::CopcBuildReport report;
+        ASSERT_TRUE(build::BuildCopc(in, path, o, &report).ok());
+        ASSERT_EQ(report.points, c.points);
+        EXPECT_GT(report.cube.halfSize, 0.0);  // one scale step on each side at least
+
+        ThumbnailRequest r;
+        r.path = path;
+        r.size = 64;
+        std::vector<uint8_t> rgba;
+        RenderInfo info;
+        ASSERT_NO_THROW(RenderThumbnail(r, rgba, &info));
+        EXPECT_EQ(info.points, c.points);
+        const Extent2 e = OpaqueExtent(rgba, 64);
+        ASSERT_GT(Opaque(rgba), 0u);
+        EXPECT_NEAR((e.minX + e.maxX) / 2.0, 31.5, 1.0);
+        EXPECT_NEAR((e.minY + e.maxY) / 2.0, 31.5, 1.0);
+
+        const compat::TileExtent extent = Extent(path, 256);
+        EXPECT_GT(extent.zooms.min, 0);
+        EXPECT_LE(extent.zooms.min, 30);
+        EXPECT_EQ(extent.zooms.max, extent.zooms.min + 5);
+        auto cloud = tiler::Cloud::Get(path);
+        const auto [x, tmsRow] = TilesAround(*cloud, extent.zooms.min, 256, 0).front();
+        TileRequest t;
+        t.path = path;
+        t.z = extent.zooms.min, t.x = x, t.y = tmsRow, t.tms = false, t.noCache = true;
+        std::vector<uint8_t> tile;
+        RenderRgba(*cloud, t, tile, &info);
+        EXPECT_GT(Opaque(tile), 0u);
+    }
 }
 
 }  // namespace
