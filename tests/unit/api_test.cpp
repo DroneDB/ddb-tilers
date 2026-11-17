@@ -1695,3 +1695,40 @@ TEST(HostApi, BuildCopc2TransformsToTheTargetCrsAndReportsTheOctree) {
               DDBT_ERR_INVALIDARGS);
     std::filesystem::remove_all(dir);
 }
+
+// "dropCrs": the COPC states no CRS, and the report says the CRS was dropped
+TEST(HostApi, BuildCopc2DropsTheCrsWhenAsked) {
+    namespace syn = ddbt::copc::testing;
+    const auto dir = ApiScratch("copc2-drop");
+    const std::string in = (dir / "in.las").string(), out = (dir / "out.copc.laz").string();
+    const std::string report = (dir / "report.json").string();
+    syn::SynthLas s;
+    s.format = 6;
+    s.minor = 4;
+    s.scale = {0.001, 0.001, 0.001};
+    s.offset = {62, 47, 14};
+    s.wkt = ddbt::crs::Crs::FromEpsg(4978).ToWkt(ddbt::crs::WktFlavor::Wkt1Gdal);
+    syn::FillRandom(s, 5000, 9, std::array<int32_t, 3>{150000, 142000, 26000});
+    ASSERT_TRUE(syn::WriteBytes(in, syn::BuildLasBytes(s)));
+    const std::string options = R"({"dropCrs": true, "report": )" + JsonString(report) + "}";
+    ASSERT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), options.c_str(), nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
+    std::ifstream f(report);
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const auto j = json::Parse(text);
+    ASSERT_TRUE(j && j->IsObject()) << text;
+    ASSERT_NE(j->Find("crsDropped"), nullptr);
+    EXPECT_TRUE(j->Find("crsDropped")->b);
+    EXPECT_FALSE(j->Find("transformed")->b);
+    EXPECT_EQ(j->Find("crs")->str, "");
+    EXPECT_EQ(j->Find("sourceCrs")->str, s.wkt);
+    char* info = nullptr;
+    ASSERT_EQ(ddbtPointCloudInfo(out.c_str(), false, &info), DDBT_ERR_NONE) << ddbtLastError();
+    const auto summary = json::Parse(std::string(info));
+    ddbtFree(info);
+    ASSERT_TRUE(summary && summary->IsObject());
+    EXPECT_EQ(summary->Find("wkt")->str, "");
+    EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"dropCrs": "yes"})", nullptr, nullptr), DDBT_ERR_INVALIDARGS);
+    EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"dropCrs": true, "targetCrs": "EPSG:32633"})", nullptr, nullptr),
+              DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}

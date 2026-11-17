@@ -8,7 +8,8 @@
 // output's directory), "forceSpill": bool, "tuneAllocator": bool (glibc mmap threshold, true),
 // "maxPartitionPoints": n, "metadata": bool (write the sidecar, true), "metadataPath": "<path>"
 // (default "<output>.meta.json"), "report": "<path>" (a JSON report of the build), "targetCrs": "<crs>"
-// (a WKT, "EPSG:n", "EPSG:h+v" or a PROJ string: every point transformed to it; CopcBuildOptions)}.
+// (a WKT, "EPSG:n", "EPSG:h+v" or a PROJ string: every point transformed to it; CopcBuildOptions),
+// "dropCrs": bool (write no CRS, the points as they are; not with targetCrs)}.
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -48,8 +49,9 @@ std::string ParseOptions(const char* text, CopcBuildOptions& o, std::string& rep
             if (key == "threads") o.threads = static_cast<size_t>(std::min<uint64_t>(val.u, 4096));
             if (key == "memoryMb") o.memoryBudget = val.u << 20;
             if (key == "maxPartitionPoints") o.maxPartitionPoints = val.u;
-        } else if (key == "forceSpill" || key == "metadata" || key == "tuneAllocator") {
+        } else if (key == "forceSpill" || key == "metadata" || key == "tuneAllocator" || key == "dropCrs") {
             if (val.kind != json::Value::Kind::kBool) return "Invalid optionsJson: " + key + " must be a boolean";
+            if (key == "dropCrs") o.dropCrs = val.b;
             if (key == "forceSpill") o.forceSpill = val.b;
             if (key == "tuneAllocator") o.tuneAllocator = val.b;
             if (key == "metadata") o.metadata = val.b;
@@ -106,6 +108,7 @@ void WriteReport(const std::string& path, const CopcBuildReport& r) {
     j.obj["sourceCrs"] = json::String(r.sourceCrs);
     j.obj["crs"] = json::String(r.crs);
     j.obj["transformed"] = json::Bool(r.transformed);
+    j.obj["crsDropped"] = json::Bool(r.crsDropped);
     json::Value levels = json::Array();
     for (const ddbt::copc::build::OctreeLevel& l : r.depthHistogram) {
         json::Value level = json::Object();

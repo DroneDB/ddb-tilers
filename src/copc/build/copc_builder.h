@@ -79,6 +79,11 @@ struct CopcBuildOptions {
     /// needs it: one cube in its own units is sized by the heights in "degrees" and the octree
     /// never splits it horizontally.
     std::string targetCrs;
+    /// Write no CRS: the CRS the inputs state does not fit their coordinates (a host judged it so,
+    /// a geocentric CRS over a site grid for one), and a reader would place the cloud wrongly. The
+    /// points are copied as they are (the same records and quantisation as a build that keeps the
+    /// CRS), no WKT record is written and the sidecar has no footprint. Not with targetCrs.
+    bool dropCrs = false;
     ProgressFn progress;
 };
 
@@ -113,6 +118,8 @@ struct CopcBuildReport {
     std::string sourceCrs, crs;
     /// The points were transformed to CopcBuildOptions::targetCrs.
     bool transformed = false;
+    /// The CRS of the inputs was dropped (CopcBuildOptions::dropCrs): crs is empty, sourceCrs is it.
+    bool crsDropped = false;
     /// The nodes and points of every depth, and the points of the largest node.
     std::vector<OctreeLevel> depthHistogram;
     uint64_t maxNodePoints = 0;

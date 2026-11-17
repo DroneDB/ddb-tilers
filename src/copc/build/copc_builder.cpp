@@ -468,6 +468,10 @@ private:
                     return InvalidArgument("inputs have different coordinate systems: " + readers_[first]->Info().path +
                                            " and " + info.path + " (a target CRS transforms each to it)");
             }
+            if (o_.dropCrs) {
+                fields_.wkt.clear();
+                r_.crsDropped = true;
+            }
         } else {
             crs::Crs target;
             try {
@@ -1233,6 +1237,8 @@ Status BuildCopc(const std::string& input, const std::string& output, const Copc
     inputs.insert(inputs.end(), options.extraInputs.begin(), options.extraInputs.end());
     for (const std::string& in : inputs)
         if (in == output) return InvalidArgument("the output is one of the inputs: " + output);
+    if (options.dropCrs && !options.targetCrs.empty())
+        return InvalidArgument("dropCrs and targetCrs cannot be set together: a COPC without a CRS has no target");
     if (options.tuneAllocator) mem::MapLargeAllocations();
     Builder b(options, r);
     DDBT_TRY(b.Prepare(output));

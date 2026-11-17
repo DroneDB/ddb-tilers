@@ -368,6 +368,77 @@ TEST(CopcBuildCrs, GeocentricToUtmWithEllipsoidalHeightsIsThreeDimensional) {
     fs::remove_all(dir);
 }
 
+// A cloud whose CRS does not fit its coordinates (a header that says EPSG:4978 over a site grid of a
+// few hundred metres): the host asks for the CRS to be dropped. The points are those of the build
+// that keeps it, record for record, and the COPC states no CRS, so no reader places it on the earth.
+TEST(CopcBuildCrs, ADroppedCrsKeepsEveryPointAndWritesNone) {
+    const std::string dir = TempDir("drop");
+    SynthLas s = TaggedCloud(20000, 13, {0.001, 0.001, 0.001}, {62, 47, 14}, {150000, 142000, 26000});
+    s.wkt = Wkt1("EPSG:4978");
+    const std::string in = dir + "/site.laz", kept = dir + "/kept.copc.laz", dropped = dir + "/dropped.copc.laz";
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+
+    CopcBuildReport keptReport, droppedReport;
+    ASSERT_TRUE(BuildCopc(in, kept, Options(""), &keptReport).ok());
+    CopcBuildOptions drop = Options("");
+    drop.dropCrs = true;
+    const Status st = BuildCopc(in, dropped, drop, &droppedReport);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+
+    EXPECT_FALSE(keptReport.crsDropped);
+    EXPECT_TRUE(droppedReport.crsDropped);
+    EXPECT_FALSE(droppedReport.transformed);
+    EXPECT_EQ(droppedReport.sourceCrs, s.wkt);
+    EXPECT_EQ(droppedReport.crs, "");
+    EXPECT_EQ(droppedReport.scale, keptReport.scale);
+    EXPECT_EQ(droppedReport.offset, keptReport.offset);
+    EXPECT_EQ(droppedReport.points, s.count);
+
+    // The file states no CRS
+    auto file = CopcFile::Open(dropped);
+    ASSERT_TRUE(file.ok()) << file.status().ToString();
+    EXPECT_FALSE((*file)->metadata().wkt.has_value() && !(*file)->metadata().wkt->empty());
+    char* info = nullptr;
+    ASSERT_EQ(ddbtPointCloudInfo(dropped.c_str(), false, &info), DDBT_ERR_NONE) << ddbtLastError();
+    const auto summary = json::Parse(std::string(info));
+    ddbtFree(info);
+    ASSERT_TRUE(summary && summary->IsObject());
+    EXPECT_EQ(summary->obj.at("wkt").str, "");
+
+    // The same points, at the same quantisation, as the COPC that keeps the CRS
+    auto byTag = [](std::vector<TaggedPoint> points) {
+        std::sort(points.begin(), points.end(), [](const TaggedPoint& a, const TaggedPoint& b) { return a.tag < b.tag; });
+        return points;
+    };
+    const auto a = byTag(ReadCopc(kept));
+    const auto b = byTag(ReadCopc(dropped));
+    ASSERT_EQ(a.size(), s.count);
+    ASSERT_EQ(b.size(), a.size());
+    for (size_t i = 0; i < a.size(); ++i) {
+        ASSERT_EQ(a[i].tag, b[i].tag);
+        ASSERT_EQ(a[i].p.x, b[i].p.x) << i;
+        ASSERT_EQ(a[i].p.y, b[i].p.y) << i;
+        ASSERT_EQ(a[i].p.z, b[i].p.z) << i;
+    }
+
+    // The sidecar has no CRS and no footprint
+    const std::vector<uint8_t> meta = ReadBytes(dropped + ".meta.json");
+    const auto j = json::Parse(std::string(meta.begin(), meta.end()));
+    ASSERT_TRUE(j && j->IsObject());
+    EXPECT_EQ(j->Find("polyBounds"), nullptr);
+    EXPECT_EQ(j->Find("centroid"), nullptr);
+    const json::Value* projection = j->Find("projection");
+    EXPECT_TRUE(projection == nullptr || projection->str.empty());
+
+    // A target and a dropped CRS ask for two different things
+    CopcBuildOptions both = Options("EPSG:32633");
+    both.dropCrs = true;
+    const std::string none = dir + "/none.copc.laz";
+    EXPECT_EQ(BuildCopc(in, none, both, nullptr).code(), StatusCode::kInvalidArgument);
+    EXPECT_FALSE(fs::exists(none));
+    fs::remove_all(dir);
+}
+
 TEST(CopcBuildCrs, CompoundKeepsItsVerticalCrs) {
     const std::string dir = TempDir("compound");
     // NAD83(2011) + NAVD88 height, as a Florida survey exports it, to NAD83(2011) / UTM 17N + NAVD88.

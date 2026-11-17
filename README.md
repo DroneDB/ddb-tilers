@@ -62,8 +62,14 @@ The WKT record then holds the target (WKT1 GDAL when it expresses it, else WKT2 
 sidecar's footprint follows it. Without `targetCrs`, inputs in different CRSs are refused. A WKT
 too long for its LAS record (65,534 characters) is an error.
 
+With `dropCrs` (a host found that the CRS the inputs state does not fit their coordinates, such
+as a geocentric CRS over a site grid of a few hundred metres) the COPC states no CRS: the points
+are copied as a build that keeps the CRS copies them, no WKT record is written, the sidecar has no
+footprint, and the report gives `crs` empty, `sourceCrs` the stated CRS and `crsDropped` true. It
+cannot be combined with `targetCrs`.
+
 The build report (`report`) gives the input and output CRSs (`sourceCrs`, `crs`,
-`transformed`), the nodes and points of each depth (`depthHistogram`), the largest node
+`transformed`, `crsDropped`), the nodes and points of each depth (`depthHistogram`), the largest node
 (`maxNodePoints`) and `warnings`: "degenerate octree" when a node holds more than 16 times the
 leaf size (100,000 points), the sign of a cube that does not fit the cloud.
 
@@ -159,7 +165,7 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | Function | |
 |---|---|
 | `ddbtBuildCog(input, output, optionsJson)` | Build a COG. Options: `codec` (`lzw`, `deflate`, `zstd`), `level`, `jpegQuality`, `noJpeg`, `memoryMb`, `statistics`, `report` (path of a JSON build report) |
-| `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report`, `targetCrs` |
+| `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report`, `targetCrs`, `dropCrs` |
 | `ddbtBuildCog2(...)`, `ddbtBuildCopc2(...)` | The same builds with a progress callback (fraction and phase) |
 | `ddbtIsOptimizedCog(input, outOptimized)` | Whether a raster is an optimized COG (EPSG:3857, 256 or 512 px tiles, overviews), which a COG build encodes again without a warp |
 | `ddbtPointCloudInfo(input, readBounds, outJson)` | Point count, bounds, CRS (as the file states it) and PDAL's dimension names of a LAS, LAZ, COPC, PLY, E57, XYZ or PTS point cloud |
