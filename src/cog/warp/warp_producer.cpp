@@ -65,8 +65,13 @@ struct SourceSpec {
     std::optional<double> nodata;  // source nodata (per band and unified validity)
     bool unifiedOnly = false;      // UNIFIED_SRC_NODATA=YES: no per-band validity
     bool dstAlpha = false;
+    /// The destination alpha is the output's internal mask, not an alpha band, whatever the codec
+    bool dstMask = false;
     std::optional<double> dstNodata;
     bool NoMasks() const { return alpha < 0 && !mask && !nodata; }
+    /// The output has an alpha band: a destination alpha that is not the mask (a JPEG output turns it
+    /// into its mask, WarpPlan)
+    bool AlphaBandOut() const { return dstAlpha && !dstMask; }
 };
 
 // GDAL's SetAlphaMax (gdalwarpoperation.cpp): the SRC_ALPHA_MAX / DST_ALPHA_MAX of an alpha band,
@@ -123,6 +128,15 @@ SourceSpec Analyse(const RasterSource& src, const WarpSettings& settings) {
         s.dstAlpha = true;
     }
     if (s.alpha >= 0) s.dstAlpha = true;
+    if (!s.dstAlpha && !s.dstNodata) {
+        // A source without a nodata, mask or alpha (gdalwarp -dstalpha, as the COG driver's ADD_ALPHA
+        // does): the output covers whole tiles of its grid, so the pixels outside the source are not
+        // written, and the internal mask keeps them out of the map and of the statistics (an alpha
+        // band would change the band count, and GDAL's readers take one as the mask of 8 and 16-bit
+        // integers only)
+        s.dstAlpha = true;
+        s.dstMask = true;
+    }
     return s;
 }
 
@@ -799,7 +813,7 @@ private:
         KernelParams& p = params_;
         p.nearest = settings_.resampling == Resampling::kNearest;
         const int nWarped = static_cast<int>(spec_.warped.size());
-        const int nOut = plan_.MaskOut() ? 3 : nWarped;  // a JPEG output keeps the colour bands
+        const int nOut = nWarped;  // the alpha band, when the output has one, is written by Finish
         p.type = work_;
         p.sourceWidth = W_;
         p.sourceHeight = H_;
@@ -926,8 +940,8 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
         p.photometric = tiff::photometric::kYCbCr;
         p.transparency = spec.dstAlpha ? Transparency::kMask : Transparency::kNone;
     } else {
-        p.bands = static_cast<int>(spec.warped.size()) + (spec.dstAlpha ? 1 : 0);
-        if (spec.dstAlpha) {
+        p.bands = static_cast<int>(spec.warped.size()) + (spec.AlphaBandOut() ? 1 : 0);
+        if (spec.AlphaBandOut()) {
             interps.emplace_back("Alpha");
             p.alphaBand = p.bands - 1;
         }
@@ -943,7 +957,9 @@ Expected<build::Plan> WarpPlan(const build::RasterSource& src, const WarpSetting
         p.codec = settings.losslessCodec;
         if (!p.complex) p.predictor = build::IsFloatType(p.type) ? 3 : 2;
         p.level = settings.level;
-        if (spec.dstNodata) {
+        if (spec.dstMask) {
+            p.transparency = Transparency::kMask;
+        } else if (spec.dstNodata) {
             p.transparency = Transparency::kNoData;
             p.nodata = spec.dstNodata;
             p.nodataText = src.NoDataText();

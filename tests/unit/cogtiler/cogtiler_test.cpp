@@ -847,6 +847,31 @@ TEST(CogTilerWarp, VirtualGridMatchesTheCogDroneDbBuilt) {
     if (checked == 0) GTEST_SKIP() << "no baseline-built COG present";
 }
 
+// A source outside EPSG:3857 without a nodata, mask or alpha is read on the grid of its COG, whose
+// internal mask makes the pixels of the grid outside the source transparent: so is the view.
+TEST(CogTilerWarp, TheGridOutsideASourceWithoutTransparencyIsTransparent) {
+    const auto src = CogSource::Open(std::string(DDBT_TEST_FIXTURES) + "/gdal/ref_byte.tif");  // EPSG:26711
+    ASSERT_NE(src->Warp(), nullptr);
+    ASSERT_EQ(src->Mask(), MaskKind::kAllValid);
+    const RasterView view(*src);
+    const SamplePlan plan = PlanLevelRead(view, 0, 0, 0, view.Width(), view.Height());
+    ASSERT_TRUE(plan.pointwise);
+    std::vector<uint8_t> alpha(plan.sx.size());
+    GatherAlpha(view, plan, alpha.data());
+    size_t outside = 0, inside = 0;
+    for (size_t i = 0; i < alpha.size(); ++i) {
+        if (plan.sx[i] < 0) {
+            ++outside;
+            EXPECT_EQ(alpha[i], 0) << i;
+        } else {
+            ++inside;
+            EXPECT_EQ(alpha[i], 255) << i;
+        }
+    }
+    EXPECT_GT(outside, 0u);
+    EXPECT_GT(inside, 0u);
+}
+
 // ------------------------------------------------------------------------------------------ API
 
 TEST(CogTilerApi, ArgumentsAndErrors) {

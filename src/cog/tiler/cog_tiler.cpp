@@ -453,10 +453,8 @@ void ReadPhysicalBands(const RasterView& view, const ViewNodata& nd, const std::
         GatherDatasetMask(view, plan, masked.data());
         for (size_t i = 0; i < pixels; ++i) masked[i] = masked[i] == 0 ? 1 : 0;
     }
-    // A warped view off the source (inside the COG grid): the built COG's transparency.
-    const bool warpTransparent =
-        src.AlphaBand() > 0 || src.Mask() != MaskKind::kAllValid || view.NodataOverride().has_value();
-    if (plan.pointwise && warpTransparent)
+    // A warped view off the source (inside the COG grid): masked, as the built COG masks it.
+    if (plan.pointwise)
         for (size_t i = 0; i < pixels; ++i)
             if (plan.sx[i] == -2) masked[i] = 1;
     std::vector<uint8_t> raw;

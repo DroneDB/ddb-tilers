@@ -664,11 +664,6 @@ void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, c
     const PixelType type = src.Type();
     const size_t ss = PixelTypeSize(type);
 
-    // The transparency of what the view adds outside the source (warped: the built COG's alpha /
-    // nodata, or none at all: opaque black).
-    const bool warpTransparent = !view.Warped() || src.AlphaBand() > 0 || src.Mask() != MaskKind::kAllValid ||
-                                 view.NodataOverride().has_value();
-
     if (view.AlphaBand() > 0) {
         const int b = view.AlphaBand();
         if (type == PixelType::kU8) {
@@ -715,13 +710,11 @@ void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, c
             case MaskKind::kAllValid: std::memset(out, 255, pixels); break;
         }
     }
-    // No sample: transparent (outside the window), or for a warped view inside its grid but off
-    // the source, what the built COG has there.
+    // No sample: transparent, outside the window as for a warped view inside its grid but off the
+    // source (the built COG masks those pixels: its alpha, its nodata, else its internal mask).
     if (plan.pointwise) {
-        for (size_t i = 0; i < pixels; ++i) {
-            if (plan.sx[i] == -1) out[i] = 0;
-            else if (plan.sx[i] == -2) out[i] = warpTransparent ? 0 : 255;
-        }
+        for (size_t i = 0; i < pixels; ++i)
+            if (plan.sx[i] < 0) out[i] = 0;
     } else {
         // Row by row: a row without a sample is cleared whole, else only its columns without one.
         const size_t w = static_cast<size_t>(plan.bufW);

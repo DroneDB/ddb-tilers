@@ -10,7 +10,10 @@
 //     (gdalwarp -of COG -r bilinear, ZOOM_LEVEL_STRATEGY=UPPER): JPEG q75 YCbCr for 8-bit RGB(A)
 //     without nodata (the alpha becomes a 1-bit mask), LZW + predictor otherwise; transparency as
 //     cog.cpp: a finite nodata is kept as the destination nodata, a NaN / infinite / huge nodata
-//     or a stand-alone mask becomes an alpha band, a source alpha is kept (a mask for JPEG).
+//     or a stand-alone mask becomes an alpha band, a source alpha is kept (a mask for JPEG); a
+//     source without any of them gets an internal mask of the pixels the warp writes (gdalwarp
+//     -dstalpha as the COG driver's ADD_ALPHA, the band count kept), so the pixels outside the
+//     source are transparent and out of the statistics.
 //   - A photo georeferenced by GCPs (BuildOptions::photo) is warped as libddb geoprojects it
 //     (gdalwarp -dstalpha from the photo with the GCPs): to the EPSG:3857 COG above in one warp
 //     (bilinear; JPEG for 8-bit RGB, with the pixels outside the photo, its alpha, mask or nodata
