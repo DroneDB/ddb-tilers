@@ -108,6 +108,8 @@ void WriteReport(const std::string& path, const CopcBuildReport& r) {
     j.obj["sourceCrs"] = json::String(r.sourceCrs);
     j.obj["crs"] = json::String(r.crs);
     j.obj["transformed"] = json::Bool(r.transformed);
+    j.obj["transformPath"] = json::String(r.transformPath);
+    j.obj["boundsPass"] = json::Bool(r.boundsPass);
     j.obj["crsDropped"] = json::Bool(r.crsDropped);
     json::Value levels = json::Array();
     for (const ddbt::copc::build::OctreeLevel& l : r.depthHistogram) {

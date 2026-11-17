@@ -8,8 +8,9 @@
 //      of LAS inputs, else from a bounds pass), then estimate the point density from a sample
 //      (the first points of every LAZ chunk, strided LAS records, the bounds pass) as a Morton
 //      histogram and cut the octree into bins. With a target CRS every pass reads the points
-//      transformed to it (point_transform.h) before they are quantised, and the cube and the
-//      sample come from a bounds pass over the transformed points.
+//      transformed to it (point_transform.h) before they are quantised, and the cube comes
+//      from the header box transformed (sampled on its surface, with a margin), else from a
+//      bounds pass over the transformed points.
 //   2. Scatter: one parallel pass over the inputs (a task per LAZ chunk, LAS range, text range,
 //      PLY stride, E57 packet range) decodes, converts, keys (BMI2 pdep) and appends every
 //      point to its bin, in memory or in one segmented spill file when the memory budget is
@@ -74,7 +75,8 @@ struct CopcBuildOptions {
     /// of its input (in three dimensions when the source is geocentric, either CRS has
     /// ellipsoidal heights or the heights change vertical CRS; otherwise X / Y only, heights
     /// kept: point_transform.h), quantised to 0.001 target units around the rounded centre, and the octree
-    /// is planned from the transformed points; the WKT VLR holds the target (WKT1 GDAL when it
+    /// is planned from the transformed header box (or the transformed points of an input without
+    /// header bounds; a point outside the plan makes it plan again); the WKT VLR holds the target (WKT1 GDAL when it
     /// expresses it, else WKT2 2019). A cloud in longitude / latitude with heights in metres
     /// needs it: one cube in its own units is sized by the heights in "degrees" and the octree
     /// never splits it horizontally.
@@ -118,6 +120,14 @@ struct CopcBuildReport {
     std::string sourceCrs, crs;
     /// The points were transformed to CopcBuildOptions::targetCrs.
     bool transformed = false;
+    /// How they were transformed (of the inputs, the most expensive): "identity" (the target is
+    /// their CRS), "grid" (X / Y through a grid approximation, heights kept), "exact" (PROJ on every
+    /// point: 3-D, or an input without header bounds); "" when not transformed.
+    std::string transformPath;
+    /// The bounds of some input were planned from a pass over its points (no header bounds, or a
+    /// header box that does not transform or that the points proved wrong): the input was read
+    /// twice.
+    bool boundsPass = false;
     /// The CRS of the inputs was dropped (CopcBuildOptions::dropCrs): crs is empty, sourceCrs is it.
     bool crsDropped = false;
     /// The nodes and points of every depth, and the points of the largest node.

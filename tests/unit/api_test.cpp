@@ -1673,6 +1673,10 @@ TEST(HostApi, BuildCopc2TransformsToTheTargetCrsAndReportsTheOctree) {
     EXPECT_TRUE(j->Find("transformed")->b);
     ASSERT_NE(j->Find("sourceCrs"), nullptr);
     EXPECT_EQ(j->Find("sourceCrs")->str, s.wkt);
+    ASSERT_NE(j->Find("transformPath"), nullptr);
+    EXPECT_EQ(j->Find("transformPath")->str, "grid");
+    ASSERT_NE(j->Find("boundsPass"), nullptr);
+    EXPECT_FALSE(j->Find("boundsPass")->b);
     ASSERT_NE(j->Find("crs"), nullptr);
     EXPECT_TRUE(ddbt::crs::Crs::FromWkt(j->Find("crs")->str).Equivalent(ddbt::crs::Crs::FromEpsg(32633)));
     ASSERT_NE(j->Find("maxNodePoints"), nullptr);

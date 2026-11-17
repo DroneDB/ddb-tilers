@@ -260,6 +260,10 @@ void ExpectGeographicToUtm(double lon, double lat, const std::string& utm, const
     st = BuildCopc(in, out, Options(utm), &rep);
     ASSERT_TRUE(st.ok()) << st.ToString();
     EXPECT_TRUE(rep.transformed);
+    EXPECT_EQ(rep.transformPath, "grid");
+    // Planned from the header box transformed: the input is read once, and the cube holds it.
+    EXPECT_FALSE(rep.boundsPass);
+    EXPECT_FALSE(rep.restarted);
     EXPECT_EQ(rep.points, s.count);
     EXPECT_EQ(rep.sourceCrs, s.wkt);
     EXPECT_TRUE(crs::Crs::FromWkt(rep.crs).Equivalent(crs::Crs::FromUserInput(utm)));
@@ -342,6 +346,9 @@ TEST(CopcBuildCrs, GeocentricToUtmWithEllipsoidalHeightsIsThreeDimensional) {
     const Status st = BuildCopc(in, out, Options(target), &rep);
     ASSERT_TRUE(st.ok()) << st.ToString();
     EXPECT_TRUE(rep.transformed);
+    EXPECT_EQ(rep.transformPath, "exact");
+    EXPECT_FALSE(rep.boundsPass);
+    EXPECT_FALSE(rep.restarted);
     EXPECT_EQ(rep.points, s.count);
     // WKT1 has no 3-D projected CRS: WKT2.
     EXPECT_EQ(rep.crs.rfind("PROJCRS[", 0), 0u) << rep.crs;
@@ -449,6 +456,7 @@ TEST(CopcBuildCrs, CompoundKeepsItsVerticalCrs) {
     CopcBuildReport rep;
     const Status st = BuildCopc(in, out, Options("EPSG:6346+5703"), &rep);
     ASSERT_TRUE(st.ok()) << st.ToString();
+    EXPECT_EQ(rep.transformPath, "grid");
     EXPECT_EQ(rep.crs.rfind("COMPD_CS[", 0), 0u) << rep.crs;
     EXPECT_TRUE(crs::Crs::FromWkt(rep.crs).Equivalent(crs::Crs::FromUserInput("EPSG:6346+5703")));
     ExpectRoundTrip(out, {{crs::Crs::FromWkt(s.wkt), PointsOf(s)}}, {0}, true);
@@ -457,6 +465,42 @@ TEST(CopcBuildCrs, CompoundKeepsItsVerticalCrs) {
     double worst = 0;
     for (const TaggedPoint& t : ReadCopc(out)) worst = std::max(worst, std::abs(t.p.z - src[static_cast<size_t>(t.tag)].z));
     EXPECT_LT(worst, 1e-6);
+    fs::remove_all(dir);
+}
+
+// Heights in US survey feet to a vertical CRS in metres (NAVD88 height (ftUS) to NAVD88 height):
+// the heights change, so every point goes through PROJ in three dimensions.
+TEST(CopcBuildCrs, ACompoundToAnotherVerticalUnitIsThreeDimensional) {
+    const std::string dir = TempDir("ftus");
+    SynthLas s = TaggedCloud(100000, 43, {1e-7, 1e-7, 0.01}, {-82.59, 27.53, 30}, {50000, 50000, 2000});
+    s.wkt = Wkt1("EPSG:6318+6360");
+    const std::string in = dir + "/geo.laz", out = dir + "/utm.copc.laz";
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    CopcBuildReport rep;
+    const Status st = BuildCopc(in, out, Options("EPSG:6346+5703"), &rep);
+    ASSERT_TRUE(st.ok()) << st.ToString();
+    EXPECT_EQ(rep.transformPath, "exact");
+    EXPECT_FALSE(rep.boundsPass);
+    // Every point once, where PROJ puts it horizontally, its height in metres (both quantisations:
+    // within 2 mm)
+    constexpr double kUsFoot = 1200.0 / 3937.0;
+    const std::vector<Xyz> src = PointsOf(s);
+    auto horizontal = crs::TransformCache::Global().Get(crs::Crs::FromEpsg(6318), crs::Crs::FromEpsg(6346));
+    const std::vector<TaggedPoint> points = ReadCopc(out);
+    ASSERT_EQ(points.size(), src.size());
+    std::vector<uint8_t> seen(src.size(), 0);
+    double worstXy = 0, worstZ = 0;
+    for (const TaggedPoint& t : points) {
+        const size_t i = static_cast<size_t>(t.tag);
+        ASSERT_LT(i, src.size());
+        ASSERT_EQ(seen[i]++, 0) << "a point written twice";
+        double x = src[i].x, y = src[i].y;
+        ASSERT_TRUE(horizontal->TransformPoint(x, y));
+        worstXy = std::max({worstXy, std::abs(t.p.x - x), std::abs(t.p.y - y)});
+        worstZ = std::max(worstZ, std::abs(t.p.z - src[i].z * kUsFoot));
+    }
+    EXPECT_LT(worstXy, 0.001);
+    EXPECT_LT(worstZ, 0.002);
     fs::remove_all(dir);
 }
 
@@ -499,6 +543,26 @@ TEST(CopcBuildCrs, PointTransformApproximatesTwoDimensionsAndRunsThreeExactly) {
     auto ellipsoidal = PointTransform::Create(crs::Crs::FromEpsg(4979), utm, box, 1e-4);
     ASSERT_TRUE(ellipsoidal.ok());
     EXPECT_TRUE((*ellipsoidal)->ThreeD());
+    EXPECT_EQ((*t)->GetPath(), PointTransform::Path::Grid);
+    EXPECT_EQ((*same)->GetPath(), PointTransform::Path::Grid);
+    EXPECT_EQ((*ecef)->GetPath(), PointTransform::Path::Exact);
+    // The bounds of the box transformed: those of a dense lattice of the box, to within the bend
+    // of a side between two samples (well under a millimetre over 1.5 km).
+    const auto bounds = (*t)->BoxBounds({box[0], box[1], 580}, {box[2], box[3], 720});
+    ASSERT_TRUE(bounds.has_value());
+    std::array<double, 3> lo{1e300, 1e300, 1e300}, hi{-1e300, -1e300, -1e300};
+    for (int i = 0; i <= 200; ++i)
+        for (int j = 0; j <= 200; ++j) {
+            double x = box[0] + (box[2] - box[0]) * i / 200, y = box[1] + (box[3] - box[1]) * j / 200;
+            ASSERT_TRUE(exact->TransformPoint(x, y));
+            lo = {std::min(lo[0], x), std::min(lo[1], y), 580};
+            hi = {std::max(hi[0], x), std::max(hi[1], y), 720};
+        }
+    for (size_t a = 0; a < 3; ++a) {
+        EXPECT_NEAR(bounds->first[a], lo[a], 1e-3) << a;
+        EXPECT_NEAR(bounds->second[a], hi[a], 1e-3) << a;
+    }
+    EXPECT_FALSE((*t)->BoxBounds({13.84, 46.68, 0}, {13.85, 95.0, 1}).has_value());
     // A point PROJ cannot transform is an error, not a point dropped.
     const double far[3] = {13.84, 95.0, 0};
     double farOut[3];
@@ -541,6 +605,7 @@ TEST(CopcBuildCrs, AnUnknownVerticalCrsKeepsItsHeights) {
     CopcBuildReport rep;
     const Status st = BuildCopc(in, out, Options("EPSG:32633"), &rep);
     ASSERT_TRUE(st.ok()) << st.ToString();
+    EXPECT_EQ(rep.transformPath, "grid");
     EXPECT_EQ(rep.sourceCrs, s.wkt);
     EXPECT_TRUE(crs::Crs::FromWkt(rep.crs).Equivalent(crs::Crs::FromEpsg(32633)));
     EXPECT_FALSE(HasWarning(rep, "degenerate octree"));
@@ -550,6 +615,99 @@ TEST(CopcBuildCrs, AnUnknownVerticalCrsKeepsItsHeights) {
     for (const TaggedPoint& t : ReadCopc(out)) worst = std::max(worst, std::abs(t.p.z - src[static_cast<size_t>(t.tag)].z));
     EXPECT_LT(worst, 1e-6);
     fs::remove_all(dir);
+}
+
+// The vertical CRS Metashape cannot name, kept by a host in the target it asks for (UTM + the
+// source's vertical part, in WKT1 as the source states it and in WKT2 as GDAL writes a compound
+// CRS it has no code for): the heights do not change, so X / Y go through the grid.
+TEST(CopcBuildCrs, ATargetWithTheSourcesUnknownVerticalCrsKeepsHeightsOnTheGrid) {
+    const std::string dir = TempDir("unknown-vertical-kept");
+    const std::string vertical =
+        "VERT_CS[\"unknown\",VERT_DATUM[\"unknown\",2005],UNIT[\"metre\",1,AUTHORITY[\"EPSG\",\"9001\"]],AXIS[\"Up\",UP]]";
+    SynthLas s = GeographicCloud(13.84, 46.68, 100000, 47);
+    s.wkt = "COMPD_CS[\"WGS 84\"," + Wkt1("EPSG:4326") + "," + vertical + "]";
+    const std::string in = dir + "/geo.laz";
+    ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    const std::string wkt1 = "COMPD_CS[\"WGS 84 / UTM zone 33N + unknown\"," + Wkt1("EPSG:32633") + "," + vertical + "]";
+    const std::string wkt2 = crs::Crs::FromWkt(wkt1).ToWkt(crs::WktFlavor::Wkt2_2019);
+    ASSERT_EQ(wkt2.rfind("COMPOUNDCRS[", 0), 0u) << wkt2;
+    const std::vector<Xyz> src = PointsOf(s);
+    for (const std::string& target : {wkt1, wkt2}) {
+        const std::string out = dir + "/utm.copc.laz";
+        CopcBuildReport rep;
+        const Status st = BuildCopc(in, out, Options(target), &rep);
+        ASSERT_TRUE(st.ok()) << st.ToString();
+        EXPECT_EQ(rep.transformPath, "grid") << target;
+        EXPECT_FALSE(rep.boundsPass);
+        EXPECT_TRUE(crs::Crs::FromWkt(rep.crs).Equivalent(crs::Crs::FromWkt(wkt1))) << rep.crs;
+        EXPECT_FALSE(HasWarning(rep, "degenerate octree"));
+        ExpectRoundTrip(out, {{crs::Crs::FromEpsg(4326), PointsOf(s)}}, {0}, false);
+        double worst = 0;
+        for (const TaggedPoint& t : ReadCopc(out)) worst = std::max(worst, std::abs(t.p.z - src[static_cast<size_t>(t.tag)].z));
+        EXPECT_LT(worst, 1e-6);
+        fs::remove_all(out);
+    }
+    fs::remove_all(dir);
+}
+
+/// Builds `s` to UTM 33N: every point once, within a millimetre of where it was, a valid COPC
+/// whose cube holds every point.
+CopcBuildReport ExpectUtmBuildOf(const SynthLas& s, const std::string& name) {
+    const std::string dir = TempDir(name);
+    const std::string in = dir + "/geo.laz", out = dir + "/utm.copc.laz";
+    EXPECT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+    CopcBuildReport rep;
+    const Status st = BuildCopc(in, out, Options("EPSG:32633"), &rep);
+    EXPECT_TRUE(st.ok()) << st.ToString();
+    if (st.ok()) {
+        EXPECT_EQ(rep.points, s.count);
+        auto chk = CheckCopc(out, 2);
+        EXPECT_TRUE(chk.ok());
+        if (chk.ok()) {
+            EXPECT_TRUE(chk->ok()) << (chk->errors.empty() ? "" : chk->errors[0]);
+            EXPECT_EQ(chk->outside, 0u);
+        }
+        ExpectRoundTrip(out, {{crs::Crs::FromWkt(s.wkt), PointsOf(s)}}, {0}, false);
+    }
+    fs::remove_all(dir);
+    return rep;
+}
+
+// A header box smaller than the cloud (the middle half of it): the cube planned from it misses
+// points, so the build plans again from the bounds of the points it read.
+TEST(CopcBuildCrs, AHeaderBoxThatMissesPointsIsPlannedAgain) {
+    SynthLas s = GeographicCloud(13.84, 46.68, 100000, 53);
+    s.overrideBounds = true;
+    s.min = {13.84 - 0.0035, 46.68 - 0.0035, 650 - 36};
+    s.max = {13.84 + 0.0035, 46.68 + 0.0035, 650 + 36};
+    const CopcBuildReport rep = ExpectUtmBuildOf(s, "small-header");
+    EXPECT_TRUE(rep.restarted);
+    EXPECT_FALSE(rep.boundsPass);
+}
+
+// A header box far from the cloud (around 0, 0): the transformed points do not fit a quantisation
+// around its centre, so the build plans from a bounds pass over them.
+TEST(CopcBuildCrs, AHeaderBoxFarFromThePointsIsPlannedFromABoundsPass) {
+    SynthLas s = GeographicCloud(13.84, 46.68, 50000, 59);
+    s.overrideBounds = true;
+    s.min = {0, 0, 0};
+    s.max = {0.001, 0.001, 1};
+    const CopcBuildReport rep = ExpectUtmBuildOf(s, "far-header");
+    EXPECT_TRUE(rep.restarted);
+    EXPECT_TRUE(rep.boundsPass);
+}
+
+// No header bounds (minimum over maximum): a bounds pass plans the build, and with no box to grid
+// over every point goes through PROJ.
+TEST(CopcBuildCrs, AnInputWithoutHeaderBoundsIsPlannedFromABoundsPass) {
+    SynthLas s = GeographicCloud(13.84, 46.68, 50000, 61);
+    s.overrideBounds = true;
+    s.min = {1, 1, 1};
+    s.max = {0, 0, 0};
+    const CopcBuildReport rep = ExpectUtmBuildOf(s, "no-header");
+    EXPECT_TRUE(rep.boundsPass);
+    EXPECT_FALSE(rep.restarted);
+    EXPECT_EQ(rep.transformPath, "exact");
 }
 
 TEST(CopcBuildCrs, InputsInDifferentCrssNeedATarget) {

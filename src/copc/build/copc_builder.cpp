@@ -73,6 +73,10 @@ constexpr double kScale = 0.001;
 // The largest error of the grid approximation of a transform to a target CRS: a tenth of the
 // scale, so a point lands where the exact transform puts it to within its quantisation.
 constexpr double kTransformError = kScale / 10;
+// The header box of an input transformed to a target CRS is widened on every side by this share
+// of its largest extent: the sides of the box bend between the samples of PointTransform::BoxBounds
+// and a header's bounds may be rounded. A point still outside makes the build plan again.
+constexpr double kHeaderBoxMargin = 1e-3;
 
 /// Bytes per point of a partition in flight: its records loaded (spill) and their sorted copy,
 /// sort entries, keys, index lists, the encoded chunks waiting to be committed.
@@ -337,15 +341,30 @@ public:
         DDBT_TRY(ChooseOutput());
         DDBT_TRY(ChooseCrs());
         DDBT_TRY(CheckHeaderFields(fields_));
+        PlanHeaderBoxes();
         DDBT_TRY(PlanBounds());
         for (int attempt = 0;; ++attempt) {
-            DDBT_TRY(PlanBins());
+            Status st = PlanBins();
             r_.secondsPlan += t.ElapsedSeconds();
             t = Timer();
-            Progress(0.05, "reading");
-            DDBT_TRY(Scatter());
-            r_.secondsScatter += t.ElapsedSeconds();
-            t = Timer();
+            if (st.ok()) {
+                Progress(0.05, "reading");
+                st = Scatter();
+                r_.secondsScatter += t.ElapsedSeconds();
+                t = Timer();
+            }
+            if (st.code() == StatusCode::kOutOfRange && attempt == 0 && PlannedFromTransformedHeader()) {
+                // A transformed point (of the sample or of the scatter) too far from a header box to
+                // be quantised around its centre: the header cannot be trusted, plan from a bounds
+                // pass over the transformed points.
+                r_.restarted = true;
+                store_.reset();
+                for (size_t i = 0; i < readers_.size(); ++i)
+                    if (transforms_[i] != nullptr) headerBoxes_[i].reset();
+                DDBT_TRY(PlanBounds());
+                continue;
+            }
+            DDBT_TRY(st);
             if (!stats_.outside) break;
             if (attempt > 0) return InternalError("points outside the cube after planning from their own bounds");
             // The header bounds were wrong: plan again from the real bounds.
@@ -506,18 +525,64 @@ private:
         }
         r_.crs = fields_.wkt;
         r_.transformed = Transforming();
+        r_.transformPath = TransformPathName();
         return Status();
+    }
+
+    /// The path of the input transformed the most expensively ("" without a target).
+    std::string TransformPathName() const {
+        if (!Transforming()) return {};
+        PointTransform::Path worst = PointTransform::Path::Identity;
+        for (const auto& t : transforms_) worst = std::max(worst, t->GetPath());
+        switch (worst) {
+            case PointTransform::Path::Identity: return "identity";
+            case PointTransform::Path::Grid: return "grid";
+            case PointTransform::Path::Exact: return "exact";
+        }
+        return {};
     }
 
     bool Transforming() const { return !o_.targetCrs.empty(); }
 
-    /// The input's header bounds and a sample of its records plan the build; otherwise (bounds
-    /// that cannot be trusted, points transformed to another CRS) a bounds pass reads it.
-    bool PlannedFromHeader(size_t reader) const {
-        return readers_[reader]->Info().boundsKnown && transforms_[reader] == nullptr;
+    /// The bounds each input's header gives in the build's CRS: as stated, or with a target CRS
+    /// the box transformed (PointTransform::BoxBounds) and widened by kHeaderBoxMargin. None for
+    /// an input without bounds, a box of no area or one that does not transform.
+    void PlanHeaderBoxes() {
+        headerBoxes_.assign(readers_.size(), std::nullopt);
+        for (size_t i = 0; i < readers_.size(); ++i) {
+            const SourceInfo& info = readers_[i]->Info();
+            if (!info.boundsKnown) continue;
+            if (transforms_[i] == nullptr) {
+                headerBoxes_[i] = HeaderBox{info.min, info.max};
+                continue;
+            }
+            if (!(info.max[0] > info.min[0] && info.max[1] > info.min[1])) continue;
+            const auto box = transforms_[i]->BoxBounds(info.min, info.max);
+            if (!box) continue;
+            auto [lo, hi] = *box;
+            double extent = 0;
+            for (size_t a = 0; a < 3; ++a) extent = std::max(extent, hi[a] - lo[a]);
+            const double margin = kHeaderBoxMargin * extent;
+            for (size_t a = 0; a < 3; ++a) {
+                lo[a] -= margin;
+                hi[a] += margin;
+            }
+            headerBoxes_[i] = HeaderBox{lo, hi};
+        }
+    }
+
+    /// The input's header bounds (headerBoxes_) and a sample of its records plan the build;
+    /// otherwise (bounds that cannot be trusted or that do not transform) a bounds pass reads it.
+    bool PlannedFromHeader(size_t reader) const { return headerBoxes_[reader].has_value(); }
+
+    bool PlannedFromTransformedHeader() const {
+        for (size_t i = 0; i < readers_.size(); ++i)
+            if (PlannedFromHeader(i) && transforms_[i] != nullptr) return true;
+        return false;
     }
 
     Status PlanBounds() {
+        probeSample_.clear();
         bool first = true;
         auto grow = [&](const std::array<double, 3>& mn, const std::array<double, 3>& mx) {
             for (size_t a = 0; a < 3; ++a) {
@@ -529,11 +594,11 @@ private:
         // Readers without trusted bounds: a bounds pass (also their sample).
         std::vector<uint32_t> probe;
         for (uint32_t i = 0; i < readers_.size(); ++i) {
-            const SourceInfo& info = readers_[i]->Info();
-            if (PlannedFromHeader(i)) grow(info.min, info.max);
+            if (PlannedFromHeader(i)) grow(headerBoxes_[i]->min, headerBoxes_[i]->max);
             else probe.push_back(i);
         }
         if (!probe.empty()) {
+            r_.boundsPass = true;
             std::vector<TaskRef> tasks;
             uint64_t estimate = 0;
             for (uint32_t i : probe) {
@@ -1181,6 +1246,11 @@ private:
     std::vector<std::unique_ptr<PointReader>> readers_;
     /// Per input: its transform to the target CRS (null without one).
     std::vector<std::shared_ptr<const PointTransform>> transforms_;
+    /// Per input: the bounds its header gives in the build's CRS (PlanHeaderBoxes).
+    struct HeaderBox {
+        std::array<double, 3> min, max;
+    };
+    std::vector<std::optional<HeaderBox>> headerBoxes_;
     OutputSpec spec_;
     CopcHeaderFields fields_;
     ProbeStats bounds_;

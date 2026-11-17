@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "copc/build/point_transform.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -83,6 +84,40 @@ Status PointTransform::Apply(const double* xyz, size_t n, double* out) const {
         out[3 * i + 2] = z;
     }
     return Status();
+}
+
+std::optional<std::pair<std::array<double, 3>, std::array<double, 3>>> PointTransform::BoxBounds(
+    const std::array<double, 3>& min, const std::array<double, 3>& max, int segments) const {
+    const int n = std::max(segments, 1);
+    std::vector<double> xyz;
+    xyz.reserve(size_t{6} * static_cast<size_t>((n + 1) * (n + 1)) * 3);
+    const auto at = [&](size_t a, int i) { return i == n ? max[a] : min[a] + (max[a] - min[a]) * i / n; };
+    // Each face: one axis at its min or its max, the other two on a lattice
+    for (size_t fixed = 0; fixed < 3; ++fixed) {
+        const size_t u = (fixed + 1) % 3, v = (fixed + 2) % 3;
+        for (const double side : {min[fixed], max[fixed]})
+            for (int i = 0; i <= n; ++i)
+                for (int j = 0; j <= n; ++j) {
+                    std::array<double, 3> p{};
+                    p[fixed] = side;
+                    p[u] = at(u, i);
+                    p[v] = at(v, j);
+                    xyz.insert(xyz.end(), p.begin(), p.end());
+                }
+    }
+    if (!Apply(xyz.data(), xyz.size() / 3, xyz.data()).ok()) return std::nullopt;
+    std::array<double, 3> lo{xyz[0], xyz[1], xyz[2]}, hi = lo;
+    for (size_t k = 0; k < xyz.size(); k += 3)
+        for (size_t a = 0; a < 3; ++a) {
+            lo[a] = std::min(lo[a], xyz[k + a]);
+            hi[a] = std::max(hi[a], xyz[k + a]);
+        }
+    return std::make_pair(lo, hi);
+}
+
+PointTransform::Path PointTransform::GetPath() const noexcept {
+    if (grid_) return Path::Grid;
+    return t_->GetKind() == crs::Transform::Kind::Identity ? Path::Identity : Path::Exact;
 }
 
 std::string LasWkt(const crs::Crs& crs) {

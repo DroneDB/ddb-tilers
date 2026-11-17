@@ -61,11 +61,16 @@ The octree is one cube in the units of the output CRS. A cloud in longitude / la
 heights in metres (a Metashape export in EPSG:4326) gets a cube sized by its height range in
 "degrees", which never splits the cloud horizontally. With `targetCrs` (a WKT, `EPSG:n`,
 `EPSG:h+v` or a PROJ string) every point is transformed from the CRS of its input before it is
-quantised, at 0.001 target units around the rounded centre, with the octree planned from a
-bounds pass over the transformed points. The transform is 3-D when the source is geocentric,
-either CRS has ellipsoidal heights or the heights change vertical CRS. Otherwise the heights are
-kept and X / Y go through a grid approximation of the PROJ transform within 0.1 mm (about free;
-PROJ's transverse Mercator would add 8 s to a build of 160 million points).
+quantised, at 0.001 target units around the rounded centre. The octree is planned from the
+header box of each input transformed (its surface sampled, 33 points a side on each face, then
+widened by 0.1 % of its largest extent), so the input is read once; a point outside that plan
+makes the build plan again from the points it read, and an input without header bounds is planned
+from a pass over its transformed points. The transform is 3-D when the source is geocentric,
+either CRS has ellipsoidal heights or the heights change vertical CRS (NAVD88 height in US survey
+feet to NAVD88 height in metres). Otherwise the heights are kept (the same vertical CRS on both
+sides, as PROJ compares them: an "unknown" vertical CRS a host copies from the source into the
+target is the same) and X / Y go through a grid approximation of the PROJ transform within 0.1 mm
+(about free; PROJ's transverse Mercator would add 4 s to a build of 160 million points).
 The WKT record then holds the target (WKT1 GDAL when it expresses it, else WKT2 2019) and the
 sidecar's footprint follows it. Without `targetCrs`, inputs in different CRSs are refused. A WKT
 too long for its LAS record (65,534 characters) is an error.
@@ -77,7 +82,9 @@ footprint, and the report gives `crs` empty, `sourceCrs` the stated CRS and `crs
 cannot be combined with `targetCrs`.
 
 The build report (`report`) gives the input and output CRSs (`sourceCrs`, `crs`,
-`transformed`, `crsDropped`), the nodes and points of each depth (`depthHistogram`), the largest node
+`transformed`, `crsDropped`), how the points were transformed (`transformPath`: `grid`, `exact`
+for PROJ on every point, `identity`, or empty), whether an input was read twice to plan the
+octree (`boundsPass`) or the plan was made again (`restarted`), the nodes and points of each depth (`depthHistogram`), the largest node
 (`maxNodePoints`) and `warnings`: "degenerate octree" when a node holds more than 16 times the
 leaf size (100,000 points), the sign of a cube that does not fit the cloud.
 
