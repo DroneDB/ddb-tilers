@@ -845,6 +845,52 @@ TEST_F(CopcTilerTest, AThumbnailFitsTheWholeCloudCentredInItsSquare) {
     }
 }
 
+TEST_F(CopcTilerTest, AThumbnailDrawsThePointsOnItsBoundsWhole) {
+    // The 8 corners of a box (a wireframe cube, a cloud of a few points): 4 points in plan, each on
+    // two bounds of the thumbnail. Fitted edge to edge, their discs were cut by the edges of the
+    // image (a quarter to a half of each drawn); with a margin each is drawn whole, the 13 pixels of
+    // the disc, off the edges, in its own coordinates and in EPSG:3857.
+    for (const bool crs : {false, true}) {
+        SCOPED_TRACE(crs ? "UTM" : "no CRS");
+        ddbt::copc::testing::SynthLas las;
+        las.format = 3;
+        las.wkt = crs ? test::kUtm33Wkt : "";
+        las.offset = {500000, 5000000, 0};
+        ddbt::copc::testing::FillRandom(las, 8, 3, {1000, 1000, 1000}, false);
+        for (uint64_t i = 0; i < 8; ++i) {
+            uint8_t* rec = las.records.data() + i * las.RecordSize();
+            for (int a = 0; a < 3; ++a)
+                ddbt::StoreLE<int32_t>(rec + 4 * a, ((i >> a) & 1) != 0 ? 1000 : -1000);
+        }
+        const std::string name = crs ? "cube-utm" : "cube";
+        const std::string in = (*dir_ / (name + ".las")).string();
+        const std::string path = (*dir_ / (name + ".copc.laz")).string();
+        ASSERT_TRUE(ddbt::copc::testing::WriteBytes(in, ddbt::copc::testing::BuildLasBytes(las)));
+        build::CopcBuildOptions o;
+        o.metadata = false;
+        ASSERT_TRUE(build::BuildCopc(in, path, o).ok());
+        for (const int size : {32, 256}) {
+            ThumbnailRequest r;
+            r.path = path;
+            r.size = size;
+            std::vector<uint8_t> rgba;
+            RenderInfo info;
+            RenderThumbnail(r, rgba, &info);
+            EXPECT_EQ(info.points, 8u);
+            EXPECT_EQ(Opaque(rgba), 4u * 13u) << size;
+            const Extent2 e = OpaqueExtent(rgba, size);
+            EXPECT_GE(e.minX, 0);
+            EXPECT_GE(e.minY, 0);
+            EXPECT_LE(e.maxX, size - 1);
+            EXPECT_LE(e.maxY, size - 1);
+            // Centred, from edge to edge but the margin
+            EXPECT_NEAR((e.minX + e.maxX) / 2.0, (size - 1) / 2.0, 1.0) << size;
+            EXPECT_LE(e.minX, 2) << size;
+            EXPECT_GE(e.maxX, size - 3) << size;
+        }
+    }
+}
+
 TEST_F(CopcTilerTest, AThumbnailReadsTheDeepestLevelsWithinItsPointBudget) {
     CloudSpec s;
     const std::string path = Cloud("rgb8", s);

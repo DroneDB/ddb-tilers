@@ -822,7 +822,11 @@ void RenderThumbnail(const ThumbnailRequest& r, std::vector<uint8_t>& rgba, Rend
     const double width = area.maxX - area.minX, height = area.maxY - area.minY;
     if (!(std::max(width, height) > 0) || !std::isfinite(width) || !std::isfinite(height))
         throw TileError(TileErrorCode::kException, "Cannot calculate length: point cloud has zero extent");
-    const double scale = r.size / std::max(width, height);
+    // A margin of the disc's radius and the pixel a point is anchored in on each side, so the points
+    // on the bounds are drawn whole (a cloud of a few points, the corners of a box) instead of cut
+    // by the edge of the image (as small an image as allows)
+    const int margin = std::min(SplatRasterizer::kRadius + 1, (r.size - 1) / 2);
+    const double scale = (r.size - 2 * margin) / std::max(width, height);
     // Centred: the margins of the shorter side split evenly
     const double offX = (r.size - width * scale) / 2, offY = (r.size - height * scale) / 2;
     const PixelMap pm{area.minX - offX / scale, area.maxY + offY / scale, scale};

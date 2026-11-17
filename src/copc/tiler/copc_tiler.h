@@ -124,7 +124,8 @@ encode::ByteBuffer RenderTile(const TileRequest& request);
 void RenderRgba(const Cloud& cloud, const TileRequest& request, std::vector<uint8_t>& rgba,
                 RenderInfo* info = nullptr);
 
-/// A thumbnail: the whole cloud fitted, centred, in a square of size x size pixels.
+/// A thumbnail: the whole cloud fitted, centred, in a square of size x size pixels, a margin of the
+/// disc's radius plus one pixel on each side (a point on the bounds is drawn whole).
 struct ThumbnailRequest {
     std::string path;
     int size = 512;
