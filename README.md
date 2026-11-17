@@ -117,8 +117,11 @@ or uses less memory.
 | Throughput at 16 threads, warm, PNG 256 px | 4.8x to 20x | 5x to 200x |
 | Peak memory | 0.30x to 0.56x | 0.35x to 0.55x (1.2x to 1.4x on one cloud at 1 thread) |
 
-Raster tiles are pixel-identical to DroneDB 2.4.1's on the test rasters (DroneDB re-encodes JPEG
-COGs, so those differ within JPEG noise). The COGs pass GDAL's COG validator and have DroneDB's
+With `DDBT_TILER_MODE=compat`, raster tiles are pixel-identical to DroneDB 2.4.1's on the test
+rasters (DroneDB re-encodes JPEG COGs, so those differ within JPEG noise). By default each tile
+pixel shows the pixel of the overview under its centre, where GDAL draws it: DroneDB 2.4.1's
+read window, rounded to whole pixels, moved a raster off the tile grid by up to a pixel of the
+level it read. The COGs pass GDAL's COG validator and have DroneDB's
 grid. WebP tiles use libwebp method 1 (DroneDB uses 2): 12-41 % more
 tiles per second, a slightly higher PSNR, at most 8 % more bytes.
 
@@ -218,6 +221,7 @@ Environment variables (all optional):
 | `DDBT_COPC_TILE_CACHE_MB` | 64 | Encoded-tile cache of the COPC tiler |
 | `DDBT_COPC_TILE_MAX_POINTS` | 4000000 | Most points one COPC tile reads (0: no limit); past it the tile reads the deepest levels of detail that fit. A tile or thumbnail of a cloud whose root node holds more points is refused (`DDBT_ERR_REFUSED`) without reading the root |
 | `DDBT_COPC_TILE_MAX_NODE_POINTS` | 1000000 | Most points of a node a COPC tile reads, the root excepted (0: no limit); larger nodes are left out and never cached |
+| `DDBT_TILER_MODE` | `default` | `compat`: DroneDB 2.4.1's raster tiles, bit for bit |
 | `DDBT_COPC_TILER_MODE` | `hybrid` | `compat`, `hybrid` or `modern` |
 | `DDBT_COPC_BUILD_MEM_MB` | 4096 | Memory cap of the COPC builder |
 | `DDBT_WEBP_METHOD` | 1 | libwebp method (0-6) of WebP tiles |

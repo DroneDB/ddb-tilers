@@ -35,8 +35,8 @@ std::atomic<int> g_mode{-1};
 
 SamplingMode ModeFromEnv() {
     const char* e = std::getenv("DDBT_TILER_MODE");
-    if (e != nullptr && std::strcmp(e, "default") == 0) return SamplingMode::kDefault;
-    return SamplingMode::kCompat;
+    if (e != nullptr && std::strcmp(e, "compat") == 0) return SamplingMode::kCompat;
+    return SamplingMode::kDefault;
 }
 
 // Encoded-tile cache ----------------------------------------------------------------------------
@@ -299,11 +299,11 @@ struct Ctx {
 };
 
 /// The read of a tile: the window and its placement (compat: geoQuery; default: the whole
-/// tile). False when the tile has nothing to read (blank).
+/// tile, on the file or on the warped grid). False when the tile has nothing to read (blank).
 bool TileRead(Ctx& c, const RasterView& view, SamplePlan& plan, Placement& at) {
     GQResult g;
     if (!tile::compat::TileWindow(c.tiling, c.req.z, c.req.x, c.row, g)) return false;
-    if (c.mode == SamplingMode::kCompat || view.Warped()) {
+    if (c.mode == SamplingMode::kCompat) {
         plan = PlanRead(view, g.r.x, g.r.y, g.r.xsize, g.r.ysize, g.w.xsize, g.w.ysize);
         at = {g.w.x, g.w.y, g.w.xsize, g.w.ysize};
     } else {

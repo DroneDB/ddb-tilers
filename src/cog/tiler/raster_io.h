@@ -14,9 +14,10 @@
 //    row (int)clamp((j + 0.5) * h / bufH + y + 1e-10), source column from x + 0.5 * inc + 1e-10
 //    stepped by inc (an accumulated double sum; an integer factor steps in integers and clamps
 //    only the last column), clamped to the level.
-//  - Default (DDBT_TILER_MODE unset or "compat" keeps compat; see CogTiler): the level comes
+//  - Default (DDBT_TILER_MODE unset; "compat" keeps compat, see cog_tiler.h): the level comes
 //    from the zoom, and each tile pixel takes the level pixel under its centre (no window
-//    rounding: no seams between tiles).
+//    rounding: no shift off the tile grid or below the smallest overview, no seams between
+//    tiles).
 //
 // The plan is then gathered from the decoded blocks (block_cache.h): bands as their native
 // samples, the "alpha" GDALTiler::readAlpha reads (the alpha band clamped to bytes, else the mask
