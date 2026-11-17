@@ -266,3 +266,38 @@ TEST(CogTilerRender, NanIsTransparent) {
         EXPECT_EQ(a.rightTransparent, 0) << bands;
     }
 }
+
+TEST(CogTilerRender, TwoBandsAreRedAndGreenWithTheirAlpha) {
+    // Two Byte bands (200, 100) with their transparency over columns 0 to 99 in a third, alpha band
+    // (a COG of a 2-band raster with a mask), or in an internal mask: drawn (200, 100, 0) and opaque
+    // over the other columns, transparent over those. DroneDB 2.4.1 drew band 1 as grey and took band
+    // 2 (100) for the alpha.
+    TempDir dir;
+    for (const bool alphaBand : {true, false}) {
+        const fs::path tif = dir.path() / (alphaBand ? "alpha.tif" : "mask.tif");
+        SynthSpec s = Spec(kW, alphaBand ? 3 : 2, 1);
+        s.height = kH;
+        s.tile = 256;
+        s.value = [](int band, uint32_t x, uint32_t) {
+            return band == 0 ? 200.0f : band == 1 ? 100.0f : (x < 100 ? 0.0f : 255.0f);
+        };
+        if (alphaBand) s.extraSamples = {0, 2};
+        else s.mask = [](uint32_t x, uint32_t, int) { return x >= 100; };
+        WriteSynth(tif, s);
+        const int z = 19;
+        const auto [tx, ty] = TileOf(kOriginX + 100 * kPixel, kOriginY - 300 * kPixel, z);
+        const auto rgba = RenderRgba(tif.string(), z, tx, ty);
+        const SplitAlpha a = AlphaAroundColumn(rgba, z, tx, ty, 100);
+        EXPECT_GT(a.left, 1000) << alphaBand;
+        EXPECT_EQ(a.leftTransparent, a.left) << alphaBand;
+        EXPECT_EQ(a.rightTransparent, 0) << alphaBand;
+        int wrong = 0, opaque = 0;
+        for (size_t i = 0; i < rgba.size(); i += 4) {
+            if (rgba[i + 3] == 0) continue;
+            ++opaque;
+            wrong += rgba[i] != 200 || rgba[i + 1] != 100 || rgba[i + 2] != 0 || rgba[i + 3] != 255;
+        }
+        EXPECT_GT(opaque, 1000) << alphaBand;
+        EXPECT_EQ(wrong, 0) << alphaBand;
+    }
+}

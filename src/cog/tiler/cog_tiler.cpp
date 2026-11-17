@@ -342,21 +342,41 @@ struct TileBands {
     const std::vector<std::array<uint8_t, 4>>* palette = nullptr;
 };
 
-/// The bands of the plain tile (and of a vis tile without a band choice): dataBandCount's first
-/// three; by default, a palette band through its colour table (DroneDB 2.4.1 drew its indices as
-/// grey levels).
-TileBands PlainTileBands(const Ctx& c, const RasterView& view) {
+/// The first 3 of `bands` and their colour channels: one band grey, 3 bands RGB; 2 bands red and
+/// green by default, grey + alpha in compat (DroneDB's encoder took band 2 of a 2-band tile for its
+/// alpha, whatever the band was).
+TileBands FirstBands(const Ctx& c, std::vector<int> bands, bool selected) {
     TileBands t;
-    if (c.mode == SamplingMode::kDefault && view.Interp(1) == ColorInterp::kPalette && view.Source().ColorTable() &&
+    if (bands.size() > 3) bands.resize(3);
+    t.bands = std::move(bands);
+    t.colorBands = std::max(1, static_cast<int>(t.bands.size()));
+    if (c.mode == SamplingMode::kDefault && t.colorBands == 2) t.colorBands = 3;
+    t.selected = selected;
+    return t;
+}
+
+/// The bands of the plain tile (and of a vis tile without a band choice). Compat: the first of
+/// dataBandCount's (which takes band 2 of 2 for an alpha band). Default: a palette band through its
+/// colour table (2.4.1 drew its indices as grey), else the bands that are not the alpha band.
+TileBands PlainTileBands(const Ctx& c, const RasterView& view) {
+    if (c.mode == SamplingMode::kCompat) {
+        std::vector<int> bands;
+        for (int b = 1; b <= std::max(1, std::min(3, view.DataBandCount())); ++b) bands.push_back(b);
+        return FirstBands(c, std::move(bands), false);
+    }
+    if (view.Interp(1) == ColorInterp::kPalette && view.Source().ColorTable() &&
         (view.Type() == PixelType::kU8 || view.Type() == PixelType::kU16)) {
+        TileBands t;
         t.colorBands = 3;
         t.bands = {1};
         t.palette = view.Source().ColorTable();
         return t;
     }
-    t.colorBands = std::max(1, std::min(3, view.DataBandCount()));
-    for (int b = 1; b <= t.colorBands; ++b) t.bands.push_back(b);
-    return t;
+    std::vector<int> bands;
+    for (int b = 1; b <= view.BandCount(); ++b)
+        if (b != view.AlphaBand()) bands.push_back(b);
+    if (bands.empty()) bands.push_back(1);
+    return FirstBands(c, std::move(bands), false);
 }
 
 /// The colour planes of a row of palette indices (Byte or UInt16 samples), and its alpha lowered
@@ -727,11 +747,7 @@ encode::ByteBuffer VisTile(Ctx& c, const VisParams& vis) {
     const std::vector<int> selected = ResolveVisBands(*c.src, vis, nBands);
     if (selected.empty()) return ReadBandsTile(c, view, PlainTileBands(c, view));
     // readSelectedBands: Byte bands as they are, others over mean +- 2.33 sigma.
-    TileBands chosen;
-    chosen.colorBands = std::min(3, static_cast<int>(selected.size()));
-    chosen.bands.assign(selected.begin(), selected.begin() + chosen.colorBands);
-    chosen.selected = true;
-    return ReadBandsTile(c, view, chosen);
+    return ReadBandsTile(c, view, FirstBands(c, selected, true));
 }
 
 }  // namespace

@@ -127,6 +127,8 @@ tiles are drawn without the known defects of DroneDB 2.4.1's:
 - a palette band is drawn in the colours of its table (2.4.1 drew its indices as grey);
 - NaN is transparent, as in the colormap and formula tiles (2.4.1 drew it white unless the NoData
   value was NaN).
+- two bands are drawn as red and green with the alpha of the alpha band or the mask (2.4.1 drew
+  band 1 as grey and took band 2 for its alpha).
 
 The COGs pass GDAL's COG validator and have DroneDB's
 grid. WebP tiles use libwebp method 1 (DroneDB uses 2): 12-41 % more

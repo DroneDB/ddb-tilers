@@ -768,8 +768,9 @@ TEST(CogTilerTiles, MaskShortcutGivesBlankBytesWithoutImagery) {
 
 TEST(CogTilerTiles, OutOfBoundsPlainIsBlankAndVisFails) {
     const auto [x, y] = SamplingTile();
+    // The blank RGB tile: the 2 bands of sampling.tif are drawn as red and green.
     const auto png = Bytes(Render(SamplingTif(), kZ, x + 50, y));
-    EXPECT_EQ(png, ddbt::encode::BlankTileBytes(256, 256, 1, {}));
+    EXPECT_EQ(png, ddbt::encode::BlankTileBytes(256, 256, 3, {}));
     VisParams vis;
     vis.formula = "VARI";
     TileRequest r;
@@ -788,7 +789,7 @@ TEST(CogTilerTiles, OutOfBoundsPlainIsBlankAndVisFails) {
     }
     vis = VisParams{};
     vis.colormap = "viridis";  // no parameter: the plain (blank) tile
-    EXPECT_EQ(Bytes(RenderTile(r)), ddbt::encode::BlankTileBytes(256, 256, 1, {}));
+    EXPECT_EQ(Bytes(RenderTile(r)), ddbt::encode::BlankTileBytes(256, 256, 3, {}));
 }
 
 TEST(CogTilerTiles, StyledBandAndFormulaRefusal) {
