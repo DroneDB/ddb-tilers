@@ -49,6 +49,24 @@ whatever the number of threads and the memory budget. The memory cap is 4 GiB by
 (`memoryMb`, `DDBT_COPC_BUILD_MEM_MB`), at most half of the physical memory. A colourless cloud
 stays colourless (point format 6, coloured by elevation in the tiles).
 
+The octree is one cube in the units of the output CRS. A cloud in longitude / latitude with
+heights in metres (a Metashape export in EPSG:4326) gets a cube sized by its height range in
+"degrees", which never splits the cloud horizontally. With `targetCrs` (a WKT, `EPSG:n`,
+`EPSG:h+v` or a PROJ string) every point is transformed from the CRS of its input before it is
+quantised, at 0.001 target units around the rounded centre, with the octree planned from a
+bounds pass over the transformed points. The transform is 3-D when the source is geocentric,
+either CRS has ellipsoidal heights or the heights change vertical CRS. Otherwise the heights are
+kept and X / Y go through a grid approximation of the PROJ transform within 0.1 mm (about free;
+PROJ's transverse Mercator would add 8 s to a build of 160 million points).
+The WKT record then holds the target (WKT1 GDAL when it expresses it, else WKT2 2019) and the
+sidecar's footprint follows it. Without `targetCrs`, inputs in different CRSs are refused. A WKT
+too long for its LAS record (65,534 characters) is an error.
+
+The build report (`report`) gives the input and output CRSs (`sourceCrs`, `crs`,
+`transformed`), the nodes and points of each depth (`depthHistogram`), the largest node
+(`maxNodePoints`) and `warnings`: "degenerate octree" when a node holds more than 16 times the
+leaf size (100,000 points), the sign of a cube that does not fit the cloud.
+
 **COPC tiler.** A flattened octree index, a node cache of 6-16 bytes per point, layer-selective
 LAZ decoding (only X, Y, Z and colour), a per-pixel z-test that does not depend on the order of
 the points. Three modes (`DDBT_COPC_TILER_MODE`):
@@ -141,7 +159,7 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 | Function | |
 |---|---|
 | `ddbtBuildCog(input, output, optionsJson)` | Build a COG. Options: `codec` (`lzw`, `deflate`, `zstd`), `level`, `jpegQuality`, `noJpeg`, `memoryMb`, `statistics`, `report` (path of a JSON build report) |
-| `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report` |
+| `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report`, `targetCrs` |
 | `ddbtBuildCog2(...)`, `ddbtBuildCopc2(...)` | The same builds with a progress callback (fraction and phase) |
 | `ddbtIsOptimizedCog(input, outOptimized)` | Whether a raster is an optimized COG (EPSG:3857, 256 or 512 px tiles, overviews), which a COG build encodes again without a warp |
 | `ddbtPointCloudInfo(input, readBounds, outJson)` | Point count, bounds, CRS (as the file states it) and PDAL's dimension names of a LAS, LAZ, COPC, PLY, E57, XYZ or PTS point cloud |

@@ -23,6 +23,7 @@ struct Crs::Data {
     double unitFactor = 1.0;
     bool horizontalGeographic = false;
     bool northingFirst = false;
+    int axisCount = 0;
     std::optional<LonLatBox> area;
 };
 
@@ -58,6 +59,28 @@ PjPtr HorizontalOf(PJ_CONTEXT* ctx, const PJ* crs) {
         }
     }
     return cur;
+}
+
+// The axes of a CRS's coordinates: a bound CRS's source's, the sum of a compound CRS's parts.
+int AxisCountOf(PJ_CONTEXT* ctx, const PJ* crs, int guard = 0) {
+    if (guard > 4) return 0;
+    const PJ_TYPE t = proj_get_type(crs);
+    if (t == PJ_TYPE_BOUND_CRS) {
+        const PjPtr source(proj_get_source_crs(ctx, crs));
+        return source ? AxisCountOf(ctx, source.get(), guard + 1) : 0;
+    }
+    if (t == PJ_TYPE_COMPOUND_CRS) {
+        int n = 0;
+        for (int i = 0;; ++i) {
+            const PjPtr part(proj_crs_get_sub_crs(ctx, crs, i));
+            if (!part) break;
+            n += AxisCountOf(ctx, part.get(), guard + 1);
+        }
+        detail::ClearLastError();  // the index past the last part
+        return n;
+    }
+    const PjPtr cs(proj_crs_get_coordinate_system(ctx, crs));
+    return cs ? proj_cs_get_axis_count(ctx, cs.get()) : 0;
 }
 
 // GDAL's EPSGTreatsAsLatLong (a geographic CRS whose first axis points north) or
@@ -127,6 +150,7 @@ Crs::Data Describe(PJ_CONTEXT* ctx, PJ* pj, const std::string& wkt) {
         if (base) t = proj_get_type(base.get());
     }
     d.type = TypeOf(t);
+    d.axisCount = AxisCountOf(ctx, use);
     if (auth != nullptr && code != nullptr && std::strcmp(auth, "EPSG") == 0) {
         char* end = nullptr;
         const long v = std::strtol(code, &end, 10);
@@ -195,6 +219,36 @@ std::optional<int> Crs::Epsg() const { return Need(d_).epsg; }
 double Crs::HorizontalUnitFactor() const { return Need(d_).unitFactor; }
 bool Crs::IsHorizontallyGeographic() const { return Need(d_).horizontalGeographic; }
 bool Crs::NorthingFirst() const { return Need(d_).northingFirst; }
+int Crs::AxisCount() const { return Need(d_).axisCount; }
+
+namespace {
+
+// Part `index` of a compound CRS (an empty CRS when there is none).
+Crs CompoundPart(const Crs& c, int index) {
+    PJ_CONTEXT* ctx = detail::ThreadContext();
+    const PjPtr pj = Create(ctx, c.Definition());
+    const PjPtr part(proj_crs_get_sub_crs(ctx, pj.get(), index));
+    if (!part) {
+        detail::ClearLastError();
+        return Crs();
+    }
+    const char* const options[] = {"MULTILINE=NO", nullptr};
+    const char* json = proj_as_projjson(ctx, part.get(), options);
+    if (json == nullptr) throw CrsError("cannot export a part of the CRS: " + detail::LastError(ctx));
+    return Crs::FromProjJson(json);
+}
+
+}  // namespace
+
+std::string BoundsMisfit(const Crs& c, double minX, double minY, double maxX, double maxY) {
+    if (!c.Valid() || !c.IsHorizontallyGeographic()) return "";
+    if (minX >= -180 && maxX <= 180 && minY >= -90 && maxY <= 90) return "";
+    const std::string& name = c.Name();
+    return "the coordinates do not fit " + (name.empty() ? std::string("the geographic CRS of the file") : name);
+}
+
+Crs Crs::HorizontalPart() const { return IsCompound() ? CompoundPart(*this, 0) : *this; }
+Crs Crs::VerticalPart() const { return IsCompound() ? CompoundPart(*this, 1) : Crs(); }
 std::optional<LonLatBox> Crs::AreaOfUse() const { return Need(d_).area; }
 
 namespace {

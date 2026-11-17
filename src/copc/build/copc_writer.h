@@ -47,6 +47,13 @@ struct CopcFinalInfo {
     double gpsTimeMin = 0, gpsTimeMax = 0;
 };
 
+/// The nodes of one depth of an octree and the points they hold.
+struct OctreeLevel {
+    int depth = 0;
+    uint64_t nodes = 0;
+    uint64_t points = 0;
+};
+
 struct CopcWriteStats {
     uint64_t points = 0;
     uint64_t nodes = 0;
@@ -54,7 +61,18 @@ struct CopcWriteStats {
     uint64_t pages = 0;
     uint64_t fileSize = 0;
     int maxDepth = 0;
+    /// Every depth from 0 to maxDepth, shallowest first.
+    std::vector<OctreeLevel> levels;
+    /// The points of the largest node.
+    uint64_t maxNodePoints = 0;
 };
+
+/// The largest payload of a VLR (its record length is 16 bits).
+inline constexpr size_t kMaxVlrPayload = 65535;
+
+/// InvalidArgument when a field does not fit the header or its VLR (the WKT and its NUL, the
+/// extra-bytes descriptors): a COPC without its CRS or its descriptors would be read wrong.
+Status CheckHeaderFields(const CopcHeaderFields& fields);
 
 class CopcWriter {
 public:

@@ -7,6 +7,7 @@ list(APPEND DDBT_SOURCES
   copc/build/lod.cpp
   copc/build/node_encoder.cpp
   copc/build/copc_writer.cpp
+  copc/build/point_transform.cpp
   copc/build/sidecar.cpp
   copc/build/copc_check.cpp
   copc/build/copc_builder.cpp)

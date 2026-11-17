@@ -49,14 +49,18 @@ std::string SidecarJson(const SidecarInput& in) {
             const crs::Crs horizontal = tiler::HorizontalCrs(src);
             const double zToMeters = tiler::VerticalUnitInMeters(src);
             const crs::Crs dst = crs::Crs::FromEpsg(4326);
-            auto t = crs::TransformCache::Global().Get(horizontal, dst);
             double x0 = in.min[0], y0 = in.min[1], x1 = in.max[0], y1 = in.max[1];
             double cx = (in.min[0] + in.max[0]) / 2.0, cy = (in.min[1] + in.max[1]) / 2.0;
-            if (!t->TransformPoint(x0, y0) || !t->TransformPoint(x1, y1) || !t->TransformPoint(cx, cy)) {
+            // Coordinates a geographic CRS cannot hold (a CRS that does not belong to them) have no
+            // footprint; checked on the bounds as they are, before any transform.
+            if (std::string misfit = crs::BoundsMisfit(src, x0, y0, x1, y1); !misfit.empty()) {
+                warning = std::move(misfit);
+            } else if (auto t = crs::TransformCache::Global().Get(horizontal, dst);
+                       !t->TransformPoint(x0, y0) || !t->TransformPoint(x1, y1) || !t->TransformPoint(cx, cy)) {
                 warning = "Cannot transform the bounds to EPSG:4326";
             } else {
                 const double z0 = in.min[2] * zToMeters, z1 = in.max[2] * zToMeters;
-                if (z0 < -30000 || z1 > 30000 || (x0 == -90 && x1 == 90)) {
+                if (z0 < -30000 || z1 > 30000) {
                     warning = "Strange point cloud bounds";
                 } else {
                     auto pt = [&](double x, double y) {

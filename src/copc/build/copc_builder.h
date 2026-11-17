@@ -7,7 +7,9 @@
 //      the scale / offset (a single LAS input keeps its own), the cube (from the header bounds
 //      of LAS inputs, else from a bounds pass), then estimate the point density from a sample
 //      (the first points of every LAZ chunk, strided LAS records, the bounds pass) as a Morton
-//      histogram and cut the octree into bins.
+//      histogram and cut the octree into bins. With a target CRS every pass reads the points
+//      transformed to it (point_transform.h) before they are quantised, and the cube and the
+//      sample come from a bounds pass over the transformed points.
 //   2. Scatter: one parallel pass over the inputs (a task per LAZ chunk, LAS range, text range,
 //      PLY stride, E57 packet range) decodes, converts, keys (BMI2 pdep) and appends every
 //      point to its bin, in memory or in one segmented spill file when the memory budget is
@@ -28,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "copc/build/copc_writer.h"
 #include "copc/build/key_mapper.h"
 #include "copc/build/lod.h"
 #include "core/util/status.h"
@@ -66,6 +69,16 @@ struct CopcBuildOptions {
     std::string metadataPath;
     /// Creation date of the header for inputs that are not LAS (0: today, UTC).
     uint16_t creationDoy = 0, creationYear = 0;
+    /// The CRS of the output: a WKT, "EPSG:n", "EPSG:h+v" or a PROJ string. Empty: the CRS of the
+    /// inputs, whose points are copied as they are. Set: every point is transformed from the CRS
+    /// of its input (in three dimensions when the source is geocentric, either CRS has
+    /// ellipsoidal heights or the heights change vertical CRS; otherwise X / Y only, heights
+    /// kept: point_transform.h), quantised to 0.001 target units around the rounded centre, and the octree
+    /// is planned from the transformed points; the WKT VLR holds the target (WKT1 GDAL when it
+    /// expresses it, else WKT2 2019). A cloud in longitude / latitude with heights in metres
+    /// needs it: one cube in its own units is sized by the heights in "degrees" and the octree
+    /// never splits it horizontally.
+    std::string targetCrs;
     ProgressFn progress;
 };
 
@@ -95,6 +108,18 @@ struct CopcBuildReport {
     double secondsPlan = 0, secondsScatter = 0, secondsProcess = 0, secondsTotal = 0;
     double secondsCommitWait = 0;  // the committer waiting for the next partition
     double secondsTopNodes = 0;    // the committer building the top nodes
+    /// The CRS of the inputs (of the first input that has one; WKT, empty when none) and the one
+    /// written (the target WKT when transformed, else sourceCrs).
+    std::string sourceCrs, crs;
+    /// The points were transformed to CopcBuildOptions::targetCrs.
+    bool transformed = false;
+    /// The nodes and points of every depth, and the points of the largest node.
+    std::vector<OctreeLevel> depthHistogram;
+    uint64_t maxNodePoints = 0;
+    /// What a valid build may still do wrong. "degenerate octree ..." when a node holds more than
+    /// 16 times the leaf size: the cube does not fit the cloud (a cloud in degrees with heights in
+    /// metres), and drawing such a node is slow.
+    std::vector<std::string> warnings;
 };
 
 /// Builds the COPC `output` from `input` (and options.extraInputs). The output appears

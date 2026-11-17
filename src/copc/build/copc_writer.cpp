@@ -114,13 +114,14 @@ std::vector<uint8_t> CopcVlrBytes(const CopcHeaderFields& f, const Cube& cube, d
     VlrHeader(b, "laszip encoded", 22204, static_cast<uint16_t>(laz.size()), "lazperf variant");
     b.PutRaw(laz.data(), laz.size());
     ++n;
-    if (!f.wkt.empty() && f.wkt.size() + 1 <= 65535) {
+    // Sizes beyond a VLR are refused by CheckHeaderFields.
+    if (!f.wkt.empty() && f.wkt.size() + 1 <= kMaxVlrPayload) {
         VlrHeader(b, "LASF_Projection", 2112, static_cast<uint16_t>(f.wkt.size() + 1), "");
         b.PutRaw(f.wkt.data(), f.wkt.size());
         b.Put<uint8_t>(0);
         ++n;
     }
-    if (!f.extraBytesVlr.empty() && f.extraBytesVlr.size() <= 65535) {
+    if (!f.extraBytesVlr.empty() && f.extraBytesVlr.size() <= kMaxVlrPayload) {
         VlrHeader(b, "LASF_Spec", 4, static_cast<uint16_t>(f.extraBytesVlr.size()), "");
         b.PutRaw(f.extraBytesVlr.data(), f.extraBytesVlr.size());
         ++n;
@@ -142,9 +143,20 @@ struct CopcWriter::State {
 CopcWriter::CopcWriter() : s_(std::make_unique<State>()) {}
 CopcWriter::~CopcWriter() = default;
 
+Status CheckHeaderFields(const CopcHeaderFields& fields) {
+    if (fields.format < 6 || fields.format > 8) return InvalidArgument("COPC point format must be 6, 7 or 8");
+    if (fields.wkt.size() + 1 > kMaxVlrPayload)
+        return InvalidArgument("the WKT of the coordinate system has " + std::to_string(fields.wkt.size()) +
+                               " characters, more than its LAS record holds (" + std::to_string(kMaxVlrPayload - 1) + ")");
+    if (fields.extraBytesVlr.size() > kMaxVlrPayload)
+        return InvalidArgument("the extra-bytes descriptors take " + std::to_string(fields.extraBytesVlr.size()) +
+                               " bytes, more than their LAS record holds (" + std::to_string(kMaxVlrPayload) + ")");
+    return Status();
+}
+
 Expected<std::unique_ptr<CopcWriter>> CopcWriter::Create(const std::string& path, const CopcHeaderFields& fields,
                                                          uint64_t preallocate) {
-    if (fields.format < 6 || fields.format > 8) return InvalidArgument("COPC point format must be 6, 7 or 8");
+    DDBT_TRY(CheckHeaderFields(fields));
     std::unique_ptr<CopcWriter> w(new CopcWriter());
     State& s = *w->s_;
     s.f = fields;
@@ -324,6 +336,16 @@ Status CopcWriter::Finish(const CopcFinalInfo& info, CopcWriteStats* stats) {
         stats->pages = pages;
         stats->fileSize = size;
         stats->maxDepth = maxDepth;
+        stats->levels.assign(static_cast<size_t>(maxDepth) + 1, OctreeLevel{});
+        for (size_t d = 0; d < stats->levels.size(); ++d) stats->levels[d].depth = static_cast<int>(d);
+        stats->maxNodePoints = 0;
+        for (const NodeRec& n : s.nodes) {
+            OctreeLevel& l = stats->levels[static_cast<size_t>(n.depth)];
+            const auto count = static_cast<uint64_t>(n.count);
+            ++l.nodes;
+            l.points += count;
+            stats->maxNodePoints = std::max(stats->maxNodePoints, count);
+        }
     }
     return Status();
 }

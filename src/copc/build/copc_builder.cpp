@@ -19,6 +19,7 @@
 #include "copc/build/copc_writer.h"
 #include "copc/build/morton.h"
 #include "copc/build/node_encoder.h"
+#include "copc/build/point_transform.h"
 #include "copc/build/sidecar.h"
 #include "copc/readers/point_reader.h"
 #include "core/exec/parallel_for.h"
@@ -60,6 +61,16 @@ constexpr uint64_t kThreadBytes = uint64_t{12} << 20;     // per thread: reader 
 constexpr uint64_t kPartitionBytes = uint64_t{4} << 20;   // per partition: grid scratch, compressor, lists
 constexpr uint64_t kDefaultBudget = uint64_t{4096} << 20;  // 4 GiB
 constexpr uint64_t kMinBudget = uint64_t{64} << 20;
+// A node of more points than this many leaves is reported: the LOD keeps a node near the leaf
+// size wherever the cloud spreads over the cube, so such a node is a cloud flat in the cube's
+// units (one horizontal cell of a cube sized by heights in metres in "degrees").
+constexpr uint64_t kDegenerateNodeFactor = 16;
+// The scale of the coordinates when no LAS scale is kept (inputs that are not LAS, points
+// transformed to a target CRS), in output units.
+constexpr double kScale = 0.001;
+// The largest error of the grid approximation of a transform to a target CRS: a tenth of the
+// scale, so a point lands where the exact transform puts it to within its quantisation.
+constexpr double kTransformError = kScale / 10;
 
 /// Bytes per point of a partition in flight: its records loaded (spill) and their sorted copy,
 /// sort entries, keys, index lists, the encoded chunks waiting to be committed.
@@ -154,13 +165,33 @@ void Today(uint16_t& doy, uint16_t& year) {
     year = static_cast<uint16_t>(tm.tm_year + 1900);
 }
 
+/// The points of a sink's batches in the build's CRS: with a target CRS, the reader's coordinates
+/// replaced by their transform (the readers give doubles then: OutputSpec::quantized is false).
+class TargetCoordinates {
+public:
+    explicit TargetCoordinates(const PointTransform* transform) : transform_(transform) {}
+    Status Of(Batch& b) {
+        if (transform_ == nullptr) return Status();
+        if (b.xyz == nullptr) return InternalError("a reader gave quantised coordinates to transform");
+        xyz_.resize(3 * b.count);
+        DDBT_TRY(transform_->Apply(b.xyz, b.count, xyz_.data()));
+        b.xyz = xyz_.data();
+        return Status();
+    }
+
+private:
+    const PointTransform* transform_;
+    std::vector<double> xyz_;
+};
+
 /// The sink of the bounds pass: double bounds and every k-th point (as doubles).
 class ProbeSink final : public BatchSink {
 public:
-    ProbeSink(uint64_t stride, ProbeStats& stats, std::vector<double>& sample)
-        : stride_(stride), stats_(stats), sample_(sample) {}
+    ProbeSink(const PointTransform* transform, uint64_t stride, ProbeStats& stats, std::vector<double>& sample)
+        : target_(transform), stride_(stride), stats_(stats), sample_(sample) {}
     Status Consume(Batch& b) override {
         if (b.xyz == nullptr) return InternalError("bounds pass: a reader gave quantised coordinates");
+        DDBT_TRY(target_.Of(b));
         for (size_t i = 0; i < b.count; ++i) {
             const double* p = b.xyz + 3 * i;
             for (size_t a = 0; a < 3; ++a) {
@@ -175,6 +206,7 @@ public:
     }
 
 private:
+    TargetCoordinates target_;
     uint64_t stride_;
     uint64_t seen_ = 0;
     ProbeStats& stats_;
@@ -184,9 +216,10 @@ private:
 /// The sink of the sampling pass of LAS inputs: keys of quantised records.
 class KeySampleSink final : public BatchSink {
 public:
-    KeySampleSink(const OutputSpec& spec, const KeyMapper& m, std::vector<uint64_t>& keys)
-        : spec_(spec), m_(m), keys_(keys) {}
+    KeySampleSink(const PointTransform* transform, const OutputSpec& spec, const KeyMapper& m, std::vector<uint64_t>& keys)
+        : target_(transform), spec_(spec), m_(m), keys_(keys) {}
     Status Consume(Batch& b) override {
+        DDBT_TRY(target_.Of(b));
         if (b.xyz != nullptr) DDBT_TRY(readers::QuantizeXyz(spec_, b.xyz, b.count, b.records));
         const size_t rs = spec_.RecordSize();
         bool outside = false;
@@ -197,6 +230,7 @@ public:
     }
 
 private:
+    TargetCoordinates target_;
     const OutputSpec& spec_;
     const KeyMapper& m_;
     std::vector<uint64_t>& keys_;
@@ -205,11 +239,12 @@ private:
 /// The sink of the scatter pass: quantise, key, count, append to the bins.
 class ScatterSink final : public BatchSink {
 public:
-    ScatterSink(const OutputSpec& spec, const KeyMapper& m, const std::vector<uint32_t>& binOfCell, size_t bins,
-                BinStore::Writer& w, ScatterStats& st)
-        : spec_(spec), m_(m), binOfCell_(binOfCell), w_(w), st_(st), counts_(bins, 0) {}
+    ScatterSink(const PointTransform* transform, const OutputSpec& spec, const KeyMapper& m,
+                const std::vector<uint32_t>& binOfCell, size_t bins, BinStore::Writer& w, ScatterStats& st)
+        : target_(transform), spec_(spec), m_(m), binOfCell_(binOfCell), w_(w), st_(st), counts_(bins, 0) {}
 
     Status Consume(Batch& b) override {
+        DDBT_TRY(target_.Of(b));
         if (b.xyz != nullptr) DDBT_TRY(readers::QuantizeXyz(spec_, b.xyz, b.count, b.records));
         const size_t rs = spec_.RecordSize();
         const size_t n = b.count;
@@ -263,6 +298,7 @@ public:
     }
 
 private:
+    TargetCoordinates target_;
     const OutputSpec& spec_;
     const KeyMapper& m_;
     const std::vector<uint32_t>& binOfCell_;
@@ -297,6 +333,8 @@ public:
         Timer t;
         DDBT_TRY(OpenInputs(inputs));
         DDBT_TRY(ChooseOutput());
+        DDBT_TRY(ChooseCrs());
+        DDBT_TRY(CheckHeaderFields(fields_));
         DDBT_TRY(PlanBounds());
         for (int attempt = 0;; ++attempt) {
             DDBT_TRY(PlanBins());
@@ -374,11 +412,6 @@ private:
         }
         fields_.format = spec_.format;
         fields_.extraBytes = spec_.extraBytes;
-        for (const auto& r : readers_)
-            if (!r->Info().wkt.empty()) {
-                fields_.wkt = r->Info().wkt;
-                break;
-            }
         // Header fields from the first LAS input.
         const SourceInfo* las = nullptr;
         for (const auto& r : readers_)
@@ -410,6 +443,71 @@ private:
         return Status();
     }
 
+    /// The CRS written: the first one an input states, or the target, to which each input's points
+    /// are then transformed from its own CRS. Without a target, inputs in different CRSs are
+    /// refused (their coordinates would be merged as if they were in one); an input that states
+    /// none is taken as being in the others'.
+    Status ChooseCrs() {
+        transforms_.assign(readers_.size(), nullptr);
+        size_t first = readers_.size();
+        for (size_t i = 0; i < readers_.size() && first == readers_.size(); ++i)
+            if (!readers_[i]->Info().wkt.empty()) first = i;
+        if (first < readers_.size()) fields_.wkt = readers_[first]->Info().wkt;
+        r_.sourceCrs = fields_.wkt;
+        if (!Transforming()) {
+            for (size_t i = first + 1; i < readers_.size(); ++i) {
+                const SourceInfo& info = readers_[i]->Info();
+                if (info.wkt.empty() || info.wkt == fields_.wkt) continue;
+                bool same = false;
+                try {
+                    same = crs::Crs::FromWkt(fields_.wkt).Equivalent(crs::Crs::FromWkt(info.wkt));
+                } catch (const crs::CrsError&) {
+                    // A WKT PROJ cannot read is not known to be the same.
+                }
+                if (!same)
+                    return InvalidArgument("inputs have different coordinate systems: " + readers_[first]->Info().path +
+                                           " and " + info.path + " (a target CRS transforms each to it)");
+            }
+        } else {
+            crs::Crs target;
+            try {
+                target = crs::Crs::FromUserInput(o_.targetCrs);
+                fields_.wkt = LasWkt(target);
+            } catch (const crs::CrsError& e) {
+                return InvalidArgument(std::string("targetCrs: ") + e.what());
+            }
+            for (size_t i = 0; i < readers_.size(); ++i) {
+                const SourceInfo& info = readers_[i]->Info();
+                if (info.wkt.empty())
+                    return InvalidArgument(info.path + " has no coordinate system to transform to the target CRS from");
+                crs::Crs source;
+                try {
+                    source = crs::Crs::FromWkt(info.wkt);
+                } catch (const crs::CrsError& e) {
+                    return InvalidArgument(info.path + ": its coordinate system cannot be read: " + e.what());
+                }
+                std::optional<std::array<double, 4>> area;
+                if (info.boundsKnown) area = std::array<double, 4>{info.min[0], info.min[1], info.max[0], info.max[1]};
+                auto t = PointTransform::Create(source, target, area, kTransformError);
+                if (!t.ok()) return t.status().WithContext(info.path);
+                transforms_[i] = std::move(*t);
+            }
+            // The readers give doubles to transform, never records quantised as they are.
+            spec_.quantized = false;
+        }
+        r_.crs = fields_.wkt;
+        r_.transformed = Transforming();
+        return Status();
+    }
+
+    bool Transforming() const { return !o_.targetCrs.empty(); }
+
+    /// The input's header bounds and a sample of its records plan the build; otherwise (bounds
+    /// that cannot be trusted, points transformed to another CRS) a bounds pass reads it.
+    bool PlannedFromHeader(size_t reader) const {
+        return readers_[reader]->Info().boundsKnown && transforms_[reader] == nullptr;
+    }
+
     Status PlanBounds() {
         bool first = true;
         auto grow = [&](const std::array<double, 3>& mn, const std::array<double, 3>& mx) {
@@ -423,7 +521,7 @@ private:
         std::vector<uint32_t> probe;
         for (uint32_t i = 0; i < readers_.size(); ++i) {
             const SourceInfo& info = readers_[i]->Info();
-            if (info.boundsKnown) grow(info.min, info.max);
+            if (PlannedFromHeader(i)) grow(info.min, info.max);
             else probe.push_back(i);
         }
         if (!probe.empty()) {
@@ -440,7 +538,7 @@ private:
             OutputSpec probeSpec = spec_;
             probeSpec.quantized = false;
             exec::ParallelFor(*pool_, 0, tasks.size(), 1, [&](size_t k) {
-                ProbeSink sink(stride, stats[k], samples[k]);
+                ProbeSink sink(transforms_[tasks[k].reader].get(), stride, stats[k], samples[k]);
                 status[k] = readers_[tasks[k].reader]->Read(tasks[k].task, probeSpec, sink);
             });
             ProbeStats all;
@@ -453,8 +551,8 @@ private:
             probeWeight_ = static_cast<double>(stride);
             // Exact counts of these inputs.
             expectedPoints_ = 0;
-            for (const auto& r : readers_)
-                if (r->Info().boundsKnown) expectedPoints_ += r->Info().pointCount;
+            for (uint32_t i = 0; i < readers_.size(); ++i)
+                if (PlannedFromHeader(i)) expectedPoints_ += readers_[i]->Info().pointCount;
             expectedPoints_ += all.points;
         }
         if (first) return InvalidArgument("the input holds no points");
@@ -479,13 +577,15 @@ private:
             for (size_t a = 0; a < 3; ++a) finest[a] = anyLas ? std::min(finest[a], i.lasScale[a]) : i.lasScale[a];
             anyLas = true;
         }
-        if (keepLas && allLas && same) {
+        // Points transformed to a target CRS: kScale of its units, whatever the inputs' scale.
+        const bool transformed = Transforming();
+        if (keepLas && allLas && same && !transformed) {
             spec_.scale = f.lasScale;
             spec_.offset = f.lasOffset;
         } else {
             for (size_t a = 0; a < 3; ++a) {
-                double s = anyLas ? finest[a] : 0.001;
-                if (!(s > 0) || !std::isfinite(s)) s = 0.001;
+                double s = anyLas && !transformed ? finest[a] : kScale;
+                if (!(s > 0) || !std::isfinite(s)) s = kScale;
                 const double centre = (bounds_.min[a] + bounds_.max[a]) / 2;
                 const double off = std::isfinite(centre) ? std::round(centre) + 0.0 : 0.0;  // + 0.0: no -0
                 const double reach = std::max(std::abs(bounds_.max[a] - off), std::abs(bounds_.min[a] - off));
@@ -526,7 +626,7 @@ private:
             std::vector<TaskRef> tasks;
             uint64_t lasPoints = 0;
             for (uint32_t i = 0; i < readers_.size(); ++i)
-                if (readers_[i]->Info().boundsKnown) {
+                if (PlannedFromHeader(i)) {
                     for (uint32_t t = 0; t < readers_[i]->TaskCount(); ++t) tasks.push_back({i, t});
                     lasPoints += readers_[i]->Info().pointCount;
                 }
@@ -535,7 +635,7 @@ private:
                 std::vector<std::vector<uint64_t>> keys(tasks.size());
                 std::vector<Status> status(tasks.size());
                 exec::ParallelFor(*pool_, 0, tasks.size(), 1, [&](size_t k) {
-                    KeySampleSink sink(spec_, mapper_, keys[k]);
+                    KeySampleSink sink(transforms_[tasks[k].reader].get(), spec_, mapper_, keys[k]);
                     status[k] = readers_[tasks[k].reader]->Sample(tasks[k].task, per, spec_, sink);
                 });
                 for (size_t k = 0; k < tasks.size(); ++k) {
@@ -673,7 +773,7 @@ private:
                 }
             }
             ScatterStats st;
-            ScatterSink sink(spec_, mapper_, binOfCell_, bins_.size(), *w, st);
+            ScatterSink sink(transforms_[tasks[k].reader].get(), spec_, mapper_, binOfCell_, bins_.size(), *w, st);
             Status s = readers_[tasks[k].reader]->Read(tasks[k].task, spec_, sink);
             uint64_t m = store_->MemoryBytes(), p = peak.load(std::memory_order_relaxed);
             while (m > p && !peak.compare_exchange_weak(p, m)) {
@@ -1023,6 +1123,13 @@ private:
         r_.cube = cube_;
         r_.spacing = fin.spacing;
         r_.color16 = stats_.maxColor > 255;
+        r_.depthHistogram = std::move(ws.levels);
+        r_.maxNodePoints = ws.maxNodePoints;
+        if (const uint64_t limit = uint64_t{lod_.leafMax} * kDegenerateNodeFactor; r_.maxNodePoints > limit)
+            r_.warnings.push_back("degenerate octree: a node holds " + std::to_string(r_.maxNodePoints) +
+                                  " points, more than " + std::to_string(kDegenerateNodeFactor) + " times the leaf size (" +
+                                  std::to_string(lod_.leafMax) +
+                                  "); the cube does not fit the cloud, as for coordinates in degrees with heights in metres");
         return Status();
     }
 
@@ -1062,6 +1169,8 @@ private:
     exec::ThreadPool* pool_ = nullptr;
     size_t threads_ = 1;
     std::vector<std::unique_ptr<PointReader>> readers_;
+    /// Per input: its transform to the target CRS (null without one).
+    std::vector<std::shared_ptr<const PointTransform>> transforms_;
     OutputSpec spec_;
     CopcHeaderFields fields_;
     ProbeStats bounds_;

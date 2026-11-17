@@ -38,8 +38,10 @@ struct OutputSpec {
     /// Quantisation of X / Y / Z (value = int * scale + offset).
     std::array<double, 3> scale{0.001, 0.001, 0.001};
     std::array<double, 3> offset{0, 0, 0};
-    /// False in the planning pass (scale / offset unknown): readers then give coordinates as
-    /// doubles (Batch::xyz).
+    /// True: a reader may hand records already quantised with the spec (a LAS input of the same
+    /// scale and offset is copied as it is). False: readers give coordinates as doubles
+    /// (Batch::xyz), in the planning pass (scale / offset unknown) and when the builder
+    /// transforms the points to another CRS before it quantises them.
     bool quantized = true;
 
     size_t RecordSize() const noexcept { return BaseSize() + extraBytes; }

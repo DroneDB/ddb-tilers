@@ -7,7 +7,8 @@
 // or 4096, at most half the physical memory), "tempDir": "<dir>" (spill files; default: the
 // output's directory), "forceSpill": bool, "tuneAllocator": bool (glibc mmap threshold, true),
 // "maxPartitionPoints": n, "metadata": bool (write the sidecar, true), "metadataPath": "<path>"
-// (default "<output>.meta.json"), "report": "<path>" (a JSON report of the build)}.
+// (default "<output>.meta.json"), "report": "<path>" (a JSON report of the build), "targetCrs": "<crs>"
+// (a WKT, "EPSG:n", "EPSG:h+v" or a PROJ string: every point transformed to it; CopcBuildOptions)}.
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -52,11 +53,12 @@ std::string ParseOptions(const char* text, CopcBuildOptions& o, std::string& rep
             if (key == "forceSpill") o.forceSpill = val.b;
             if (key == "tuneAllocator") o.tuneAllocator = val.b;
             if (key == "metadata") o.metadata = val.b;
-        } else if (key == "tempDir" || key == "metadataPath" || key == "report") {
+        } else if (key == "tempDir" || key == "metadataPath" || key == "report" || key == "targetCrs") {
             if (val.kind != json::Value::Kind::kString) return "Invalid optionsJson: " + key + " must be a string";
             if (key == "tempDir") o.tempDir = val.str;
             if (key == "metadataPath") o.metadataPath = val.str;
             if (key == "report") reportPath = val.str;
+            if (key == "targetCrs") o.targetCrs = val.str;
         } else {
             return "Invalid optionsJson: unknown option " + key;
         }
@@ -101,6 +103,22 @@ void WriteReport(const std::string& path, const CopcBuildReport& r) {
     j.obj["secondsCommitWait"] = json::Number(r.secondsCommitWait);
     j.obj["secondsTopNodes"] = json::Number(r.secondsTopNodes);
     j.obj["seconds"] = json::Number(r.secondsTotal);
+    j.obj["sourceCrs"] = json::String(r.sourceCrs);
+    j.obj["crs"] = json::String(r.crs);
+    j.obj["transformed"] = json::Bool(r.transformed);
+    json::Value levels = json::Array();
+    for (const ddbt::copc::build::OctreeLevel& l : r.depthHistogram) {
+        json::Value level = json::Object();
+        level.obj["depth"] = json::Unsigned(static_cast<uint64_t>(l.depth));
+        level.obj["nodes"] = json::Unsigned(l.nodes);
+        level.obj["points"] = json::Unsigned(l.points);
+        levels.arr.push_back(std::move(level));
+    }
+    j.obj["depthHistogram"] = std::move(levels);
+    j.obj["maxNodePoints"] = json::Unsigned(r.maxNodePoints);
+    json::Value warnings = json::Array();
+    for (const std::string& w : r.warnings) warnings.arr.push_back(json::String(w));
+    j.obj["warnings"] = std::move(warnings);
     std::ofstream out(path, std::ios::trunc | std::ios::binary);
     out << json::Dump(j, 2);
 }
