@@ -424,10 +424,8 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, const TileBands
     samples.resize(pixels * ss * bands.size());
 
     bool bandsRead = false;
-    const bool needBandsForMask = view.AlphaBand() == 0 &&
-                                  (src.Mask() == MaskKind::kNodata ||
-                                   (view.NodataOverride() && src.Mask() != MaskKind::kPerDataset));
-    if (ms == MaskSummary::kAllOne) {
+    const bool needBandsForMask = view.NodataMasks();
+    if (ms == MaskSummary::kAllOne && !needBandsForMask) {
         std::memset(alpha.data(), 255, pixels);
     } else if (needBandsForMask && !bands.empty() && bands[0] == 1) {
         GatherBands(view, plan, bands, samples.data(), pixels * ss);

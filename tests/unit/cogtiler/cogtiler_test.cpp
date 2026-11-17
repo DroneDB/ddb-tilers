@@ -897,6 +897,86 @@ TEST(CogTilerTiles, TheNodataMaskOfSeveralBandsNeedsEveryBandAtNodata) {
     }
 }
 
+// A NoData override masks the pixels of a raster that has an internal mask (the padding mask the
+// COG of a raster without nodata, mask or alpha gets) together with that mask: a pixel is
+// transparent where the mask makes it so (a graded mask kept) or where every band is at the override.
+TEST(CogTilerTiles, ANodataOverrideMasksWithTheInternalMask) {
+    TempDir dir;
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(64, 3, 1);
+    // Columns 0-15: every band at 0; 16-31: band 1 alone at 0; the rest: grey
+    spec.value = [](int b, uint32_t x, uint32_t) {
+        if (x < 16) return 0.0f;
+        if (x < 32) return b == 0 ? 0.0f : 90.0f;
+        return 90.0f;
+    };
+    // The mask: opaque up to 47, half transparent over 48-55, transparent after (the padding)
+    spec.mask8 = [](uint32_t x, uint32_t, int) -> uint8_t { return x < 48 ? 255 : x < 56 ? 128 : 0; };
+    const std::string path = dir.File("masked_rgb.tif");
+    syn::WriteSynth(path, spec);
+    const auto src = CogSource::Open(path);
+    ASSERT_EQ(src->Mask(), MaskKind::kPerDataset);
+    const RasterView view(*src, 0.0);
+    EXPECT_TRUE(view.NodataMasks());
+    EXPECT_FALSE(RasterView(*src).NodataMasks());
+    const SamplePlan plan = PlanLevelRead(view, 0, 0, 0, 64, 64);
+    const size_t pixels = 64 * 64;
+    std::vector<uint8_t> planes(pixels * 3);
+    const int all[3] = {1, 2, 3};
+    GatherBands(view, plan, all, planes.data(), pixels);
+    for (const int gathered : {0, 1, 3}) {
+        std::vector<uint8_t> alpha(pixels);
+        GatherAlpha(view, plan, alpha.data(), gathered ? planes.data() : nullptr, gathered, pixels);
+        for (size_t i = 0; i < pixels; ++i) {
+            const size_t x = i % 64;
+            const int expected = x < 16 ? 0 : x < 48 ? 255 : x < 56 ? 128 : 0;
+            ASSERT_EQ(alpha[i], expected) << "pixel " << i << ", " << gathered << " bands gathered";
+        }
+    }
+}
+
+// A tile of a raster whose internal mask is all opaque there still draws the pixels at a NoData
+// override transparent: the mask alone does not make the tile opaque.
+TEST(CogTilerTiles, ATileIsTransparentOverTheNodataOverrideInsideAnOpaqueMask) {
+    TempDir dir;
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(256, 3, 1);
+    spec.tile = 64;
+    // A checkerboard of 8-pixel squares: every band at 0, or grey
+    spec.value = [](int, uint32_t x, uint32_t y) { return (x / 8 + y / 8) % 2 == 0 ? 0.0f : 90.0f; };
+    spec.mask = [](uint32_t, uint32_t, int) { return true; };
+    const std::string path = dir.File("opaque_mask.tif");
+    syn::WriteSynth(path, spec);
+    ASSERT_EQ(CogSource::Open(path)->Mask(), MaskKind::kPerDataset);
+    const auto [x, y] = TileOf(syn::kOriginX + 32, syn::kOriginY - 32, 21);
+    VisParams vis;
+    TileRequest r;
+    r.path = path;
+    r.z = 21;
+    r.x = x;
+    r.y = y;
+    r.tms = true;
+    r.noCache = true;
+    r.vis = &vis;
+    for (const bool overridden : {false, true}) {
+        vis.nodata = overridden ? std::optional<double>(0.0) : std::nullopt;
+        const auto png = RenderTile(r);
+        const auto d = ddbt::encode::testing::DecodePng(png.data(), png.size());
+        ASSERT_TRUE(d.ok);
+        size_t transparent = 0, opaque = 0;
+        for (size_t i = 0; i < 256 * 256; ++i) {
+            const uint8_t red = d.rgba[i * 4], alpha = d.rgba[i * 4 + 3];
+            if (overridden) ASSERT_EQ(alpha, red == 0 ? 0 : 255) << "pixel " << i;
+            else ASSERT_EQ(alpha, 255) << "pixel " << i;
+            (alpha == 0 ? transparent : opaque)++;
+        }
+        EXPECT_GT(opaque, 0u);
+        if (overridden) {
+            EXPECT_GT(transparent, 0u);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------- warped grids
 
 TEST(CogTilerWarp, VirtualGridMatchesTheCogDroneDbBuilt) {
