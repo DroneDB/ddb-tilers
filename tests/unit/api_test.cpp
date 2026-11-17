@@ -1665,8 +1665,9 @@ TEST(HostApi, BuildCopc2TransformsToTheTargetCrsAndReportsTheOctree) {
     ASSERT_TRUE(syn::WriteBytes(in, syn::BuildLasBytes(s)));
     const std::string options = R"({"targetCrs": "EPSG:32633", "report": )" + JsonString(report) + "}";
     ASSERT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), options.c_str(), nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
-    std::ifstream f(report);
-    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // Read through ReadBytes, which closes the file: Windows cannot remove a folder with an open file
+    const std::vector<uint8_t> bytes = syn::ReadBytes(report);
+    const std::string text(bytes.begin(), bytes.end());
     const auto j = json::Parse(text);
     ASSERT_TRUE(j && j->IsObject()) << text;
     ASSERT_NE(j->Find("transformed"), nullptr);
@@ -1716,8 +1717,9 @@ TEST(HostApi, BuildCopc2DropsTheCrsWhenAsked) {
     ASSERT_TRUE(syn::WriteBytes(in, syn::BuildLasBytes(s)));
     const std::string options = R"({"dropCrs": true, "report": )" + JsonString(report) + "}";
     ASSERT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), options.c_str(), nullptr, nullptr), DDBT_ERR_NONE) << ddbtLastError();
-    std::ifstream f(report);
-    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    // Read through ReadBytes, which closes the file: Windows cannot remove a folder with an open file
+    const std::vector<uint8_t> bytes = syn::ReadBytes(report);
+    const std::string text(bytes.begin(), bytes.end());
     const auto j = json::Parse(text);
     ASSERT_TRUE(j && j->IsObject()) << text;
     ASSERT_NE(j->Find("crsDropped"), nullptr);
