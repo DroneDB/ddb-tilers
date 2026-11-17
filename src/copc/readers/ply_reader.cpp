@@ -114,7 +114,8 @@ Expected<std::unique_ptr<PlyReader>> PlyReader::Open(const std::string& path, co
         std::string line(data + pos, static_cast<size_t>(e - pos));
         if (!line.empty() && line.back() == '\r') line.pop_back();
         pos = e + 1;
-        if (lines.empty() && line != "ply") return Corrupt(path + ": not a PLY file");
+        // Some writers put a space after the magic word ("ply "), which PDAL and rply read
+        if (lines.empty() && (line.compare(0, 3, "ply") != 0 || line.find_last_not_of(" \t") != 2)) return Corrupt(path + ": not a PLY file");
         lines.push_back(line);
         if (line == "end_header") break;
     }
