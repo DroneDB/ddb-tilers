@@ -106,8 +106,13 @@ Status DecodeLazChunk(const las::LasHeader& h, std::span<const uint8_t> chunk, u
 std::string WktOf(const las::LasMetadata& meta) {
     auto crs = las::ResolveCrs(meta);
     if (crs.ok() && crs->Valid()) {
-        std::string w = crs->ToWkt(crs::WktFlavor::Wkt1Gdal);
-        if (!w.empty()) return w;
+        try {
+            std::string w = crs->ToWkt(crs::WktFlavor::Wkt1Gdal);
+            if (!w.empty()) return w;
+        } catch (const crs::CrsError&) {
+            // WKT1 cannot express it (a 3-D projected CRS)
+            return crs->ToWkt(crs::WktFlavor::Wkt2_2019);
+        }
     }
     if (meta.wkt) return *meta.wkt;
     return {};

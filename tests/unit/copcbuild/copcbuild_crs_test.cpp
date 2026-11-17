@@ -27,6 +27,7 @@
 #include "core/crs/proj_context.h"
 #include "core/crs/transform.h"
 #include "core/util/endian.h"
+#include "ddbt/ddbt.h"
 #include "../test_env.h"
 #include "synth_las.h"
 
@@ -354,6 +355,16 @@ TEST(CopcBuildCrs, GeocentricToUtmWithEllipsoidalHeightsIsThreeDimensional) {
         worst = std::max(worst, std::abs(t.p.z - lonLatH[static_cast<size_t>(t.tag)].z));
     EXPECT_LT(worst, 0.002);
     EXPECT_GT(rep.depthHistogram.size(), 3u);
+    // A host reads the COPC back: its summary states the 3-D CRS, in WKT2 as WKT1 cannot
+    char* info = nullptr;
+    ASSERT_EQ(ddbtPointCloudInfo(out.c_str(), true, &info), DDBT_ERR_NONE) << ddbtLastError();
+    const std::string summary(info);
+    ddbtFree(info);
+    const auto parsed = json::Parse(summary);
+    ASSERT_TRUE(parsed && parsed->IsObject()) << summary;
+    const std::string wkt = parsed->obj.at("wkt").str;
+    EXPECT_EQ(wkt.rfind("PROJCRS[", 0), 0u) << wkt;
+    EXPECT_TRUE(crs::Crs::FromWkt(wkt).Equivalent(crs::Crs::FromUserInput(target)));
     fs::remove_all(dir);
 }
 
