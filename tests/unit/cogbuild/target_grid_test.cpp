@@ -2,7 +2,7 @@
 //
 // The warped COG grid against the grids libddb 2.4.1 built for corpus rasters (gdalinfo of the
 // baseline COGs: size, origin, pixel size). The corpus is read in place, never written; a raster
-// that is not on this machine skips its case.
+// that is not on this machine skips its case. A raster around a pole, on a synthetic georeference.
 
 #include <gtest/gtest.h>
 
@@ -12,6 +12,7 @@
 
 #include "cog/build/source.h"
 #include "cog/warp/target_grid.h"
+#include "core/crs/crs.h"
 
 namespace ddbt::cog::warp {
 namespace {
@@ -71,6 +72,48 @@ TEST_P(TargetGridCorpus, EqualsLibddbsCogGrid) {
 
 INSTANTIATE_TEST_SUITE_P(Corpus, TargetGridCorpus, testing::ValuesIn(kCases),
                          [](const testing::TestParamInfo<GridCase>& i) { return std::string(i.param.id); });
+
+// A raster around a pole (Antarctica in EPSG:3031, the Arctic in EPSG:3413) reaches Mercator's
+// limit at that pole over every longitude, as gdalwarp's grid does: the sampled edges alone
+// stopped at the latitude of the raster's edges, and the COG lost everything poleward of them.
+// A raster beside the pole keeps the extent of its edges.
+TEST(TargetGrid, ARasterAroundAPoleReachesMercatorsLimitAtThatPole) {
+    constexpr double kHalf = 20037508.342789244;
+    struct Case {
+        int epsg;
+        bool south;
+    };
+    for (const Case c : {Case{3031, true}, Case{3413, false}}) {
+        SCOPED_TRACE(c.epsg);
+        const crs::Crs polar = crs::Crs::FromEpsg(c.epsg);
+        // 4000 km square centred on the pole, 2 km pixels
+        auto around = SourceGeoreference::FromGeoTransform({-2000000, 2000, 0, 2000000, 0, -2000});
+        ASSERT_TRUE(around.ok());
+        auto g = ComputeTargetGrid(polar, *around, 2000, 2000, false);
+        ASSERT_TRUE(g.ok()) << g.status().message();
+        const double minX = g->geoTransform[0], maxY = g->geoTransform[3];
+        const double maxX = minX + g->geoTransform[1] * g->width, minY = maxY + g->geoTransform[5] * g->height;
+        EXPECT_NEAR(minX, -kHalf, 1e-3);
+        EXPECT_NEAR(maxX, kHalf, 1e-3);
+        if (c.south) {
+            EXPECT_NEAR(minY, -kHalf, 1e-3);
+            EXPECT_LT(maxY, 0);
+        } else {
+            EXPECT_NEAR(maxY, kHalf, 1e-3);
+            EXPECT_GT(minY, 0);
+        }
+
+        // 1000 km square 1000 km from the pole
+        auto beside = SourceGeoreference::FromGeoTransform({1000000, 2000, 0, 1000000, 0, -2000});
+        ASSERT_TRUE(beside.ok());
+        auto b = ComputeTargetGrid(polar, *beside, 500, 500, false);
+        ASSERT_TRUE(b.ok()) << b.status().message();
+        const double bMaxY = b->geoTransform[3], bMinY = bMaxY + b->geoTransform[5] * b->height;
+        EXPECT_GT(bMinY, -kHalf * 0.9);
+        EXPECT_LT(bMaxY, kHalf * 0.9);
+        EXPECT_LT(b->geoTransform[1] * b->width, kHalf);
+    }
+}
 
 }  // namespace
 }  // namespace ddbt::cog::warp

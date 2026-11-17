@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <string>
@@ -317,6 +318,30 @@ double ResolutionForExtent(const crs::Transform& t, const std::array<double, 6>&
     return 0;
 }
 
+// The poles inside a source with a geotransform (an Antarctic or Arctic raster in polar
+// stereographic): -1 for the south pole, +1 for the north one, 0 for none. GDAL finds them
+// through TransformBounds() (GDALSuggestedWarpOutput2), as the sampled edges of the source never
+// reach a pole inside it.
+std::vector<int> PolesInSource(const crs::Crs& srcCrs, const SourceGeoreference& geo, int W, int H) {
+    std::vector<int> poles;
+    if (!geo.GeoTransform() || srcCrs.Type() == crs::CrsType::Geographic2D ||
+        srcCrs.Type() == crs::CrsType::Geographic3D)
+        return poles;
+    std::shared_ptr<const crs::Transform> toSource;
+    try {
+        toSource = crs::TransformCache::Global().Get(crs::Crs::FromEpsg(4326), srcCrs);
+    } catch (const std::exception&) {
+        return poles;
+    }
+    constexpr double kEpsilon = 1e-5;  // pixels, as GDAL
+    for (const int sign : {-1, 1}) {
+        double x = 0, y = 90.0 * sign;
+        if (!toSource->TransformPoint(x, y) || !Ok(x, y) || !geo.CrsToPixel(x, y)) continue;
+        if (x >= -kEpsilon && x <= W + kEpsilon && y >= -kEpsilon && y <= H + kEpsilon) poles.push_back(sign);
+    }
+    return poles;
+}
+
 }  // namespace
 
 Expected<std::array<double, 4>> SuggestedPixelExtent(const crs::Transform& t, const SourceGeoreference& georef,
@@ -438,6 +463,16 @@ Expected<TargetGrid> ComputeTargetGrid(const crs::Crs& srcCrs, const SourceGeore
                                                             std::to_string(s->lines) +
                                                             " dataset is illegal, sizes must be larger than zero.");
         minX = s->minX, minY = s->minY, maxX = s->maxX, maxY = s->maxY, res = s->pixelSize;
+        // A pole inside the source: the output reaches Mercator's limit there and spans every
+        // longitude (the resolution stays the one of the sampled edges)
+        for (const int pole : PolesInSource(srcCrs, geo, W, H)) {
+            minX = -kHalf;
+            maxX = kHalf;
+            if (pole < 0)
+                minY = -kHalf;
+            else
+                maxY = kHalf;
+        }
     }
     g.suggestedResolution = res;
 
