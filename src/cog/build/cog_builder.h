@@ -5,11 +5,14 @@
 //   - A source that is already an optimized COG (EPSG:3857, square 256 / 512 tiles, overviews:
 //     DroneDB's isOptimizedCogDataset) is encoded again at its own grid (GDALTranslate -of COG
 //     BLOCKSIZE=<source> OVERVIEWS=IGNORE_EXISTING): same pixels, overviews regenerated; JPEG at
-//     the source's quality for a 3-band 8-bit JPEG source, LZW + predictor otherwise.
+//     the source's quality for a 3-band 8-bit JPEG source, LZW + predictor otherwise; the nodata of
+//     several bands comes with an internal mask of the pixels where not every band is at nodata
+//     (the source's mask when it has one).
 //   - Any other GeoTIFF is warped to EPSG:3857 on the GoogleMapsCompatible grid of the COG driver
 //     (gdalwarp -of COG -r bilinear, ZOOM_LEVEL_STRATEGY=UPPER): JPEG q75 YCbCr for 8-bit RGB(A)
 //     without nodata (the alpha becomes a 1-bit mask), LZW + predictor otherwise; transparency as
-//     cog.cpp: a finite nodata is kept as the destination nodata, a NaN / infinite / huge nodata
+//     cog.cpp: a finite nodata is kept as the destination nodata (of several bands: with an
+//     internal mask of the pixels where not every band is at nodata), a NaN / infinite / huge nodata
 //     or a stand-alone mask becomes an alpha band, a source alpha is kept (a mask for JPEG); a
 //     source without any of them gets an internal mask of the pixels the warp writes (gdalwarp
 //     -dstalpha as the COG driver's ADD_ALPHA, the band count kept), so the pixels outside the

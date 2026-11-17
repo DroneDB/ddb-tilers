@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "../test_env.h"
+#include "../tiff/tiff_test_util.h"
 #include "cog/build/cog_builder.h"
 #include "cog/build/pipeline.h"
 #include "cog/build/tiff_source.h"
@@ -403,6 +404,38 @@ TEST(CogBuild, OwnGridByteRgbWithMaskIsLosslessLzw) {
     EXPECT_TRUE(rep.ownGrid);
     EXPECT_EQ(rep.transparency, "mask");
     CheckOwnGrid(src, out, "LZW");
+}
+
+// An RGB COG with nodata 0 keeps it, and gets an internal mask of the pixels where not every band is at
+// 0 (a pixel whose red alone is 0 is not empty)
+TEST(CogBuild, OwnGridRgbNodataGetsAMaskOfThePixelsWhereABandIsNotAtNodata) {
+    TempDir dir;
+    SourceCog src(tiff::SampleType::kU8, 3, false, 0.0);
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    src.Write(in);
+    build::BuildReport rep;
+    const Status s = build::BuildCog(in, out, {}, &rep);
+    ASSERT_TRUE(s.ok()) << s.message();
+    EXPECT_TRUE(rep.ownGrid);
+    EXPECT_EQ(rep.transparency, "mask");
+    auto r = tiff::TiffReader::Open(out);
+    ASSERT_TRUE(r.ok());
+    const tiff::IfdInfo& m = (*r)->Ifd((*r)->MainImage());
+    EXPECT_EQ(m.noData, 0.0);
+    const auto maskIfd = (*r)->MaskOf(m.index);
+    ASSERT_TRUE(maskIfd.has_value()) << "no mask: band 1's nodata hides the pixels without red";
+    auto mask = tiff::testing::ReadWindow(**r, *maskIfd, {0}, 0, 0, src.W, src.H, 255);
+    ASSERT_TRUE(mask.ok());
+    size_t noRed = 0, empty = 0;
+    for (size_t i = 0; i < static_cast<size_t>(src.W) * src.H; ++i) {
+        const uint8_t* p = &src.pixels[i * 3];
+        const bool allZero = p[0] == 0 && p[1] == 0 && p[2] == 0;
+        ASSERT_EQ((*mask)[0][i], allZero ? 0 : 255) << i;
+        empty += allZero ? 1 : 0;
+        noRed += !allZero && p[0] == 0 ? 1 : 0;
+    }
+    EXPECT_GT(noRed, 0u);
+    EXPECT_GT(empty, 0u);
 }
 
 TEST(CogBuild, OwnGridFloatNodataWithZstdOption) {

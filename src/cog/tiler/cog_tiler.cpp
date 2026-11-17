@@ -348,18 +348,21 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, int colorBands,
     samples.resize(pixels * ss * bands.size());
 
     bool bandsRead = false;
-    const bool needBand1ForMask = view.AlphaBand() == 0 &&
+    const bool needBandsForMask = view.AlphaBand() == 0 &&
                                   (src.Mask() == MaskKind::kNodata ||
                                    (view.NodataOverride() && src.Mask() != MaskKind::kPerDataset));
     if (ms == MaskSummary::kAllOne) {
         std::memset(alpha.data(), 255, pixels);
-    } else if (needBand1ForMask && !bands.empty() && bands[0] == 1) {
+    } else if (needBandsForMask && !bands.empty() && bands[0] == 1) {
         GatherBands(view, plan, bands, samples.data(), pixels * ss);
         bandsRead = true;
-        GatherAlpha(view, plan, alpha.data(), samples.data());
+        // The bands read from band 1 on, for the nodata mask
+        int leading = 0;
+        while (static_cast<size_t>(leading) < bands.size() && bands[static_cast<size_t>(leading)] == leading + 1) ++leading;
+        GatherAlpha(view, plan, alpha.data(), samples.data(), leading, pixels * ss);
     } else {
         GatherAlpha(view, plan, alpha.data());
-        if (!needBand1ForMask && kernels::AllBytesEqual(alpha.data(), pixels, 0))
+        if (!needBandsForMask && kernels::AllBytesEqual(alpha.data(), pixels, 0))
             return BlankTile(size, colorBands, c.req.format);  // nothing visible: no imagery decode
     }
     if (!bandsRead) GatherBands(view, plan, bands, samples.data(), pixels * ss);

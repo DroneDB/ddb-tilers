@@ -25,6 +25,7 @@
 #include "cog/pyramid/average.h"
 #include "cog/pyramid/overview.h"
 #include "cog/tiff/gdal_metadata.h"
+#include "cog/warp/bilinear.h"
 #include "cog/warp/warp_producer.h"
 #include "core/exec/parallel_for.h"
 #include "core/exec/task_group.h"
@@ -179,7 +180,10 @@ Expected<Plan> OwnGridPlan(const RasterSource& src, const BuildOptions& o) {
     for (int b = 0; b < p.bands; ++b) interps.push_back(src.ColorInterp(b));
     SetPhotometric(p, interps);
     if (src.NoData()) {
-        p.transparency = Transparency::kNoData;
+        // A mask (the source's, else of the pixels where not every band is at nodata) beside the nodata
+        // of several bands
+        const bool mask = src.AlphaBand() < 0 && !src.Complex() && NodataNeedsMask(p.bands);
+        p.transparency = mask ? Transparency::kMask : Transparency::kNoData;
         p.nodata = src.NoData();
         p.nodataText = src.NoDataText();
     } else if (src.HasMask()) {
@@ -217,7 +221,9 @@ Expected<Plan> OwnGridPlan(const RasterSource& src, const BuildOptions& o) {
 
 class OwnGridProducer final : public TileProducer {
 public:
-    OwnGridProducer(const RasterSource& src, const Plan& plan) : src_(src), plan_(plan) {}
+    OwnGridProducer(const RasterSource& src, const Plan& plan) : src_(src), plan_(plan) {
+        for (int b = 0; b < plan.bands; ++b) bandOffsets_.push_back(static_cast<size_t>(b) * plan.SampleSize());
+    }
 
     void Produce(uint32_t col, Strip& s) override {
         thread_local std::vector<uint8_t> block, mask;
@@ -232,8 +238,14 @@ public:
             std::memcpy(s.Pixel(x0, y), block.data() + static_cast<size_t>(y) * bw * pb, static_cast<size_t>(vw) * pb);
         if (plan_.MaskOut()) {
             mask.resize(static_cast<size_t>(bw) * src_.BlockHeight());
-            const Status st = src_.ReadMaskBlock(col, s.row, mask.data());
-            if (!st.ok()) throw std::runtime_error(std::string(st.message()));
+            if (src_.HasMask()) {
+                const Status st = src_.ReadMaskBlock(col, s.row, mask.data());
+                if (!st.ok()) throw std::runtime_error(std::string(st.message()));
+            } else {
+                // The nodata of several bands (NodataNeedsMask)
+                warp::UnifiedValidity(src_.Type(), block.data(), pb, mask.size(), bandOffsets_, *plan_.nodata, 255,
+                                      mask.data());
+            }
             for (uint32_t y = 0; y < s.rows; ++y)
                 std::memcpy(s.MaskAt(x0, y), mask.data() + static_cast<size_t>(y) * bw, vw);
         }
@@ -244,6 +256,7 @@ public:
 private:
     const RasterSource& src_;
     const Plan& plan_;
+    std::vector<size_t> bandOffsets_;  // the byte offsets of the bands in a pixel
     std::atomic<uint64_t> decoded_{0};
 };
 

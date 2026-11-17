@@ -161,6 +161,11 @@ std::string OutputMetadata(const std::string& source, const Plan& plan, bool dro
 void SetPhotometric(Plan& p, const std::vector<std::string>& interps);
 /// GDAL's GetMaskBand alpha rule: the last band of a 2 / 4-band 8 / 16-bit raster masks the others.
 bool AlphaMaskRule(int bands, int alphaBand, tiff::SampleType t);
+/// An output that keeps a nodata value on `dataBands` bands (no alpha band) also gets an internal
+/// mask of the pixels where not every band is at nodata, when it has several: GDAL's readers take
+/// the internal mask before the nodata, which they test on each band on its own (the mask of band
+/// 1 would hide every pixel whose band 1 alone is at nodata, a dark pixel of an RGB with nodata 0).
+inline bool NodataNeedsMask(int dataBands) noexcept { return dataBands > 1; }
 
 /// Fills the full-resolution strips. Produce() is called concurrently for the columns of a row;
 /// BeginRow / EndRow on the driving thread, rows in order.

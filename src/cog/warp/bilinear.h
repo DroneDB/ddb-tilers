@@ -191,4 +191,10 @@ inline bool IsNodata(const uint8_t* p, double nodata) {
     }
 }
 
+/// UNIFIED_SRC_NODATA (GDALWarpNoDataMasker over the bands, as GDAL's mask of the nodata values of
+/// every band): out[i] is `valid` when a sample of pixel i (pixels `pixelBytes` apart, the samples
+/// of type `type` at `bandOffsets` bytes in it) is not at `nodata`, else 0.
+void UnifiedValidity(tiff::SampleType type, const uint8_t* pixels, size_t pixelBytes, size_t count,
+                     const std::vector<size_t>& bandOffsets, double nodata, uint8_t valid, uint8_t* out);
+
 }  // namespace ddbt::cog::warp

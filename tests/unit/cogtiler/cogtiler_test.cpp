@@ -28,6 +28,7 @@
 
 #include "../test_env.h"
 #include "../encode/decode_helpers.h"
+#include "synth_raster.h"
 #include "cog/tiler/block_cache.h"
 #include "cog/tiler/cog_source.h"
 #include "cog/tiler/cog_tiler.h"
@@ -806,6 +807,40 @@ TEST(CogTilerTiles, StyledBandAndFormulaRefusal) {
     } catch (const TileError& e) {
         EXPECT_EQ(e.code(), TileErrorCode::kRefused);
         EXPECT_STREQ(e.what(), "Requires bands: RN");
+    }
+}
+
+// The nodata mask of a raster of several bands: a pixel is empty when every band is at nodata (GDAL's
+// mask of the nodata values of all the bands, as the built COG's internal mask), not when band 1 is.
+TEST(CogTilerTiles, TheNodataMaskOfSeveralBandsNeedsEveryBandAtNodata) {
+    TempDir dir;
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(64, 3, 1);
+    spec.nodata = "0";
+    // Columns 0-15: no red (0 70 140); 16-31: empty; 32-47: no blue; the rest: grey
+    spec.value = [](int b, uint32_t x, uint32_t) {
+        if (x < 16) return b == 0 ? 0.0f : b == 1 ? 70.0f : 140.0f;
+        if (x < 32) return 0.0f;
+        if (x < 48) return b == 2 ? 0.0f : 90.0f;
+        return 120.0f;
+    };
+    const std::string path = dir.File("rgb_nodata.tif");
+    syn::WriteSynth(path, spec);
+    const auto src = CogSource::Open(path);
+    ASSERT_EQ(src->Mask(), MaskKind::kNodata);
+    const RasterView view(*src);
+    const SamplePlan plan = PlanLevelRead(view, 0, 0, 0, 64, 64);
+    const size_t pixels = 64 * 64;
+    std::vector<uint8_t> planes(pixels * 3);
+    const int all[3] = {1, 2, 3};
+    GatherBands(view, plan, all, planes.data(), pixels);
+    for (const int gathered : {0, 1, 3}) {
+        std::vector<uint8_t> alpha(pixels);
+        GatherAlpha(view, plan, alpha.data(), gathered ? planes.data() : nullptr, gathered, pixels);
+        for (size_t i = 0; i < pixels; ++i) {
+            const size_t x = i % 64;
+            ASSERT_EQ(alpha[i], x >= 16 && x < 32 ? 0 : 255) << "pixel " << i << ", " << gathered << " bands gathered";
+        }
     }
 }
 

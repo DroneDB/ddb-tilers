@@ -121,5 +121,44 @@ TEST(WarpTransparency, ASourceWithoutTransparencyGetsAMaskOfThePixelsOutsideIt) 
     }
 }
 
+// An RGB source with nodata 0 on its bands: a pixel is empty when every band is at 0 (GDAL's
+// UNIFIED_SRC_NODATA, the nodata mask of all the bands), not when its red alone is. The output keeps
+// the nodata and gets an internal mask of the pixels where a band is not at 0, which readers take
+// before the nodata of band 1.
+TEST(WarpTransparency, ThePixelsOfAnRgbWithNodataAreMaskedWhenEveryBandIsAtNodata) {
+    TempDir dir;
+    syn::SynthSpec spec = syn::Spec(300, 3, 1);
+    spec.nodata = "0";
+    // Left half: no red (a dark blue, 0 70 140); top right quarter: empty; the rest: grey
+    spec.value = [](int b, uint32_t x, uint32_t y) {
+        if (x < 150) return b == 0 ? 0.0f : b == 1 ? 70.0f : 140.0f;
+        if (y < 150) return 0.0f;
+        return 120.0f;
+    };
+    const std::string in = dir.File("in.tif"), out = dir.File("out.tif");
+    syn::WriteSynth(in, spec);
+    BuildReport rep;
+    const Status s = BuildCog(in, out, {}, &rep);
+    ASSERT_TRUE(s.ok()) << s.message();
+    EXPECT_EQ(rep.transparency, "mask");
+    const Output o = ReadOutput(out);
+    ASSERT_EQ(o.bands.size(), 3u);
+    EXPECT_EQ(o.nodata, 0.0);
+    ASSERT_FALSE(o.mask.empty()) << "no mask: band 1's nodata hides the pixels without red";
+    size_t noRed = 0, empty = 0;
+    for (size_t i = 0; i < o.mask.size(); ++i) {
+        const bool allZero = o.bands[0][i] == 0 && o.bands[1][i] == 0 && o.bands[2][i] == 0;
+        if (allZero) {
+            ++empty;
+            ASSERT_EQ(o.mask[i], 0) << i;
+        } else {
+            ASSERT_EQ(o.mask[i], 255) << i;
+            if (o.bands[0][i] == 0) ++noRed;
+        }
+    }
+    EXPECT_GT(noRed, 150u * 300u);  // the left half, warped to a finer grid
+    EXPECT_GT(empty, 150u * 150u);  // the empty quarter and the padding
+}
+
 }  // namespace
 }  // namespace ddbt::cog::build
