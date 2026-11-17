@@ -419,6 +419,11 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, const TileBands
             return BlankTile(size, colorBands, c.req.format);  // nothing visible: no imagery decode
     }
     if (!bandsRead) GatherBands(view, plan, bands, samples.data(), pixels * ss);
+    // A NaN has no colour: by default it is transparent, as the colormap and formula tiles draw it
+    // (2.4.1 stretched it to 255, white, unless the NoData value was NaN).
+    if (c.mode == SamplingMode::kDefault)
+        for (size_t b = 0; b < bands.size(); ++b)
+            TransparentWhereNaN(type, samples.data() + b * pixels * ss, pixels, alpha.data());
 
     // A read that covers the tile writes every pixel: the image needs no clearing.
     const bool full = at.x == 0 && at.y == 0 && at.w == size && at.h == size;

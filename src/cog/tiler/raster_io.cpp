@@ -592,6 +592,26 @@ bool IsNodataSample(PixelType type, const uint8_t* p, double nd) noexcept {
     return false;
 }
 
+void TransparentWhereNaN(PixelType type, const uint8_t* samples, size_t n, uint8_t* alpha) noexcept {
+    switch (type) {
+        case PixelType::kF32:
+            for (size_t i = 0; i < n; ++i)
+                if (std::isnan(Load<float>(samples + i * 4))) alpha[i] = 0;
+            return;
+        case PixelType::kF64:
+            for (size_t i = 0; i < n; ++i)
+                if (std::isnan(Load<double>(samples + i * 8))) alpha[i] = 0;
+            return;
+        case PixelType::kF16:
+            for (size_t i = 0; i < n; ++i) {
+                const uint16_t h = Load<uint16_t>(samples + i * 2);
+                if ((h & 0x7C00u) == 0x7C00u && (h & 0x03FFu) != 0) alpha[i] = 0;
+            }
+            return;
+        default: return;
+    }
+}
+
 double SampleToDouble(PixelType type, const uint8_t* p) noexcept {
     switch (type) {
         case PixelType::kU8: return Load<uint8_t>(p);

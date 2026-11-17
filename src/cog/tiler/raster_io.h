@@ -130,6 +130,9 @@ MaskSummary PlanMaskSummary(const RasterView& view, const SamplePlan& plan);
 /// the nodata cast to the type, floats with ARE_REAL_EQUAL and NaN): true = nodata.
 bool IsNodataSample(PixelType type, const uint8_t* sample, double nodata) noexcept;
 
+/// Clears the alpha of the samples that are NaN (Float16 / 32 / 64 samples; others have none).
+void TransparentWhereNaN(PixelType type, const uint8_t* samples, size_t n, uint8_t* alpha) noexcept;
+
 /// GDALCopyWords of one native sample to double / float / byte.
 double SampleToDouble(PixelType type, const uint8_t* sample) noexcept;
 uint8_t SampleToByte(PixelType type, const uint8_t* sample) noexcept;

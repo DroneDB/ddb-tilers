@@ -213,3 +213,56 @@ TEST(CogTilerRender, PaletteBandsAreDrawnInTheirColours) {
     EXPECT_GT(transparent, 0);
     EXPECT_GT(coloured, 10000);
 }
+
+namespace {
+
+/// The alpha of each tile pixel of tile (z, x, y) over raster columns < `split` and >= `split`
+/// (rows inside the raster): how many are transparent on each side, and how many there are.
+struct SplitAlpha {
+    int leftTransparent = 0, left = 0, rightTransparent = 0, right = 0;
+};
+
+SplitAlpha AlphaAroundColumn(const std::vector<uint8_t>& rgba, int z, int tx, int ty, double split) {
+    const double span = TileSpan(z), res = span / 256, minX = -kWorld + tx * span, maxY = kWorld - ty * span;
+    SplitAlpha a;
+    for (int j = 0; j < 256; ++j)
+        for (int i = 0; i < 256; ++i) {
+            const double col = (minX + (i + 0.5) * res - kOriginX) / kPixel;
+            const double row = (kOriginY - (maxY - (j + 0.5) * res)) / kPixel;
+            if (col < 0 || col >= kW || row < 0 || row >= kH) continue;
+            const bool transparent = rgba[(static_cast<size_t>(j) * 256 + static_cast<size_t>(i)) * 4 + 3] == 0;
+            if (col < split) {
+                a.left++;
+                a.leftTransparent += transparent;
+            } else {
+                a.right++;
+                a.rightTransparent += transparent;
+            }
+        }
+    return a;
+}
+
+}  // namespace
+
+TEST(CogTilerRender, NanIsTransparent) {
+    // A Float32 band without NoData, NaN over columns 0 to 99: transparent there (DroneDB 2.4.1
+    // stretched NaN to 255, opaque white), drawn elsewhere; the same over 3 bands.
+    TempDir dir;
+    for (const int bands : {1, 3}) {
+        const fs::path tif = dir.path() / ("nan" + std::to_string(bands) + ".tif");
+        SynthSpec s = Spec(kW, bands, 4);
+        s.height = kH;
+        s.tile = 256;
+        s.value = [](int band, uint32_t x, uint32_t y) {
+            return x < 100 && band == 0 ? std::nanf("") : static_cast<float>(x + y + static_cast<uint32_t>(band));
+        };
+        WriteSynth(tif, s);
+        const int z = 19;
+        const auto [tx, ty] = TileOf(kOriginX + 100 * kPixel, kOriginY - 300 * kPixel, z);
+        const SplitAlpha a = AlphaAroundColumn(RenderRgba(tif.string(), z, tx, ty), z, tx, ty, 100);
+        EXPECT_GT(a.left, 1000) << bands;
+        EXPECT_GT(a.right, 1000) << bands;
+        EXPECT_EQ(a.leftTransparent, a.left) << bands;
+        EXPECT_EQ(a.rightTransparent, 0) << bands;
+    }
+}

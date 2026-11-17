@@ -124,7 +124,9 @@ tiles are drawn without the known defects of DroneDB 2.4.1's:
 - each tile pixel shows the pixel of the overview under its centre, where GDAL draws it (2.4.1's
   read window, rounded to whole pixels, moved a raster off the tile grid by up to a pixel of the
   level it read, and was empty 9 zooms above the resolution of the raster);
-- a palette band is drawn in the colours of its table (2.4.1 drew its indices as grey).
+- a palette band is drawn in the colours of its table (2.4.1 drew its indices as grey);
+- NaN is transparent, as in the colormap and formula tiles (2.4.1 drew it white unless the NoData
+  value was NaN).
 
 The COGs pass GDAL's COG validator and have DroneDB's
 grid. WebP tiles use libwebp method 1 (DroneDB uses 2): 12-41 % more
