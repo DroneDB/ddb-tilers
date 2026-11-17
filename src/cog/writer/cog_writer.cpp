@@ -654,6 +654,9 @@ Status CogWriter::Put(uint32_t level, uint32_t col, uint32_t row, bool mask, enc
     if (col >= lv.across || row >= lv.down || (mask && !I.spec.hasMask))
         return Status(StatusCode::kInvalidArgument, "COG writer: bad block");
     const uint64_t block = static_cast<uint64_t>(row) * lv.across + col;
+    // An overview block waits in memory until Finish: it keeps its size, not its encoder's bound (a
+    // DEFLATE block reserves more than the uncompressed block)
+    if (level > 0) bytes.shrink_to_fit();
     std::lock_guard lock(I.mutex);
     if (I.finished) return Status(StatusCode::kInternal, "COG writer: finished");
     if (!I.sticky.ok()) return I.sticky;
@@ -667,6 +670,7 @@ Status CogWriter::Put(uint32_t level, uint32_t col, uint32_t row, bool mask, enc
     const uint64_t seq = block * I.Kinds() + (mask ? 1 : 0);
     if (seq != I.nextSeq) {
         if (I.pending.count(seq)) return Status(StatusCode::kInvalidArgument, "COG writer: block put twice");
+        bytes.shrink_to_fit();  // it waits for the blocks before it
         I.pendingBytes += bytes.size();
         I.pending.emplace(seq, std::move(bytes));
         return Status::Ok();
