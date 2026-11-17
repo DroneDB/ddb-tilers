@@ -864,6 +864,12 @@ bool SetDefaultPoolThreads(size_t threads) {
     return true;
 }
 
+size_t DefaultPoolThreads() {
+    std::lock_guard lock(gDefaultMutex);
+    if (const ThreadPool* p = gDefaultPool.load(std::memory_order_relaxed)) return p->Size();
+    return gDefaultThreads != 0 ? gDefaultThreads : DefaultThreadCount();
+}
+
 void ShutdownDefaultPool() {
     std::unique_lock lock(gDefaultMutex);
     ThreadPool* p = gDefaultPool.load(std::memory_order_relaxed);

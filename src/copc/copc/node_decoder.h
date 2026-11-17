@@ -28,10 +28,20 @@
 
 namespace ddbt::copc {
 
+/// The decode buffers a thread keeps from node to node are freed after a node of more points
+/// than this. A COPC node normally holds far fewer (builders split at about 100 000), so they are
+/// kept in steady state, while a node of millions of points (a degenerate octree, a file built
+/// elsewhere) does not leave its memory pinned in every thread that decoded one.
+inline constexpr size_t kKeptDecodePoints = size_t{1} << 18;
+
 struct RawPoints {
     std::vector<int32_t> x, y, z;
     std::vector<uint16_t> r, g, b, nir;  // empty when not decoded / absent
     size_t size() const noexcept { return x.size(); }
+    /// Frees the arrays when they hold room for more than kKeptDecodePoints points.
+    void ReleaseIfLarge() noexcept {
+        if (x.capacity() > kKeptDecodePoints) *this = RawPoints();
+    }
 };
 
 class CompactNode {

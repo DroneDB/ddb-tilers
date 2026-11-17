@@ -10,7 +10,8 @@
 // bench/harness/tilecmp.py and bench/micro/copctiler/compare_dumps.py compare them with the
 // baseline's dump. N threads render in parallel (default 1); the tile cache is bypassed.
 // DDBT_COPC_DUMP_INFO=1 adds what each render did (nodes, points, depth limit, transform and fit
-// residual, compat raw fallback, blank) to index.jsonl.
+// residual, compat raw fallback, blank, points read, the depth the point budget cut the selection
+// to, the nodes above the node limit, the most points decoded at once) to index.jsonl.
 #include <gtest/gtest.h>
 
 #include <atomic>
@@ -127,7 +128,9 @@ TEST(CopcTilerTool, DumpTiles) {
                     j << ", \"nodes\": " << info.nodes << ", \"points\": " << info.inWindow << ", \"depthEnd\": "
                       << info.depthEnd << ", \"transform\": \"" << kTransforms[static_cast<int>(info.transform)]
                       << "\", \"fitResidual\": " << info.fitResidual << ", \"rawFallback\": "
-                      << (info.rawFallback ? "true" : "false") << ", \"blank\": " << (info.blank ? "true" : "false");
+                      << (info.rawFallback ? "true" : "false") << ", \"blank\": " << (info.blank ? "true" : "false")
+                      << ", \"pointsRead\": " << info.points << ", \"depthLimitedTo\": " << info.depthLimitedTo
+                      << ", \"nodesSkipped\": " << info.nodesSkipped << ", \"peakBatchPoints\": " << info.peakBatchPoints;
                 }
                 j << "}";
             } catch (const std::exception& e) {

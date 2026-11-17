@@ -410,6 +410,9 @@ ThreadPool& DefaultPool();
 /// ShutdownDefaultPool()); returns false (and changes nothing) while a default pool exists.
 bool SetDefaultPoolThreads(size_t threads);
 
+/// Workers of the default pool: those of the running pool, else those it will start with.
+size_t DefaultPoolThreads();
+
 /// Destroys the default pool: runs every task still queued, then joins its workers (the C API
 /// teardown calls it). Idempotent; a no-op when no default pool exists. Afterwards
 /// DefaultPool() creates a new pool (honouring SetDefaultPoolThreads), so a library can be

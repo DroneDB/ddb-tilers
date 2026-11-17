@@ -14,7 +14,9 @@
 //    OGRCreateCoordinateTransformation prepares it (no area of interest);
 //  - the baseline's footprint: the two corners (min, max) of the header bounds through the
 //    horizontal part of the CRS, with its refusals (heights beyond +-30 km, a transform that
-//    fails); its tile zoom range;
+//    fails); its tile zoom range. Bounds that cannot be coordinates of the CRS (BoundsMisfit: a
+//    geographic CRS on values beyond +-180 / +-90) give no footprint, no transforms and no tiles,
+//    with the reason;
 //  - a densified footprint (32 points of the bounds' outline; for a geocentric CRS the 12 edges
 //    of the 3-D box) for the default mode, which also tiles clouds the baseline refuses;
 //  - the ramp range of colourless clouds: the header z bounds, also as filters.colorinterp
@@ -128,6 +130,9 @@ private:
 
 /// The horizontal part of a compound CRS (its first component); the CRS itself otherwise.
 crs::Crs HorizontalCrs(const crs::Crs& c);
+/// Why x, y bounds cannot be coordinates of `c`, "" when they can: a CRS whose horizontal part is
+/// geographic takes x (longitude) in [-180, 180] and y (latitude) in [-90, 90], LAS order.
+std::string BoundsMisfit(const crs::Crs& c, double minX, double minY, double maxX, double maxY);
 /// Metres per unit of the vertical axis of a compound CRS (GDAL's GetTargetLinearUnits
 /// ("VERT_CS")); 1 for other CRSs.
 double VerticalUnitInMeters(const crs::Crs& c);
