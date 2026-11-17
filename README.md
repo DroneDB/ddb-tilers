@@ -54,8 +54,11 @@ extra-bytes descriptors. A descriptor of a deprecated array type (LAS data types
 the normals of an Agisoft Metashape export, 3 signed chars) is written as one scalar descriptor
 per element, named as PDAL names the elements (`normals0`, `normals1`, `normals2`), with the
 no-data, min, max, scale and offset of the element: the COPC readers of the browsers (copc.js in
-Potree and Giro3D) refuse a whole file with an array type. The bytes of the points do not change.
-The sidecar's `dimensions` name the descriptors written.
+Potree and Giro3D) refuse a whole file with an array type. Each element name is unique and at
+most 31 characters (a NUL ends it in the record): a name too long for its index is cut, and a
+name already used (a descriptor named `normals0`, two arrays whose names share their first 30
+characters) takes the suffix `_1`, `_2`, ... after the index. The bytes of the points do not
+change. The sidecar's `dimensions` name the descriptors written.
 
 The octree is one cube in the units of the output CRS. A cloud in longitude / latitude with
 heights in metres (a Metashape export in EPSG:4326) gets a cube sized by its height range in

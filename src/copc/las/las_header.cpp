@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <string>
+#include <unordered_set>
 
 #include "core/util/checked_math.h"
 #include "core/util/endian.h"
@@ -209,30 +210,69 @@ bool HasNonScalarExtraBytes(std::span<const uint8_t> p) noexcept {
     return false;
 }
 
+namespace {
+
+// The name of a descriptor of an extra-bytes VLR: 32 bytes, NUL-terminated when shorter.
+constexpr size_t kExtraBytesName = 4, kExtraBytesNameSize = 32;
+// A name that leaves room for its NUL.
+constexpr size_t kExtraBytesNameMax = kExtraBytesNameSize - 1;
+
+// `stem` cut so that it and `tail` fit kExtraBytesNameMax characters.
+std::string FitName(std::string_view stem, std::string_view tail) {
+    return std::string(stem.substr(0, kExtraBytesNameMax - tail.size())) + std::string(tail);
+}
+
+// The name of element `index` of the array `name`, unique among `taken` (which it joins): PDAL's
+// name (ExtraBytesElementName) when it fits and is free, else with the name cut to fit; when that
+// is taken (a descriptor already named so, or an array whose name shares the characters kept), the
+// first of name<index>_1, name<index>_2, ... that is free, the name cut to fit.
+std::string UniqueElementName(std::string_view name, size_t index, std::unordered_set<std::string>& taken) {
+    const std::string pdal = ExtraBytesElementName(name, index);
+    const std::string tail = pdal.substr(name.size());
+    std::string candidate = FitName(name, tail);
+    for (size_t k = 1; taken.contains(candidate); ++k) candidate = FitName(name, tail + "_" + std::to_string(k));
+    taken.insert(candidate);
+    return candidate;
+}
+
+}  // namespace
+
 std::vector<uint8_t> ScalarExtraBytes(std::span<const uint8_t> p) {
-    // Offsets inside a descriptor: data type, name, then the no-data, min, max, scale and offset
-    // fields of 3 slots of 8 bytes each.
-    constexpr size_t kType = 2, kName = 4, kNameSize = 32;
+    // Offsets inside a descriptor: data type, then the no-data, min, max, scale and offset fields
+    // of 3 slots of 8 bytes each.
+    constexpr size_t kType = 2;
     constexpr size_t kSlotFields[] = {40, 64, 88, 112, 136};
+    const auto isArray = [](std::span<const uint8_t> d) {
+        return d.size() == kExtraBytesDescriptorSize && d[kType] > 10 && d[kType] <= 30;
+    };
+    const auto descriptor = [&p](size_t at) {
+        return p.subspan(at, std::min(kExtraBytesDescriptorSize, p.size() - at));
+    };
+    // The names of the descriptors kept as stored, which the element names must not repeat.
+    std::unordered_set<std::string> taken;
+    for (size_t at = 0; at < p.size(); at += kExtraBytesDescriptorSize)
+        if (const auto d = descriptor(at); !isArray(d) && d.size() == kExtraBytesDescriptorSize)
+            taken.insert(FixedString(d.data() + kExtraBytesName, kExtraBytesNameSize));
+
     std::vector<uint8_t> out;
     out.reserve(p.size());
     for (size_t at = 0; at < p.size(); at += kExtraBytesDescriptorSize) {
-        const std::span<const uint8_t> d = p.subspan(at, std::min(kExtraBytesDescriptorSize, p.size() - at));
-        const uint8_t type = d.size() == kExtraBytesDescriptorSize ? d[kType] : 0;
-        if (type <= 10 || type > 30) {
+        const std::span<const uint8_t> d = descriptor(at);
+        if (!isArray(d)) {
             out.insert(out.end(), d.begin(), d.end());
             continue;
         }
+        const uint8_t type = d[kType];
         const size_t elements = static_cast<size_t>((type - 1) / 10 + 1);
-        const std::string name = FixedString(d.data() + kName, kNameSize).substr(0, kNameSize - 1);
+        const std::string name = FixedString(d.data() + kExtraBytesName, kExtraBytesNameSize);
         for (size_t i = 0; i < elements; ++i) {
             const size_t e = out.size();
             out.insert(out.end(), d.begin(), d.end());
             uint8_t* element = out.data() + e;
             element[kType] = static_cast<uint8_t>((type - 1) % 10 + 1);
-            const std::string elementName = ExtraBytesElementName(name, i);
-            std::memset(element + kName, 0, kNameSize);
-            std::memcpy(element + kName, elementName.data(), std::min(elementName.size(), kNameSize));
+            const std::string elementName = UniqueElementName(name, i, taken);
+            std::memset(element + kExtraBytesName, 0, kExtraBytesNameSize);
+            std::memcpy(element + kExtraBytesName, elementName.data(), elementName.size());
             for (const size_t field : kSlotFields) {
                 std::memcpy(element + field, d.data() + field + 8 * i, 8);
                 std::memset(element + field + 8, 0, 16);

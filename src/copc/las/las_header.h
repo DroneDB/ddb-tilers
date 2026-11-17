@@ -167,8 +167,11 @@ bool HasNonScalarExtraBytes(std::span<const uint8_t> payload) noexcept;
 
 /// An extra-bytes VLR payload (accepted by ParseExtraBytes) with each descriptor of a deprecated
 /// array type (11-30) replaced by one scalar descriptor per element, in the order of the elements,
-/// so that the bytes of a record keep their meaning. Element i is named ExtraBytesElementName (the
-/// name cut to 31 characters first, so that the index fits the 32 of the record) and takes slot i
+/// so that the bytes of a record keep their meaning. Element i is named ExtraBytesElementName, the
+/// name cut so that the name and the index fit 31 characters (a NUL ends the name in the 32 of the
+/// record); a name already in the payload (a descriptor kept as stored, an element of another
+/// array) takes the suffix _1, _2, ... after the index instead, the name cut to fit, so that every
+/// name of the payload is unique. The element takes slot i
 /// of the no-data, min, max, scale and offset of the array in its slot 0 (the others zero); its
 /// options, reserved bytes and description are those of the array. Other descriptors are kept
 /// as stored. COPC readers of the browsers (copc.js) refuse a file with an array type.
