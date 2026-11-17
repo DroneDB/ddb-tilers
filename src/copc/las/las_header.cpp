@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #include "copc/las/las_header.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -194,6 +195,49 @@ Expected<std::vector<ExtraBytesDescriptor>> ParseExtraBytes(std::span<const uint
             return Corrupt("extra bytes VLR: descriptors need " + std::to_string(used) + " bytes, records have " +
                            std::to_string(extraBytesPerPoint));
         out.push_back(std::move(e));
+    }
+    return out;
+}
+
+std::string ExtraBytesElementName(std::string_view name, size_t index) {
+    return std::string(name) + std::to_string(index);
+}
+
+bool HasNonScalarExtraBytes(std::span<const uint8_t> p) noexcept {
+    for (size_t at = 0; at + kExtraBytesDescriptorSize <= p.size(); at += kExtraBytesDescriptorSize)
+        if (p[at + 2] > 10) return true;
+    return false;
+}
+
+std::vector<uint8_t> ScalarExtraBytes(std::span<const uint8_t> p) {
+    // Offsets inside a descriptor: data type, name, then the no-data, min, max, scale and offset
+    // fields of 3 slots of 8 bytes each.
+    constexpr size_t kType = 2, kName = 4, kNameSize = 32;
+    constexpr size_t kSlotFields[] = {40, 64, 88, 112, 136};
+    std::vector<uint8_t> out;
+    out.reserve(p.size());
+    for (size_t at = 0; at < p.size(); at += kExtraBytesDescriptorSize) {
+        const std::span<const uint8_t> d = p.subspan(at, std::min(kExtraBytesDescriptorSize, p.size() - at));
+        const uint8_t type = d.size() == kExtraBytesDescriptorSize ? d[kType] : 0;
+        if (type <= 10 || type > 30) {
+            out.insert(out.end(), d.begin(), d.end());
+            continue;
+        }
+        const size_t elements = static_cast<size_t>((type - 1) / 10 + 1);
+        const std::string name = FixedString(d.data() + kName, kNameSize).substr(0, kNameSize - 1);
+        for (size_t i = 0; i < elements; ++i) {
+            const size_t e = out.size();
+            out.insert(out.end(), d.begin(), d.end());
+            uint8_t* element = out.data() + e;
+            element[kType] = static_cast<uint8_t>((type - 1) % 10 + 1);
+            const std::string elementName = ExtraBytesElementName(name, i);
+            std::memset(element + kName, 0, kNameSize);
+            std::memcpy(element + kName, elementName.data(), std::min(elementName.size(), kNameSize));
+            for (const size_t field : kSlotFields) {
+                std::memcpy(element + field, d.data() + field + 8 * i, 8);
+                std::memset(element + field + 8, 0, 16);
+            }
+        }
     }
     return out;
 }

@@ -21,6 +21,8 @@
 #include "copc/build/node_encoder.h"
 #include "copc/build/point_transform.h"
 #include "copc/build/sidecar.h"
+#include "copc/las/dimension_names.h"
+#include "copc/las/las_header.h"
 #include "copc/readers/point_reader.h"
 #include "core/exec/parallel_for.h"
 #include "core/exec/task_group.h"
@@ -408,7 +410,10 @@ private:
         }
         if (sameEb) {
             spec_.extraBytes = first.lasExtraBytes;
-            fields_.extraBytesVlr = first.extraBytesVlr;
+            // A deprecated array type (Metashape's normals: 3 signed chars) makes the COPC readers of
+            // the browsers refuse the whole file; its elements are written as scalars over the same
+            // bytes, so the records are copied unchanged.
+            fields_.extraBytesVlr = las::ScalarExtraBytes(first.extraBytesVlr);
         }
         fields_.format = spec_.format;
         fields_.extraBytes = spec_.extraBytes;
@@ -1148,8 +1153,9 @@ private:
         in.color16 = r_.color16;
         in.spacing = r_.spacing;
         in.cube = cube_;
-        for (const auto& d : readers_[0]->Info().extraBytes)
-            if (spec_.extraBytes) in.extraDimensions.push_back(d.name);
+        // The dimensions PDAL reads from the descriptors written (a COPC is LAS 1.4).
+        if (auto written = las::ParseExtraBytes(fields_.extraBytesVlr, spec_.extraBytes); written.ok())
+            in.extraDimensions = las::PdalExtraDimensionNames(4, *written);
         const std::string path = o_.metadataPath.empty() ? output + ".meta.json" : o_.metadataPath;
         return WriteSidecarFile(path, in);
     }

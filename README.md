@@ -49,6 +49,14 @@ whatever the number of threads and the memory budget. The memory cap is 4 GiB by
 (`memoryMb`, `DDBT_COPC_BUILD_MEM_MB`), at most half of the physical memory. A colourless cloud
 stays colourless (point format 6, coloured by elevation in the tiles).
 
+The extra bytes of the points are kept when every input is a LAS / LAZ file with the same
+extra-bytes descriptors. A descriptor of a deprecated array type (LAS data types 11-30, such as
+the normals of an Agisoft Metashape export, 3 signed chars) is written as one scalar descriptor
+per element, named as PDAL names the elements (`normals0`, `normals1`, `normals2`), with the
+no-data, min, max, scale and offset of the element: the COPC readers of the browsers (copc.js in
+Potree and Giro3D) refuse a whole file with an array type. The bytes of the points do not change.
+The sidecar's `dimensions` name the descriptors written.
+
 The octree is one cube in the units of the output CRS. A cloud in longitude / latitude with
 heights in metres (a Metashape export in EPSG:4326) gets a cube sized by its height range in
 "degrees", which never splits the cloud horizontally. With `targetCrs` (a WKT, `EPSG:n`,

@@ -279,10 +279,8 @@ Expected<std::unique_ptr<LasReader>> LasReader::Open(std::shared_ptr<const io::B
         if (!std::isfinite(h.min[a]) || !std::isfinite(h.max[a]) || h.min[a] > h.max[a]) ok = false;
     }
     info.boundsKnown = ok && h.pointCount > 0;
-    if (const las::VlrRecord* eb = r->meta_.FindVlr("LASF_Spec", 4); eb != nullptr && eb->payloadKept && !r->meta_.extraBytes.empty()) {
+    if (const las::VlrRecord* eb = r->meta_.FindVlr("LASF_Spec", 4); eb != nullptr && eb->payloadKept && !r->meta_.extraBytes.empty())
         info.extraBytesVlr = eb->payload;
-        info.extraBytes = r->meta_.extraBytes;
-    }
     info.wkt = WktOf(r->meta_);
     info.statedWkt = StatedWktOf(r->meta_);
     const std::vector<std::string> extraNames = las::PdalExtraDimensionNames(h.versionMinor, r->meta_.extraBytes);

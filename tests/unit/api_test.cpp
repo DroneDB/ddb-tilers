@@ -706,11 +706,11 @@ namespace {
 
 // One descriptor of a LAS extra-bytes VLR (192 bytes): data type, name, and the rest zero.
 void PutExtraBytesDescriptor(std::vector<uint8_t>& vlr, uint8_t dataType, const std::string& name) {
-    std::vector<uint8_t> d(192, 0);
-    d[2] = dataType;
-    if (dataType == 0) d[3] = 2;  // an undocumented type: `options` is its size, 2 bytes
-    std::memcpy(d.data() + 4, name.data(), std::min<size_t>(name.size(), 32));
-    vlr.insert(vlr.end(), d.begin(), d.end());
+    ddbt::copc::testing::SynthExtraBytes e;
+    e.dataType = dataType;
+    if (dataType == 0) e.options = 2;  // an undocumented type: `options` is its size, 2 bytes
+    e.name = name;
+    ddbt::copc::testing::AppendExtraBytesDescriptor(vlr, e);
 }
 
 // The summary of ddbtPointCloudInfo, parsed.

@@ -39,6 +39,34 @@ struct SynthLas {
     size_t RecordSize() const { return las::BaseRecordSize(format) + extraBytes; }
 };
 
+/// One descriptor of a LAS extra-bytes VLR (192 bytes). No-data, min and max hold integer values
+/// (one per element, the anytype of an integer data type); an undocumented type (0) stores its
+/// size in `options`.
+struct SynthExtraBytes {
+    uint8_t dataType = 0;
+    uint8_t options = 0;
+    std::string name;
+    std::string description;
+    std::array<int64_t, 3> noData{}, min{}, max{};
+    std::array<double, 3> scale{}, offset{};
+};
+
+inline void AppendExtraBytesDescriptor(std::vector<uint8_t>& vlr, const SynthExtraBytes& e) {
+    std::vector<uint8_t> d(192, 0);
+    d[2] = e.dataType;
+    d[3] = e.options;
+    std::memcpy(d.data() + 4, e.name.data(), std::min<size_t>(e.name.size(), 32));
+    for (size_t i = 0; i < 3; ++i) {
+        StoreLE<int64_t>(d.data() + 40 + 8 * i, e.noData[i]);
+        StoreLE<int64_t>(d.data() + 64 + 8 * i, e.min[i]);
+        StoreLE<int64_t>(d.data() + 88 + 8 * i, e.max[i]);
+        StoreLE<double>(d.data() + 112 + 8 * i, e.scale[i]);
+        StoreLE<double>(d.data() + 136 + 8 * i, e.offset[i]);
+    }
+    std::memcpy(d.data() + 160, e.description.data(), std::min<size_t>(e.description.size(), 32));
+    vlr.insert(vlr.end(), d.begin(), d.end());
+}
+
 /// Random records of `s.format` (every field varies; 16-bit colour when color16), points in a
 /// box of extent[a] units of the scale around the offset on axis a, clustered so the octree has
 /// depth. Axes of different extents make a cloud whose units differ per axis (degrees of

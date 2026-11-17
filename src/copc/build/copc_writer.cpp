@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "copc/build/morton.h"
+#include "copc/las/las_header.h"
 #include "core/io/out_file.h"
 #include "core/util/endian.h"
 
@@ -151,6 +152,10 @@ Status CheckHeaderFields(const CopcHeaderFields& fields) {
     if (fields.extraBytesVlr.size() > kMaxVlrPayload)
         return InvalidArgument("the extra-bytes descriptors take " + std::to_string(fields.extraBytesVlr.size()) +
                                " bytes, more than their LAS record holds (" + std::to_string(kMaxVlrPayload) + ")");
+    // The COPC readers of the browsers (copc.js) refuse a whole file whose extra-bytes record has
+    // a deprecated array type; the builder writes such an array as scalars (las::ScalarExtraBytes).
+    if (las::HasNonScalarExtraBytes(fields.extraBytesVlr))
+        return InvalidArgument("an extra-bytes descriptor has an array type (11-30) or an unknown type; a COPC holds scalars only");
     return Status();
 }
 

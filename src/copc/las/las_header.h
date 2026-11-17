@@ -21,6 +21,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "copc/las/point_format.h"
@@ -156,6 +157,23 @@ uint16_t ExtraBytesTypeSize(uint8_t baseType) noexcept;
 /// Corrupt (PDAL: "Extra byte specification exceeds point length").
 Expected<std::vector<ExtraBytesDescriptor>> ParseExtraBytes(std::span<const uint8_t> payload,
                                                             uint16_t extraBytesPerPoint);
+/// The name of element `index` of an extra-bytes array named `name`, as PDAL's LAS reader names it:
+/// the name followed by the index (normals0, normals1, normals2).
+std::string ExtraBytesElementName(std::string_view name, size_t index);
+
+/// True when a descriptor of an extra-bytes VLR payload has a deprecated array type (11-30) or a
+/// type the LAS specification does not define (above 30).
+bool HasNonScalarExtraBytes(std::span<const uint8_t> payload) noexcept;
+
+/// An extra-bytes VLR payload (accepted by ParseExtraBytes) with each descriptor of a deprecated
+/// array type (11-30) replaced by one scalar descriptor per element, in the order of the elements,
+/// so that the bytes of a record keep their meaning. Element i is named ExtraBytesElementName (the
+/// name cut to 31 characters first, so that the index fits the 32 of the record) and takes slot i
+/// of the no-data, min, max, scale and offset of the array in its slot 0 (the others zero); its
+/// options, reserved bytes and description are those of the array. Other descriptors are kept
+/// as stored. COPC readers of the browsers (copc.js) refuse a file with an array type.
+std::vector<uint8_t> ScalarExtraBytes(std::span<const uint8_t> payload);
+
 Expected<CopcInfo> ParseCopcInfo(std::span<const uint8_t> payload);
 Expected<LazVlr> ParseLazVlr(std::span<const uint8_t> payload);
 

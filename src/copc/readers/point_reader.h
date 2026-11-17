@@ -95,7 +95,6 @@ struct SourceInfo {
     uint16_t lasExtraBytes = 0;
     /// The extra-bytes VLR payload as stored (descriptors), empty when absent.
     std::vector<uint8_t> extraBytesVlr;
-    std::vector<las::ExtraBytesDescriptor> extraBytes;
     las::LasHeader lasHeader;
 
     /// CRS as WKT (WKT1 as PDAL writes it in a COPC), empty when unknown.

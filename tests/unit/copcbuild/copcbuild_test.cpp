@@ -14,8 +14,10 @@
 #include <string>
 #include <vector>
 
+#include "cog/tiler/json_lite.h"
 #include "copc/build/copc_builder.h"
 #include "copc/build/copc_check.h"
+#include "copc/build/copc_writer.h"
 #include "copc/build/key_mapper.h"
 #include "copc/build/lod.h"
 #include "copc/build/morton.h"
@@ -608,6 +610,148 @@ TEST(CopcBuildEndToEnd, MergedInputsTakeTheFinestScale) {
     EXPECT_EQ(ha + hb, CopcHash(dir + "/ab.copc.laz", &nout));
     EXPECT_EQ(nout, 16000u);
     fs::remove_all(dir);
+}
+
+// Agisoft Metashape writes the normals of the points as one extra-bytes descriptor of a deprecated
+// array type (22: three signed chars). The COPC readers of the browsers (copc.js) refuse a file
+// with such a type, so the builder writes each array as one scalar descriptor per element, named as
+// PDAL names the elements (name0, name1, ...), with the element's no-data, min, max, scale and
+// offset and the options of the array. The elements keep the bytes of the array in order, so every
+// record is unchanged, and a scalar descriptor is written as it is stored.
+TEST(CopcBuildExtraBytes, ArrayDescriptorsAreWrittenAsOneScalarPerElement) {
+    using copc::testing::AppendExtraBytesDescriptor;
+    using copc::testing::SynthExtraBytes;
+    const std::string dir = TempDir();
+    SynthExtraBytes normals;
+    normals.dataType = 22;  // 3 x char
+    normals.options = 1 | 2 | 4 | 8 | 16;
+    normals.name = "normals";
+    normals.description = "point normals";
+    normals.noData = {-1, -2, -3};
+    normals.min = {-100, -101, -102};
+    normals.max = {100, 101, 102};
+    normals.scale = {0.01, 0.02, 0.03};
+    normals.offset = {1, 2, 3};
+    SynthExtraBytes slope;
+    slope.dataType = 14;  // 2 x short
+    slope.options = 8 | 16;
+    slope.name = "slope";
+    slope.scale = {0.5, 0.25, 0};
+    slope.offset = {10, 20, 0};
+    SynthExtraBytes count;
+    count.dataType = 3;  // ushort
+    count.options = 1;
+    count.name = "count";
+    count.noData = {65535, 0, 0};
+    std::vector<uint8_t> vlr;
+    for (const SynthExtraBytes& e : {normals, slope, count}) AppendExtraBytesDescriptor(vlr, e);
+
+    struct Case {
+        int minor;
+        bool laz;
+    };
+    for (const Case c : {Case{2, false}, Case{4, true}}) {
+        SCOPED_TRACE("LAS 1." + std::to_string(c.minor) + (c.laz ? " LAZ" : ""));
+        SynthLas s;
+        s.minor = c.minor;
+        s.format = 2;
+        s.laz = c.laz;
+        s.extraBytes = 3 + 4 + 2;
+        s.extraBytesVlr = vlr;
+        FillRandom(s, 20000, 31);
+        const std::string in = dir + "/normals" + (c.laz ? ".laz" : ".las"), out = dir + "/normals.copc.laz";
+        ASSERT_TRUE(WriteBytes(in, BuildLasBytes(s)));
+        CopcBuildOptions o;
+        o.lod.leafMax = 2000;
+        CopcBuildReport rep;
+        const Status st = BuildCopc(in, out, o, &rep);
+        ASSERT_TRUE(st.ok()) << st.ToString();
+        EXPECT_EQ(rep.extraBytes, s.extraBytes);
+
+        auto chk = CheckCopc(out, 2);
+        ASSERT_TRUE(chk.ok()) << chk.status().ToString();
+        EXPECT_TRUE(chk->ok()) << (chk->errors.empty() ? "" : chk->errors[0]);
+        uint64_t nIn = 0, nOut = 0;
+        EXPECT_EQ(ConvertedInputHash(in, rep.format, s.extraBytes, rep.scale, rep.offset, &nIn), CopcHash(out, &nOut))
+            << "every record, its extra bytes included, as the source holds it";
+        EXPECT_EQ(nOut, s.count);
+
+        auto file = CopcFile::Open(out);
+        ASSERT_TRUE(file.ok()) << file.status().ToString();
+        const las::LasMetadata& meta = (*file)->metadata();
+        const las::VlrRecord* written = meta.FindVlr("LASF_Spec", 4);
+        ASSERT_NE(written, nullptr);
+        ASSERT_TRUE(written->payloadKept);
+        ASSERT_EQ(written->payload.size(), 6 * las::kExtraBytesDescriptorSize);
+        for (size_t k = 0; k < 6; ++k)
+            EXPECT_LE(written->payload[k * las::kExtraBytesDescriptorSize + 2], 10) << "descriptor " << k << " is an array";
+        EXPECT_TRUE(std::equal(vlr.begin() + 2 * 192, vlr.end(), written->payload.begin() + 5 * 192))
+            << "a scalar descriptor is written as stored";
+
+        struct Element {
+            const char* name;
+            uint8_t dataType, options;
+            uint16_t byteOffset;
+            double noData, min, max, scale, offset;
+        };
+        const std::vector<Element> expected = {
+            {"normals0", 2, normals.options, 0, -1, -100, 100, 0.01, 1},
+            {"normals1", 2, normals.options, 1, -2, -101, 101, 0.02, 2},
+            {"normals2", 2, normals.options, 2, -3, -102, 102, 0.03, 3},
+            {"slope0", 4, slope.options, 3, 0, 0, 0, 0.5, 10},
+            {"slope1", 4, slope.options, 5, 0, 0, 0, 0.25, 20},
+            {"count", 3, count.options, 7, 65535, 0, 0, 0, 0},
+        };
+        ASSERT_EQ(meta.extraBytes.size(), expected.size());
+        for (size_t k = 0; k < expected.size(); ++k) {
+            const las::ExtraBytesDescriptor& d = meta.extraBytes[k];
+            const Element& e = expected[k];
+            SCOPED_TRACE(e.name);
+            EXPECT_EQ(d.name, e.name);
+            EXPECT_EQ(d.dataType, e.dataType);
+            EXPECT_EQ(d.elements, 1);
+            EXPECT_EQ(d.options, e.options);
+            EXPECT_EQ(d.byteOffset, e.byteOffset);
+            EXPECT_EQ(d.AnyAsDouble(d.noData), e.noData);
+            EXPECT_EQ(d.AnyAsDouble(d.minValue), e.min);
+            EXPECT_EQ(d.AnyAsDouble(d.maxValue), e.max);
+            EXPECT_EQ(d.scale[0], e.scale);
+            EXPECT_EQ(d.offset[0], e.offset);
+            if (k < 3) {
+                EXPECT_EQ(d.description, normals.description);
+            }
+        }
+
+        // The sidecar names the dimensions of the descriptors written.
+        const auto sidecar = ReadBytes(out + ".meta.json");
+        const auto j = cog::tiler::json::Parse(std::string(sidecar.begin(), sidecar.end()));
+        ASSERT_TRUE(j && j->IsObject());
+        const auto* dims = j->Find("dimensions");
+        ASSERT_NE(dims, nullptr);
+        std::vector<std::string> names;
+        for (const auto& v : dims->arr) names.push_back(v.str);
+        ASSERT_GE(names.size(), 6u);
+        EXPECT_EQ(std::vector<std::string>(names.end() - 6, names.end()),
+                  (std::vector<std::string>{"normals0", "normals1", "normals2", "slope0", "slope1", "count"}));
+        fs::remove(in);
+        fs::remove(out);
+        fs::remove(out + ".meta.json");
+    }
+    fs::remove_all(dir);
+}
+
+// A descriptor of an array type never reaches a COPC: the writer refuses it.
+TEST(CopcBuildExtraBytes, TheWriterRefusesAnArrayDescriptor) {
+    copc::testing::SynthExtraBytes normals;
+    normals.dataType = 22;
+    normals.name = "normals";
+    CopcHeaderFields f;
+    f.format = 7;
+    f.extraBytes = 3;
+    copc::testing::AppendExtraBytesDescriptor(f.extraBytesVlr, normals);
+    EXPECT_EQ(CheckHeaderFields(f).code(), StatusCode::kInvalidArgument);
+    f.extraBytesVlr[2] = 1;  // uchar
+    EXPECT_TRUE(CheckHeaderFields(f).ok());
 }
 
 TEST(CopcBuildEndToEnd, SidecarAndErrors) {
