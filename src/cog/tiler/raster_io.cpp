@@ -345,6 +345,11 @@ bool RasterView::HasDatasetMask() const noexcept {
     return source_->Mask() == MaskKind::kPerDataset;
 }
 
+bool RasterView::NodataMasks() const noexcept {
+    if (alphaBand_ > 0) return false;
+    return override_.has_value() || source_->Mask() == MaskKind::kNodata;
+}
+
 int RasterView::DataBandCount() const noexcept { return source_->DataBandCount(); }
 
 bool SamplePlan::AllInside() const noexcept {
@@ -732,31 +737,27 @@ void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, c
                 for (size_t i = 0; i < pixels; ++i) out[i] = SampleToByte(type, a.data() + i * ss);
         }
     } else {
-        MaskKind kind = src.Mask();
-        if (view.NodataOverride() && kind != MaskKind::kPerDataset) kind = MaskKind::kNodata;
-        switch (kind) {
-            case MaskKind::kPerDataset: GatherDatasetMask(view, plan, out); break;
-            case MaskKind::kNodata: {
-                std::vector<uint8_t> own, bandMask;
-                const auto samplesOf = [&](int b) -> const uint8_t* {
-                    if (gathered != nullptr && b <= gatheredBands) return gathered + static_cast<size_t>(b - 1) * planeBytes;
-                    own.resize(pixels * ss);
-                    GatherBands(view, plan, std::span<const int>(&b, 1), own.data(), pixels * ss);
-                    return own.data();
-                };
-                BandNodataMask(view, 1, samplesOf(1), pixels, out);
-                // Several bands: a pixel is empty when every band is at its nodata (GDAL's mask of the
-                // nodata values of all the bands, as the warp's UNIFIED_SRC_NODATA and the internal
-                // mask of the COG built since), not when band 1 alone is
-                bandMask.resize(pixels);
-                for (int b = 2; b <= src.BandCount() && !kernels::AllBytesEqual(out, pixels, 255); ++b) {
-                    BandNodataMask(view, b, samplesOf(b), pixels, bandMask.data());
-                    for (size_t i = 0; i < pixels; ++i) out[i] |= bandMask[i];
-                }
-                break;
+        if (src.Mask() == MaskKind::kPerDataset) GatherDatasetMask(view, plan, out);
+        else std::memset(out, 255, pixels);
+        if (view.NodataMasks() && !kernels::AllBytesEqual(out, pixels, 0)) {
+            std::vector<uint8_t> own, nodata(pixels), bandMask;
+            const auto samplesOf = [&](int b) -> const uint8_t* {
+                if (gathered != nullptr && b <= gatheredBands) return gathered + static_cast<size_t>(b - 1) * planeBytes;
+                own.resize(pixels * ss);
+                GatherBands(view, plan, std::span<const int>(&b, 1), own.data(), pixels * ss);
+                return own.data();
+            };
+            BandNodataMask(view, 1, samplesOf(1), pixels, nodata.data());
+            // Several bands: a pixel is empty when every band is at its nodata (GDAL's mask of the
+            // nodata values of all the bands, as the warp's UNIFIED_SRC_NODATA and the internal
+            // mask of the COG built since), not when band 1 alone is
+            bandMask.resize(pixels);
+            for (int b = 2; b <= src.BandCount() && !kernels::AllBytesEqual(nodata.data(), pixels, 255); ++b) {
+                BandNodataMask(view, b, samplesOf(b), pixels, bandMask.data());
+                for (size_t i = 0; i < pixels; ++i) nodata[i] |= bandMask[i];
             }
-            case MaskKind::kAlpha:
-            case MaskKind::kAllValid: std::memset(out, 255, pixels); break;
+            // With the internal mask: transparent where either masks the pixel (a graded mask kept)
+            for (size_t i = 0; i < pixels; ++i) out[i] = std::min(out[i], nodata[i]);
         }
     }
     // No sample: transparent, outside the window as for a warped view inside its grid but off the

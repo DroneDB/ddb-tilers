@@ -62,6 +62,11 @@ public:
     /// The view has a per-dataset mask (detectBandNodata's datasetMask: no alpha band, and the
     /// mask of band 1 is per dataset, not a nodata mask).
     bool HasDatasetMask() const noexcept;
+    /// The NoData values of the view mask its pixels (readAlpha's mask of band 1 without an alpha
+    /// band): the source's own NoData values when it has no other mask, and an override always,
+    /// together with the internal mask the COG of a raster without transparency has for its padding
+    /// (an override would otherwise never mask the rasters it is meant for).
+    bool NodataMasks() const noexcept;
     /// dataBandCount(view).
     int DataBandCount() const noexcept;
 
@@ -113,10 +118,11 @@ SamplePlan PlanTile(const RasterView& view, double minX, double minY, double max
 void GatherBands(const RasterView& view, const SamplePlan& plan, std::span<const int> bands, uint8_t* out,
                  size_t planeBytes);
 
-/// GDALTiler::readAlpha: the alpha band (clamped to bytes), else the mask band of band 1 (the
-/// internal mask; the nodata mask with the view's nodata, of every band for a raster of several:
-/// 0 where they all are at nodata; else 255), 0 where there is no sample. `gathered` may give the
-/// native samples of bands 1 .. gatheredBands already gathered, planes `planeBytes` apart.
+/// GDALTiler::readAlpha: the alpha band (clamped to bytes), else the mask band of band 1: the
+/// internal mask (else 255), lowered to 0 where the view's NoData values mask the pixel
+/// (RasterView::NodataMasks; of every band for a raster of several: 0 where they all are at
+/// nodata), 0 where there is no sample. `gathered` may give the native samples of bands 1 ..
+/// gatheredBands already gathered, planes `planeBytes` apart.
 void GatherAlpha(const RasterView& view, const SamplePlan& plan, uint8_t* out, const uint8_t* gathered = nullptr,
                  int gatheredBands = 0, size_t planeBytes = 0);
 
