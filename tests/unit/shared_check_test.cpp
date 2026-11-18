@@ -10,7 +10,7 @@
 #include "ddbt/ddbt.h"
 
 TEST(SharedLibrary, ExportsTheCApi) {
-    EXPECT_STREQ(ddbtVersion(), "0.13.2");
+    EXPECT_STREQ(ddbtVersion(), "0.13.3");
     char* json = nullptr;
     ASSERT_EQ(ddbtCpuInfo(&json), DDBT_ERR_NONE);
     EXPECT_NE(std::string(json).find("dispatchTarget"), std::string::npos);
