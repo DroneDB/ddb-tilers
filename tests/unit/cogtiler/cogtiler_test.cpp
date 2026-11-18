@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -242,17 +243,41 @@ TEST(CogTilerStretch, FloatsAndEdges) {
 
 TEST(CogTilerStretch, RangeRules) {
     BandStatistics s{0, 100, 50, 10, 1, 1};
-    auto r = StretchRange(s);
+    auto r = StretchRange(s, PixelType::kF32);
     EXPECT_DOUBLE_EQ(r.first, 50 - 23.3);
     EXPECT_DOUBLE_EQ(r.second, 50 + 23.3);
     s = {0, 100, 50, 100, 1, 1};  // clamped to min / max
-    r = StretchRange(s);
+    r = StretchRange(s, PixelType::kF32);
     EXPECT_EQ(r.first, 0);
     EXPECT_EQ(r.second, 100);
     s = {7, 7, 7, 0, 1, 1};  // empty: min..max then +1
-    r = StretchRange(s);
+    r = StretchRange(s, PixelType::kF32);
     EXPECT_EQ(r.first, 7);
     EXPECT_EQ(r.second, 8);
+}
+
+// A span the rounding of resampling leaves in a constant floating-point band is one value; real
+// low-contrast data and integer bands are not.
+TEST(CogTilerStretch, OnlyARoundingSpanIsConstant) {
+    const double c = 126.765;
+    const double ulpsApart = std::nextafter(std::nextafter(std::nextafter(c, 200.0), 200.0), 200.0) -
+                             std::nextafter(std::nextafter(c, 0.0), 0.0);  // 5 units in the last place
+    EXPECT_TRUE(IsConstantSpan(c, c, PixelType::kU8));
+    EXPECT_TRUE(IsConstantSpan(c - ulpsApart / 2, c + ulpsApart / 2, PixelType::kF64));
+    EXPECT_TRUE(IsConstantSpan(-c - ulpsApart, -c, PixelType::kF64));
+    // A DEM spanning a centimetre at 8848 m, a reflectance band spanning 1e-4, two neighbouring
+    // Float32 values, a band at 0 and 1e-300, a whole-number span of a 64-bit integer band.
+    EXPECT_FALSE(IsConstantSpan(8848.0, 8848.01, PixelType::kF64));
+    EXPECT_FALSE(IsConstantSpan(0.5, 0.5001, PixelType::kF32));
+    EXPECT_FALSE(IsConstantSpan(0.5, std::nextafter(0.5f, 1.0f), PixelType::kF32));
+    EXPECT_FALSE(IsConstantSpan(0.0, 1e-300, PixelType::kF64));
+    EXPECT_FALSE(IsConstantSpan(0x1p52, 0x1p52 + 1.0, PixelType::kI64));
+    EXPECT_FALSE(IsConstantSpan(1.4e9, 1.4e9 + 1e-3, PixelType::kF64));
+    // StretchRange: a constant band from its minimum to its minimum + 1, whatever its deviation.
+    const BandStatistics s{c - ulpsApart / 2, c + ulpsApart / 2, c, ulpsApart / 3, 1, 1};
+    const auto r = StretchRange(s, PixelType::kF64);
+    EXPECT_EQ(r.first, s.min);
+    EXPECT_EQ(r.second, s.min + 1.0);
 }
 
 // ------------------------------------------------------------------------------------------- vis
@@ -974,6 +999,72 @@ TEST(CogTilerTiles, ATileIsTransparentOverTheNodataOverrideInsideAnOpaqueMask) {
         if (overridden) {
             EXPECT_GT(transparent, 0u);
         }
+    }
+}
+
+namespace {
+// The colours of the default tile of a 256 x 256 Float64 raster of `bands` bands whose samples are
+// value(x, y), at zoom 21 inside it (opaque); -1 when a pixel is not opaque.
+std::vector<int> Float64TileGreys(int bands, const std::function<double(uint32_t, uint32_t)>& value) {
+    TempDir dir;
+    namespace syn = ddbt::cog::tiler::testing;
+    syn::SynthSpec spec = syn::Spec(256, bands, 8);
+    spec.tile = 64;
+    spec.sampleFormat = 3;
+    spec.raw = [&](int, uint32_t x, uint32_t y) { return std::bit_cast<uint64_t>(value(x, y)); };
+    const std::string path = dir.File("float64.tif");
+    syn::WriteSynth(path, spec);
+    const auto [x, y] = TileOf(syn::kOriginX + 32, syn::kOriginY - 32, 21);
+    VisParams vis;
+    TileRequest r;
+    r.path = path;
+    r.z = 21;
+    r.x = x;
+    r.y = y;
+    r.tms = true;
+    r.noCache = true;
+    r.vis = &vis;
+    const auto png = RenderTile(r);
+    const auto d = ddbt::encode::testing::DecodePng(png.data(), png.size());
+    EXPECT_TRUE(d.ok);
+    std::vector<int> greys;
+    for (size_t i = 0; d.ok && i < 256 * 256; ++i) {
+        const uint8_t* p = d.rgba.data() + i * 4;
+        greys.push_back(p[3] == 255 && p[0] == p[1] && p[1] == p[2] ? p[0] : -1);
+    }
+    return greys;
+}
+
+// 126.765 moved by -2 to +3 units in the last place, as resampling leaves a constant
+double RoundedConstant(uint32_t x, uint32_t y) {
+    double v = 126.765;
+    const int ulps = static_cast<int>((x * 7 + y * 13) % 6) - 2;
+    for (int i = 0; i < std::abs(ulps); ++i) v = std::nextafter(v, ulps > 0 ? 200.0 : 0.0);
+    return v;
+}
+}  // namespace
+
+// A Float64 band that is constant but for the rounding of the COG's resampling draws one colour,
+// black, as gdal_translate -scale draws a constant band (stretching its few units in the last
+// place to 0-255 drew grey noise); with three such bands too (each over its mean +- 2.33 sigma).
+TEST(CogTilerTiles, AConstantFloatBandWithRoundingDrawsOneColour) {
+    for (const int bands : {1, 3}) {
+        const std::vector<int> greys = Float64TileGreys(bands, RoundedConstant);
+        ASSERT_EQ(greys.size(), 256u * 256u);
+        for (size_t i = 0; i < greys.size(); ++i) ASSERT_EQ(greys[i], 0) << "pixel " << i << ", " << bands << " bands";
+    }
+}
+
+// A Float64 DEM that spans a centimetre at 8848 m is still stretched over its range.
+TEST(CogTilerTiles, ALowContrastFloatBandIsStillStretched) {
+    for (const int bands : {1, 3}) {
+        const std::vector<int> greys =
+            Float64TileGreys(bands, [](uint32_t x, uint32_t) { return 8848.0 + 0.01 * x / 255.0; });
+        ASSERT_EQ(greys.size(), 256u * 256u);
+        std::vector<int> sorted = greys;
+        std::sort(sorted.begin(), sorted.end());
+        EXPECT_GE(sorted.front(), 0) << bands << " bands";
+        EXPECT_GT(std::unique(sorted.begin(), sorted.end()) - sorted.begin(), 20) << bands << " bands";
     }
 }
 

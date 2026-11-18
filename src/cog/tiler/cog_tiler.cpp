@@ -264,7 +264,9 @@ encode::ByteBuffer Encode(Image& im, encode::TileFormat format, std::optional<bo
     return out;
 }
 
-/// vis_render.cpp defaultStretch (exact statistics).
+/// vis_render.cpp defaultStretch (exact statistics). A constant band (IsConstantSpan) is
+/// stretched over its value to its value + 0.1, as gdal_translate -scale stretches a band whose
+/// minimum and maximum are equal: it draws black (a colormap's first colour).
 std::vector<std::pair<double, double>> DefaultStretch(const CogSource& src, const std::vector<int>& bands,
                                                       const std::optional<double>& nodata) {
     std::vector<BandStatistics> stats;
@@ -272,12 +274,12 @@ std::vector<std::pair<double, double>> DefaultStretch(const CogSource& src, cons
     std::vector<std::pair<double, double>> ranges;
     if (bands.size() == 1) {
         double lo = stats[0].min, hi = stats[0].max;
-        if (lo == hi) hi += 0.1;
+        if (IsConstantSpan(lo, hi, src.Type())) hi = lo + 0.1;
         if (lo == hi) Fail("Cannot scale values due to source min/max being equal");
         ranges.emplace_back(lo, hi);
         return ranges;
     }
-    for (const auto& s : stats) ranges.push_back(StretchRange(s));
+    for (const auto& s : stats) ranges.push_back(StretchRange(s, src.Type()));
     return ranges;
 }
 
@@ -453,7 +455,7 @@ encode::ByteBuffer ReadBandsTile(Ctx& c, const RasterView& view, const TileBands
     if (type != PixelType::kU8 && tb.palette == nullptr) {
         if (tb.selected) {
             // readSelectedBands: each band over mean +- 2.33 sigma of its statistics.
-            for (const int b : bands) ranges.push_back(StretchRange(GetBandStatistics(src, b, view.NodataOverride())));
+            for (const int b : bands) ranges.push_back(StretchRange(GetBandStatistics(src, b, view.NodataOverride()), type));
         } else {
             ranges = DefaultStretch(src, bands, view.NodataOverride());
         }
@@ -753,15 +755,23 @@ encode::ByteBuffer VisTile(Ctx& c, const VisParams& vis) {
 
 // Stretch ---------------------------------------------------------------------------------------
 
+bool IsConstantSpan(double lo, double hi, PixelType type) {
+    if (lo == hi) return true;
+    if (!PixelTypeIsFloat(type)) return false;
+    // 2^-42: a thousand times the relative spacing of doubles (2^-52)
+    constexpr double kRelativeSpan = 0x1p-42;
+    return hi - lo <= kRelativeSpan * std::max(std::fabs(lo), std::fabs(hi));
+}
+
 /// vis_render.cpp stretchRange.
-std::pair<double, double> StretchRange(const BandStatistics& s) {
+std::pair<double, double> StretchRange(const BandStatistics& s, PixelType type) {
+    if (IsConstantSpan(s.min, s.max, type)) return {s.min, s.min + 1.0};
     double lo = std::max(s.mean - 2.33 * s.stdDev, s.min);
     double hi = std::min(s.mean + 2.33 * s.stdDev, s.max);
     if (lo >= hi) {
         lo = s.min;
         hi = s.max;
     }
-    if (lo >= hi) hi = lo + 1.0;
     return {lo, hi};
 }
 
