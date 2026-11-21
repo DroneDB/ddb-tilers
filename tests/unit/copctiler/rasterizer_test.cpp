@@ -9,6 +9,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -279,6 +280,155 @@ TEST(CopcTilerRasterizer, SplatEqualsTheMaximumKeyOverTheDiscAndIgnoresOrder) {
                                                                           [](uint32_t v) { return v != 0; })));
                 }
             }
+        }
+    }
+}
+
+// Brute force of ResolveAdaptive: the anchors are the buffer pixels holding a point (with their
+// largest key); each draws the disc dx^2 + dy^2 <= r^2 of r = AdaptiveRadius(the squared distance to
+// its kNeighbours-th nearest other anchor within AdaptiveSearch(maxRadius) along each axis).
+std::vector<uint32_t> BruteAdaptive(int T, int pad, int maxRadius, const std::vector<int>& cx,
+                                    const std::vector<int>& cy, const std::vector<uint64_t>& keys) {
+    const int P = T + 2 * pad;
+    std::vector<uint64_t> anchor(static_cast<size_t>(P) * static_cast<size_t>(P), 0);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        uint64_t& a = anchor[static_cast<size_t>(cy[i]) * static_cast<size_t>(P) + static_cast<size_t>(cx[i])];
+        a = std::max(a, keys[i]);
+    }
+    std::vector<std::array<int, 2>> at;
+    for (int y = 0; y < P; ++y)
+        for (int x = 0; x < P; ++x)
+            if (anchor[static_cast<size_t>(y) * static_cast<size_t>(P) + static_cast<size_t>(x)] != 0) at.push_back({x, y});
+    const int search = SplatRasterizer::AdaptiveSearch(maxRadius);
+    std::vector<uint64_t> best(static_cast<size_t>(T) * static_cast<size_t>(T), 0);
+    for (const auto& [x, y] : at) {
+        std::vector<int> d2;
+        for (const auto& [ox, oy] : at)
+            if ((ox != x || oy != y) && std::abs(ox - x) <= search && std::abs(oy - y) <= search)
+                d2.push_back((ox - x) * (ox - x) + (oy - y) * (oy - y));
+        std::sort(d2.begin(), d2.end());
+        const int k = SplatRasterizer::kNeighbours;
+        const int r = SplatRasterizer::AdaptiveRadius(d2.size() >= static_cast<size_t>(k) ? d2[k - 1] : 0, maxRadius);
+        const uint64_t key = anchor[static_cast<size_t>(y) * static_cast<size_t>(P) + static_cast<size_t>(x)];
+        for (int dy = -r; dy <= r; ++dy)
+            for (int dx = -r; dx <= r; ++dx) {
+                const int px = x - pad + dx, py = y - pad + dy;
+                if (dx * dx + dy * dy > r * r || px < 0 || py < 0 || px >= T || py >= T) continue;
+                uint64_t& b = best[static_cast<size_t>(py) * static_cast<size_t>(T) + static_cast<size_t>(px)];
+                b = std::max(b, key);
+            }
+    }
+    std::vector<uint32_t> out(best.size());
+    for (size_t i = 0; i < best.size(); ++i) out[i] = static_cast<uint32_t>(best[i]);
+    return out;
+}
+
+std::vector<uint32_t> Pixels(const std::vector<uint8_t>& rgba) {
+    std::vector<uint32_t> out(rgba.size() / 4);
+    std::memcpy(out.data(), rgba.data(), rgba.size());
+    return out;
+}
+
+TEST(CopcTilerRasterizer, AdaptiveRadiusFollowsTheSpacingOfTheNeighbours) {
+    constexpr int r = SplatRasterizer::kRadius;
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(0, 32), r);     // fewer neighbours than counted: isolated
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(1, 32), r);
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(8, 32), r);     // 2.83 px: the 13-pixel discs meet
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(9, 32), 3);     // ceil(0.8 x 3)
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(100, 32), 8);   // 10 px
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(1600, 32), 32); // 40 px: 32
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(1681, 32), 32); // beyond: capped
+    EXPECT_EQ(SplatRasterizer::AdaptiveRadius(100, r), r);    // no growth allowed
+    EXPECT_EQ(SplatRasterizer::AdaptiveSearch(32), 40);
+    EXPECT_EQ(SplatRasterizer::AdaptivePad(32), 72);
+}
+
+TEST(CopcTilerRasterizer, AWiderAnchorPadDrawsTheSameDiscs) {
+    std::mt19937 rng(11);
+    for (const Disc disc : {Disc::kDisc13, Disc::kStamp11}) {
+        constexpr int T = 64, extra = 7;
+        std::uniform_int_distribution<int> pos(0, T + 2 * SplatRasterizer::kRadius - 1);
+        SplatRasterizer narrow, wide;
+        narrow.Reset(T, disc);
+        wide.Reset(T, disc, SplatRasterizer::kRadius + extra);
+        EXPECT_EQ(wide.PaddedSize(), T + 2 * (SplatRasterizer::kRadius + extra));
+        for (int i = 0; i < 500; ++i) {
+            const int x = pos(rng), y = pos(rng);
+            const uint64_t key = SplatKey(static_cast<float>(i % 13), static_cast<uint32_t>(rng()) | 0xFF000000u);
+            narrow.Add(x, y, key);
+            wide.Add(x + extra, y + extra, key);
+        }
+        // Anchors of the wide buffer that no disc brings onto the tile
+        wide.Add(0, 0, SplatKey(99.0f, 0xFFFFFFFFu));
+        wide.Add(wide.PaddedSize() - 1, 3, SplatKey(99.0f, 0xFFFFFFFFu));
+        std::vector<uint8_t> a(static_cast<size_t>(T) * T * 4), b(a.size());
+        narrow.Resolve(a.data());
+        wide.Resolve(b.data());
+        EXPECT_EQ(a, b) << "disc " << static_cast<int>(disc);
+    }
+}
+
+TEST(CopcTilerRasterizer, AdaptiveDiscsAreTheMaximumKeyOverDiscsSizedByTheirNeighbours) {
+    std::mt19937 rng(5);
+    SplatRasterizer s;  // reused across sizes, pads and orders
+    for (const int maxRadius : {2, 6, 12}) {
+        const int pad = SplatRasterizer::AdaptivePad(maxRadius);
+        for (const int T : {16, 64, 128}) {
+            const int P = T + 2 * pad;
+            // From empty to every pixel taken: isolated points, clusters, sparse and dense spacings.
+            for (const size_t n : {size_t{0}, size_t{1}, size_t{5}, size_t{60}, size_t{600}, size_t{6000}, size_t{40000}}) {
+                std::vector<int> cx(n), cy(n);
+                std::vector<uint64_t> keys(n);
+                std::uniform_int_distribution<int> pos(0, P - 1);
+                std::uniform_real_distribution<float> z(-50.f, 50.f);
+                for (size_t i = 0; i < n; ++i) {
+                    cx[i] = pos(rng);
+                    cy[i] = pos(rng);
+                    keys[i] = SplatKey((i % 5 == 0) ? 1.0f : z(rng), static_cast<uint32_t>(rng()) | 0xFF000000u);
+                }
+                const auto expect = BruteAdaptive(T, pad, maxRadius, cx, cy, keys);
+                std::vector<uint8_t> rgba(static_cast<size_t>(T) * static_cast<size_t>(T) * 4);
+                for (int round = 0; round < 2; ++round) {
+                    std::vector<size_t> perm(n);
+                    for (size_t i = 0; i < n; ++i) perm[i] = i;
+                    std::shuffle(perm.begin(), perm.end(), rng);
+                    s.Reset(T, Disc::kDisc13, pad);
+                    for (const size_t i : perm) s.Add(cx[i], cy[i], keys[i]);
+                    const size_t opaque = s.ResolveAdaptive(rgba.data(), maxRadius);
+                    ASSERT_EQ(Pixels(rgba), expect) << "maxRadius " << maxRadius << " T " << T << " n " << n << " round " << round;
+                    EXPECT_EQ(opaque, static_cast<size_t>(std::count_if(expect.begin(), expect.end(),
+                                                                          [](uint32_t v) { return v != 0; })));
+                }
+            }
+        }
+    }
+}
+
+TEST(CopcTilerRasterizer, AdaptiveDiscsJoinASquareGridOfAnyPitchUpToTheLargestDisc) {
+    constexpr int T = 128, maxRadius = 32;
+    const int pad = SplatRasterizer::AdaptivePad(maxRadius);
+    const int P = T + 2 * pad;
+    SplatRasterizer s, plain;
+    std::vector<uint8_t> rgba(static_cast<size_t>(T) * T * 4), disc13(rgba.size());
+    for (int pitch = 1; pitch <= 40; ++pitch) {
+        const int shift = pitch / 3;  // grid not aligned on the tile
+        s.Reset(T, Disc::kDisc13, pad);
+        plain.Reset(T, Disc::kDisc13, pad);
+        uint32_t colour = 0;
+        for (int y = shift; y < P; y += pitch)
+            for (int x = shift; x < P; x += pitch) {
+                const uint64_t key = SplatKey(static_cast<float>((x * 7 + y * 3) % 11), 0xFF000000u | ++colour);
+                s.Add(x, y, key);
+                plain.Add(x, y, key);
+            }
+        const size_t opaque = s.ResolveAdaptive(rgba.data(), maxRadius);
+        EXPECT_EQ(opaque, static_cast<size_t>(T) * T) << "pitch " << pitch << ": holes between the discs";
+        plain.Resolve(disc13.data());
+        // Points at most 2 sqrt(2) px apart: the 13-pixel disc, as Resolve draws it.
+        if (pitch <= 2) {
+            EXPECT_EQ(rgba, disc13) << "pitch " << pitch;
+        } else {
+            EXPECT_NE(rgba, disc13) << "pitch " << pitch;
         }
     }
 }

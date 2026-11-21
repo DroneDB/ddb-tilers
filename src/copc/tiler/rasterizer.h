@@ -20,8 +20,9 @@
 //  - kDisc13 (modern): the 13-pixel symmetric disc of radius 2 (dx^2 + dy^2 <= 4).
 // Points are accumulated as the maximum key per anchor pixel; Resolve() then gives each pixel the
 // maximum over the anchors whose disc covers it (the reflected disc around the pixel), only over
-// the rows and columns touched. Buffers are kept between tiles (one rasterizer per thread): no
-// allocation in steady state.
+// the rows and columns touched. ResolveAdaptive() draws discs whose radius follows the spacing of
+// the points around each anchor instead (modern tiles zoomed in past the density of the cloud).
+// Buffers are kept between tiles (one rasterizer per thread): no allocation in steady state.
 #pragma once
 
 #include <bit>
@@ -113,13 +114,42 @@ public:
         return true;
     }
 
-    /// Starts a tile of tileSize x tileSize pixels drawn with `disc`. The anchor buffer covers
-    /// the tile plus kRadius pixels on each side (points anchored there still cover tile pixels).
-    void Reset(int tileSize, Disc disc = Disc::kDisc13);
+    /// The points around an anchor whose spacing sets the radius of its adaptive disc: the
+    /// distance to its kNeighbours-th nearest anchor. On a square grid of pitch p it is p (the
+    /// pixel farthest from every point is p / sqrt(2) away); on an irregular cloud it is larger
+    /// than the distance to the nearest point, which a cluster of two would make small.
+    static constexpr int kNeighbours = 4;
+    /// Adaptive disc radius = ceil(kSpacingToRadius x that distance): on a grid of pitch p,
+    /// 0.8 p covers the p / sqrt(2) to the farthest pixel with 0.09 p to spare for the pixel the
+    /// points are anchored in (floor); irregular clouds keep fewer pinholes than with 0.75.
+    static constexpr double kSpacingToRadius = 0.8;
 
-    /// Width (and height) of the anchor buffer: tileSize + 2 * kRadius. Anchor pixel (cx, cy)
-    /// of the buffer is tile pixel (cx - kRadius, cy - kRadius).
+    /// The anchors around which ResolveAdaptive looks for neighbours (pixels, along each axis):
+    /// a disc reaches maxRadius when its spacing reaches maxRadius / kSpacingToRadius.
+    static constexpr int AdaptiveSearch(int maxRadius) noexcept {
+        return static_cast<int>((maxRadius * 5 + 3) / 4);  // ceil(maxRadius / 0.8)
+    }
+    /// The anchor buffer around the tile that ResolveAdaptive needs for discs of at most
+    /// maxRadius: an anchor up to maxRadius off the tile still covers tile pixels, and its
+    /// radius comes from the anchors AdaptiveSearch(maxRadius) around it, so a tile draws the
+    /// discs its neighbours draw along their common edge.
+    static constexpr int AdaptivePad(int maxRadius) noexcept { return maxRadius + AdaptiveSearch(maxRadius); }
+
+    /// The radius of the adaptive disc of an anchor whose kNeighbours-th nearest anchor is
+    /// sqrt(kthSquared) pixels away (0: fewer than kNeighbours within the search): kRadius when
+    /// the 13-pixel disc already meets its neighbours (at most kGaplessSpacing) or the anchor is
+    /// isolated (nothing to join), else ceil(kSpacingToRadius x the distance), at most maxRadius.
+    static int AdaptiveRadius(int kthSquared, int maxRadius) noexcept;
+
+    /// Starts a tile of tileSize x tileSize pixels drawn with `disc`. The anchor buffer covers
+    /// the tile plus `pad` pixels on each side (at least kRadius: points anchored there still
+    /// cover tile pixels).
+    void Reset(int tileSize, Disc disc = Disc::kDisc13, int pad = kRadius);
+
+    /// Width (and height) of the anchor buffer: tileSize + 2 * Pad(). Anchor pixel (cx, cy)
+    /// of the buffer is tile pixel (cx - Pad(), cy - Pad()).
     int PaddedSize() const noexcept { return padded_; }
+    int Pad() const noexcept { return pad_; }
 
     /// A point anchored on buffer pixel (cx, cy), 0 <= cx, cy < PaddedSize(). key != 0.
     void Add(int cx, int cy, uint64_t key) noexcept {
@@ -139,11 +169,36 @@ public:
     /// pixels.
     size_t Resolve(uint8_t* rgba);
 
+    /// Resolve() with a disc per anchor, of radius AdaptiveRadius(the squared distance to its
+    /// kNeighbours-th nearest anchor within AdaptiveSearch(maxRadius), maxRadius) (dx^2 + dy^2 <=
+    /// r^2 around the anchor; for r = kRadius the 13-pixel disc): every pixel takes the maximum
+    /// key of the discs covering it, independent of the order of the points. Where the anchors
+    /// are at most kGaplessSpacing apart it draws what Resolve() draws with kDisc13. Needs
+    /// Pad() >= AdaptivePad(maxRadius) for tiles that join their neighbours.
+    size_t ResolveAdaptive(uint8_t* rgba, int maxRadius);
+
 private:
+    // The squared distance from anchor (x, y) to its kNeighbours-th nearest anchor within
+    // `search` pixels (Chebyshev), 0 when there are fewer.
+    int KthNeighbourSquared(int x, int y, int search) const noexcept;
+    // Every tile pixel reached by a disc of radius kRadius (the stamp, else the 13-pixel disc):
+    // emit(pixel index, the maximum key of the anchors whose disc covers it).
+    template <typename Emit>
+    void GatherDiscs(bool stamp, Emit&& emit) const;
+    // The summed-area table of the anchors of the touched rectangle (counts_), and the number of
+    // anchors in the box x0..x1, y0..y1 of the buffer (inclusive, clipped to the rectangle).
+    void CountAnchors();
+    int AnchorsIn(int x0, int y0, int x1, int y1) const noexcept;
+    // Zeroes the touched part of the anchor buffer for the next tile.
+    void ClearAnchors() noexcept;
+
     int tile_ = 0;
+    int pad_ = kRadius;
     int padded_ = 0;
     Disc disc_ = Disc::kDisc13;
     std::vector<uint64_t> centre_;  // padded_^2, all zero between tiles
+    std::vector<uint64_t> best_;    // tile_^2: the maximum key per pixel of ResolveAdaptive
+    std::vector<uint32_t> counts_;  // (touched width + 1) x (touched height + 1): CountAnchors
     int dirtyMinX_ = 0, dirtyMaxX_ = -1, dirtyMinY_ = 0, dirtyMaxY_ = -1;
     size_t points_ = 0;
 };

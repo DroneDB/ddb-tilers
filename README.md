@@ -102,7 +102,9 @@ the points. Three modes (`DDBT_COPC_TILER_MODE`):
 - `compat`: DroneDB 2.4.1's tiles, bit for bit.
 - `hybrid` (default): the same look without the known defects (points drawn at their true
   position, no seams at zoom 21 and above, one 8/16-bit colour decision per cloud).
-- `modern`: also a symmetric point disc and a level of detail from the projected point spacing.
+- `modern`: also a symmetric point disc and a level of detail from the projected point spacing;
+  zoomed in past the density of the cloud, the discs grow with the spacing of the points around
+  them (up to 32 px of radius), so the cloud stays a surface instead of dots over the map.
 
 ## Performance
 

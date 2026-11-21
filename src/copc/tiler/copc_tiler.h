@@ -34,7 +34,10 @@
 //    quadratic or cubic, max residual <= 0.01 px, else exact PROJ); colours with the per-cloud
 //    16-bit decision, the ramp over the exact header z range; the 13-pixel symmetric disc on the
 //    point's pixel with a per-pixel z-test (max key), independent of the point order:
-//    deterministic whatever the threads.
+//    deterministic whatever the threads. Where the points are farther apart than the disc spans
+//    (a tile zoomed in past the density of the cloud), a point's disc grows with the distance to
+//    its 4th nearest point, up to a radius of 32 px, so that the cloud stays a surface; the window
+//    holds the points 72 px around the tile, which set the discs drawn along its edges.
 //
 // Every mode keeps the baseline's contract: the inverted tms flag, "Out of bounds [...]" for a
 // tile outside the footprint's tile range (any zoom accepted), the error messages of
