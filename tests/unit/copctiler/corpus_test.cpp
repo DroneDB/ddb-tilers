@@ -135,7 +135,8 @@ TEST(CopcTilerCorpus, SplatModesHaveNoSeamsAtZ21AndAbove) {
                 // A point on a pixel edge may land on either side in the two renders (separate fits).
                 EXPECT_LE(d.differing, d.pixels / 500) << path << " z" << z << " " << ModeName(mode);
                 EXPECT_LE(d.seamHoles, d.seamPixels / 1000) << path << " z" << z << " " << ModeName(mode);
-                if (z == 20) {
+                // (modern draws tiles that the baseline's discs leave under a tenth covered)
+                if (z == 20 && c.tiles > 0) {
                     EXPECT_GT(c.seamHoles, d.seamHoles * 10 + 10) << "compat seams at z21 " << path;
                 }
             }

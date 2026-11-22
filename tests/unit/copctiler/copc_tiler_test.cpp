@@ -407,7 +407,8 @@ TEST_F(CopcTilerTest, SplatModesHaveNoSeamsA512TileIsFour256Tiles) {
     for (const Mode mode : {Mode::kHybrid, Mode::kModern, Mode::kCompat}) {
         size_t worstDiff = 0, tilesCompared = 0;
         size_t edgeMissing = 0;
-        for (const int z : {20, 21}) {
+        // z22: the points are about 7 px apart, the discs of modern grow.
+        for (const int z : {20, 21, 22}) {
             for (const auto& [x, tmsRow] : TilesAround(*cloud, z, 512, 0)) {
                 if (!InRange(*cloud, z, x, tmsRow, 512)) continue;
                 const int y = compat::FlipRow(tmsRow, z);
@@ -582,38 +583,87 @@ TEST_F(CopcTilerTest, SplatModesUseAFitAndStayWithinTheResidual) {
 // the grid is drawn. The cube is sized so that the spacing at z19 (and of depth 1 at z20) is
 // 3.6 px in EPSG:3857 (UTM 33N at 45 N: 1.417 Mercator metres per metre); the depth limit of
 // res(z - 2) stopped there, the discs of points 4 px apart left a hole between them.
-TEST_F(CopcTilerTest, ModernTilesHaveNoHolesWhereTheCloudHasPoints) {
+// A flat square grid of 512 x 512 points 0.19 m apart over 97 m (nested over the three levels
+// of its octree; see CloudSpec::nestedGrid).
+CloudSpec NestedGridSpec() {
     CloudSpec s;
     s.nestedGrid = true;
     s.halfSize = 48.5;
     s.center[0] = 500000 + s.halfSize;
     s.center[1] = 5000000 + s.halfSize;
-    const std::string path = Cloud("nested-grid", s);
+    return s;
+}
+
+struct GridCoverage {
+    size_t inside = 0, holes = 0;
+};
+
+// The pixels of the 256 px tiles of zoom z inside the grid of `s` (at least one root spacing in:
+// its border pixels are partly drawn), and those of them that are transparent: of every tile over
+// the grid, else (centre) of the 3 x 3 tiles around its centre. `check` sees the info of every tile.
+template <typename Check>
+GridCoverage CoverageOfTheGrid(const std::string& path, const CloudSpec& s, int z, Mode mode, bool centre,
+                               Check&& check) {
     auto cloud = tiler::Cloud::Get(path);
     const compat::GlobalMercator m(256);
-    // Pixels at least one root spacing inside the grid (its border pixels are partly drawn).
     const double margin = 2 * s.halfSize / 128;
-    for (const int z : {19, 20}) {
-        size_t inside = 0, holes = 0;
-        for (const auto& [x, tmsRow] : TilesAround(*cloud, z, 256, 0)) {
-            RenderInfo info;
-            const auto rgba = Render(path, z, x, compat::FlipRow(tmsRow, z), 256, Mode::kModern, &info);
-            EXPECT_EQ(info.depthEnd, z - 19 + 2) << "z" << z;  // one level more than res(z - 2)
-            const auto tb = m.tileBounds(x, tmsRow, z);
-            const double res = m.resolution(z);
-            for (int py = 0; py < 256; ++py)
-                for (int px = 0; px < 256; ++px) {
-                    double cx = tb.min.x + (px + 0.5) * res, cy = tb.max.y - (py + 0.5) * res;
-                    ASSERT_TRUE(cloud->toCloud().TransformPoint(cx, cy));
-                    if (std::fabs(cx - s.center[0]) > s.halfSize - margin ||
-                        std::fabs(cy - s.center[1]) > s.halfSize - margin)
-                        continue;
-                    ++inside;
-                    holes += rgba[(static_cast<size_t>(py) * 256 + static_cast<size_t>(px)) * 4 + 3] == 0;
+    auto tiles = TilesAround(*cloud, z, 256, 0);
+    if (centre) {
+        const std::array<int, 2> mid = tiles[tiles.size() / 2];
+        std::erase_if(tiles, [&](const std::array<int, 2>& t) {
+            return std::abs(t[0] - mid[0]) > 1 || std::abs(t[1] - mid[1]) > 1;
+        });
+    }
+    GridCoverage c;
+    for (const auto& [x, tmsRow] : tiles) {
+        RenderInfo info;
+        const auto rgba = Render(path, z, x, compat::FlipRow(tmsRow, z), 256, mode, &info);
+        check(info);
+        const auto tb = m.tileBounds(x, tmsRow, z);
+        const double res = m.resolution(z);
+        for (int py = 0; py < 256; ++py)
+            for (int px = 0; px < 256; ++px) {
+                double cx = tb.min.x + (px + 0.5) * res, cy = tb.max.y - (py + 0.5) * res;
+                if (!cloud->toCloud().TransformPoint(cx, cy)) {
+                    ADD_FAILURE() << "no preimage of a pixel of z" << z;
+                    return c;
                 }
+                if (std::fabs(cx - s.center[0]) > s.halfSize - margin || std::fabs(cy - s.center[1]) > s.halfSize - margin)
+                    continue;
+                ++c.inside;
+                c.holes += rgba[(static_cast<size_t>(py) * 256 + static_cast<size_t>(px)) * 4 + 3] == 0;
+            }
+    }
+    return c;
+}
+
+TEST_F(CopcTilerTest, ModernTilesHaveNoHolesWhereTheCloudHasPoints) {
+    const CloudSpec s = NestedGridSpec();
+    const std::string path = Cloud("nested-grid", s);
+    for (const int z : {19, 20}) {
+        const GridCoverage c = CoverageOfTheGrid(path, s, z, Mode::kModern, false, [z](const RenderInfo& info) {
+            EXPECT_EQ(info.depthEnd, z - 19 + 2) << "z" << z;  // one level more than res(z - 2)
+        });
+        EXPECT_GT(c.inside, 20000u) << "z" << z;
+        EXPECT_EQ(c.holes, 0u) << "z" << z << ": " << c.holes << " of " << c.inside << " pixels inside the grid";
+    }
+}
+
+TEST_F(CopcTilerTest, ModernTilesZoomedInPastTheDensityOfTheCloudStayASurface) {
+    // From z21 the grid's points are 2 to 13 px apart (0.27 m in EPSG:3857 at 45 degrees north,
+    // 0.075 to 0.019 m per pixel), all three levels read: the 13-pixel disc leaves the map seen
+    // between them (the hybrid stamp too), the discs of modern grow with the spacing and join.
+    const CloudSpec s = NestedGridSpec();
+    const std::string path = Cloud("nested-grid", s);
+    for (const int z : {21, 22, 23}) {
+        const auto noCheck = [](const RenderInfo&) {};
+        const GridCoverage modern = CoverageOfTheGrid(path, s, z, Mode::kModern, true, noCheck);
+        const GridCoverage hybrid = CoverageOfTheGrid(path, s, z, Mode::kHybrid, true, noCheck);
+        EXPECT_GT(modern.inside, 100000u) << "z" << z;
+        EXPECT_EQ(modern.holes, 0u) << "z" << z << ": " << modern.holes << " of " << modern.inside;
+        if (z >= 22) {
+            EXPECT_GT(hybrid.holes, hybrid.inside / 4) << "z" << z << ": the stamp alone";
         }
-        EXPECT_GT(inside, 20000u) << "z" << z;
-        EXPECT_EQ(holes, 0u) << "z" << z << ": " << holes << " of " << inside << " pixels inside the grid";
     }
 }
 
@@ -1119,6 +1169,14 @@ XyzTile FullestTile(const std::string& path, std::initializer_list<int> zooms, R
     return best;
 }
 
+// What a 256 px tile reads in `mode` without limits.
+RenderInfo UnlimitedRender(const std::string& path, const XyzTile& t, Mode mode) {
+    const ScopedTileLimits none(0, 0);
+    RenderInfo info;
+    Render(path, t.z, t.x, t.y, 256, mode, &info);
+    return info;
+}
+
 TEST_F(CopcTilerTest, TilesWithinTheLimitsAreTheTilesOfAnUnlimitedTiler) {
     struct Case {
         std::string name;
@@ -1212,6 +1270,7 @@ TEST_F(CopcTilerTest, TheRootIsReadWhateverTheNodeLimitWithinTheBudget) {
     const XyzTile t = FullestTile(path, {21}, all);
     const uint64_t root = (s.points + 15) / 16;  // every 16th point
     for (const Mode mode : {Mode::kCompat, Mode::kHybrid, Mode::kModern}) {
+        const RenderInfo whole = UnlimitedRender(path, t, mode);  // modern reads a wider window
         {
             // Every node but the root is above the node limit of 1 point
             const ScopedTileLimits limits(root, 1);
@@ -1223,7 +1282,7 @@ TEST_F(CopcTilerTest, TheRootIsReadWhateverTheNodeLimitWithinTheBudget) {
             EXPECT_EQ(info.rootPoints, root);
             EXPECT_FALSE(info.rootRefused);
             EXPECT_EQ(info.depthLimitedTo, -1);
-            EXPECT_EQ(info.nodesSkipped, all.nodes - 1);
+            EXPECT_EQ(info.nodesSkipped, whole.nodes - 1);
             EXPECT_GT(Opaque(rgba), 0u) << ModeName(mode);
             EXPECT_EQ(cache::NodeCache::Global().Stats().entries, 0u);  // the root is above the limit
         }
@@ -1307,13 +1366,14 @@ TEST_F(CopcTilerTest, ANodeAboveTheNodeLimitIsSkippedAndNeverCached) {
     const XyzTile t = FullestTile(path, {21}, all);
     ASSERT_GE(all.depthEnd, 3);
     for (const Mode mode : {Mode::kCompat, Mode::kHybrid, Mode::kModern}) {
+        const RenderInfo whole = UnlimitedRender(path, t, mode);  // modern reads a wider window
         const ScopedTileLimits limits(0, 2000);
         cache::NodeCache::Global().Clear();
         RenderInfo info;
         const auto rgba = Render(path, t.z, t.x, t.y, 256, mode, &info);
         EXPECT_GT(info.nodesSkipped, 0u);
-        EXPECT_EQ(info.nodes + info.nodesSkipped, all.nodes);
-        EXPECT_LT(info.points, all.points);
+        EXPECT_EQ(info.nodes + info.nodesSkipped, whole.nodes);
+        EXPECT_LT(info.points, whole.points);
         EXPECT_EQ(info.depthLimitedTo, -1);
         EXPECT_GT(Opaque(rgba), 0u) << ModeName(mode);
         // Every node read is cached but the root, which is above the limit

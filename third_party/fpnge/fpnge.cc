@@ -1336,7 +1336,7 @@ CollectSymbolCounts(size_t bytes_per_line, const unsigned char *current_row_buf,
 
   auto encode_rle_cb = [&](size_t run) {
     symbol_counts[0] += 1;
-    constexpr size_t kLZ77Sym[] = {
+    static constexpr size_t kLZ77Sym[] = {
         0,   0,   0,   257, 258, 259, 260, 261, 262, 263, 264, 265, 265, 266,
         266, 267, 267, 268, 268, 269, 269, 269, 269, 270, 270, 270, 270, 271,
         271, 271, 271, 272, 272, 272, 272, 273, 273, 273, 273, 273, 273, 273,

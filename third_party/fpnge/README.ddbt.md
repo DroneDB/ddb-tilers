@@ -1,7 +1,10 @@
 # fpnge in ddb-tilers
 
 Upstream: https://github.com/veluca93/fpnge, commit `097ebccf3d3db443d9a8f238b1deed010a82f961` (2025-10-09).
-Files: `fpnge.cc`, `fpnge.h`, `LICENSE` (Apache-2.0, Copyright 2021 Google LLC), copied unmodified.
+Files: `fpnge.cc`, `fpnge.h`, `LICENSE` (Apache-2.0, Copyright 2021 Google LLC), copied unmodified but for one
+line of `fpnge.cc`: the table `kLZ77Sym` of `CollectSymbolCounts` is `static constexpr` instead of `constexpr`. MSVC
+19.52 (Visual Studio 2026) stops with C2326 ("function cannot access 'kLZ77Sym'") on the lambda nested in the lambda
+that declares it; a static table needs no capture, and its values and the code are the same.
 
 Used by `src/core/encode/png_encoder.cpp` for grey, grey + alpha, RGB and RGBA tiles when the PNG engine is fpnge
 (`PngOptions::engine` or `DDBT_PNG_ENGINE=fpnge`; libdeflate is the default: fpnge encodes raster tiles 4.6-5.1x faster

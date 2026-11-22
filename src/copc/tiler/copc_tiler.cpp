@@ -530,13 +530,14 @@ void RenderCompat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int
 // hybrid and modern
 
 struct PixelMap {
-    // u = (mx - minX) / res + kRadius, v = (maxY - my) / res + kRadius: anchor-buffer pixels.
+    // u = (mx - minX) / res + pad, v = (maxY - my) / res + pad: anchor-buffer pixels (pad: the
+    // anchor buffer's margin around the image, SplatRasterizer::Pad()).
     double minX, maxY, invRes;
+    double pad = SplatRasterizer::kRadius;
     void ToPixels(double* mx, double* my, size_t n) const {
-        constexpr double r = SplatRasterizer::kRadius;
         for (size_t i = 0; i < n; ++i) {
-            mx[i] = (mx[i] - minX) * invRes + r;
-            my[i] = (maxY - my[i]) * invRes + r;
+            mx[i] = (mx[i] - minX) * invRes + pad;
+            my[i] = (maxY - my[i]) * invRes + pad;
         }
     }
 };
@@ -630,37 +631,16 @@ void DrawSplatNode(const CompactNode& node, const SplatDraw& d, Scratch& s, Rend
     }
 }
 
-// The resolution that sets the depth limit of a modern tile of `res` metres per pixel: the levels
-// are read down to the first whose spacing is at most kGaplessSpacing pixels (1.41 to 2.83 px).
-// The baseline's limit, res(z - 2), stops at a spacing of 2 to 4 px, where the 13-pixel disc
-// leaves holes that the deeper levels fill (pinholes, and rectangles where the last level read
-// is sparser than its neighbours): up to 7 % of the pixels of a tile that the full cloud covers.
-// At the zooms where the spacing of the baseline's last level is above kGaplessSpacing (about
-// half of them), one level more is read: about twice the points decoded, within the budget.
-double ModernLodResolution(double res) { return res * SplatRasterizer::kGaplessSpacing; }
+// A tile's bounds with `anchorPad` pixels (and one more for the rounding of the window) around it.
+Rect PadTile(const tile::compat::Box<tile::compat::Point>& tb, int anchorPad, double res) {
+    const double pad = (anchorPad + 1) * res;
+    return Rect{tb.min.x - pad, tb.min.y - pad, tb.max.x + pad, tb.max.y + pad};
+}
 
-// hybrid and modern differ in the depth limit, the ramp range, the disc and where it is anchored
-// (see copc_tiler.h); the window, the transform, the colours and the z-test are the same.
-void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int tz, int tx, int tmsRow, int tileSize,
-                 Mode mode, Scratch& s, std::vector<uint8_t>& rgba, RenderInfo& info) {
-    const bool hybrid = mode == Mode::kHybrid;
-    const size_t bytes = static_cast<size_t>(tileSize) * static_cast<size_t>(tileSize) * 4;
-    rgba.resize(bytes);
-    auto blank = [&] {
-        std::memset(rgba.data(), 0, bytes);
-        info.blank = true;
-    };
-
-    const double res = m.resolution(tz);
-    const auto tb = m.tileBounds(tx, tmsRow, tz);
-    // Discs reach kRadius px; one more pixel of margin for the rounding of the window.
-    const double pad = (SplatRasterizer::kRadius + 1) * res;
-    const Rect padded{tb.min.x - pad, tb.min.y - pad, tb.max.x + pad, tb.max.y + pad};
-    const auto& fp = cloud.footprint();
-    if (!fp || fp->maxX < padded.minX || fp->minX > padded.maxX || fp->maxY < padded.minY || fp->minY > padded.maxY)
-        return blank();
-
-    // Read window: the padded tile's outline (32 points) in the cloud CRS.
+// The read window of a padded tile: its outline (32 points) in the cloud CRS, at the lowest and
+// highest heights for a geocentric CRS, widened by 1 % for the curvature between the samples; the
+// header bounds where part of the tile has no preimage (beyond the CRS's domain).
+kernels::Window ReadWindow(const Cloud& cloud, const Rect& padded) {
     constexpr int kSide = 8;
     double wx[8 * kSide], wy[8 * kSide], wz[8 * kSide];
     const bool geo = cloud.geocentric();
@@ -688,17 +668,62 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
             window.minY = std::min(window.minY, wy[i]);
             window.maxY = std::max(window.maxY, wy[i]);
         }
-        // The outline is sampled: allow for its curvature between samples.
         const double mx = (window.maxX - window.minX) * 0.01, my = (window.maxY - window.minY) * 0.01;
         window.minX -= mx;
         window.maxX += mx;
         window.minY -= my;
         window.maxY += my;
     } else {
-        // Part of the tile has no preimage (beyond the CRS's domain): read the whole cloud there.
         const las::LasHeader& h = cloud.file().header();
         window = {h.min[0], h.min[1], h.max[0], h.max[1]};
     }
+    return window;
+}
+
+// The largest disc of a modern tile (SplatRasterizer::ResolveAdaptive): a point up to 65 px wide.
+// It is a number of pixels whatever the tile size, so that a tile draws what the tiles of the same
+// resolution covering it draw (a 512 px tile, its four 256 px tiles of the next zoom). Points
+// farther apart than that are zoomed in far past the density of the cloud and keep gaps.
+constexpr int kAdaptiveMaxRadius = 32;
+
+// The resolution that sets the depth limit of a modern tile of `res` metres per pixel: the levels
+// are read down to the first whose spacing is at most kGaplessSpacing pixels (1.41 to 2.83 px).
+// The baseline's limit, res(z - 2), stops at a spacing of 2 to 4 px, where the 13-pixel disc
+// leaves holes that the deeper levels fill (pinholes, and rectangles where the last level read
+// is sparser than its neighbours): up to 7 % of the pixels of a tile that the full cloud covers.
+// At the zooms where the spacing of the baseline's last level is above kGaplessSpacing (about
+// half of them), one level more is read: about twice the points decoded, within the budget.
+double ModernLodResolution(double res) { return res * SplatRasterizer::kGaplessSpacing; }
+
+// hybrid and modern differ in the depth limit, the ramp range, the disc and where it is anchored
+// (see copc_tiler.h); the window, the transform, the colours and the z-test are the same.
+void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int tz, int tx, int tmsRow, int tileSize,
+                 Mode mode, Scratch& s, std::vector<uint8_t>& rgba, RenderInfo& info) {
+    const bool hybrid = mode == Mode::kHybrid;
+    const size_t bytes = static_cast<size_t>(tileSize) * static_cast<size_t>(tileSize) * 4;
+    rgba.resize(bytes);
+    auto blank = [&] {
+        std::memset(rgba.data(), 0, bytes);
+        info.blank = true;
+    };
+
+    const double res = m.resolution(tz);
+    const auto tb = m.tileBounds(tx, tmsRow, tz);
+    // Discs reach kRadius px (hybrid), kAdaptiveMaxRadius px (modern); one more pixel of margin
+    // for the rounding of the window.
+    const int reach = hybrid ? SplatRasterizer::kRadius : kAdaptiveMaxRadius;
+    const Rect reached = PadTile(tb, reach, res);
+    const auto& fp = cloud.footprint();
+    if (!fp || fp->maxX < reached.minX || fp->minX > reached.maxX || fp->maxY < reached.minY ||
+        fp->minY > reached.maxY)
+        return blank();
+
+    // The anchors around the tile: those whose disc reaches it, and for modern the anchors that
+    // set the radius of their discs (SplatRasterizer::AdaptivePad), so that a tile draws along its
+    // edges the discs its neighbours draw.
+    const int anchorPad = hybrid ? SplatRasterizer::kRadius : SplatRasterizer::AdaptivePad(kAdaptiveMaxRadius);
+    const bool geo = cloud.geocentric();
+    const kernels::Window window = ReadWindow(cloud, PadTile(tb, anchorPad, res));
 
     // Level of detail. hybrid: the baseline's (the spacing in the cloud's units against
     // res(z - 2), the resolution passed through readers.copc's option text for colourless
@@ -731,7 +756,7 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
     info.points = sel.points;
     if (sel.nodes.empty()) return blank();
 
-    const PixelMap pm{tb.min.x, tb.max.y, 1.0 / res};
+    const PixelMap pm{tb.min.x, tb.max.y, 1.0 / res, static_cast<double>(anchorPad)};
     std::optional<crs::PolyFit> fit;
     if (!geo && sel.points >= kExactBelow) {
         double residual = 0;
@@ -757,7 +782,7 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
     // (floor). hybrid: the baseline's 11-pixel stamp on the pixel whose top-left corner is the
     // pixel corner nearest the point (round, as PointRasterizer), so that the stamp's 4 x 4 box
     // is centred on the point up to half a pixel.
-    s.splat.Reset(tileSize, hybrid ? SplatRasterizer::Disc::kStamp11 : SplatRasterizer::Disc::kDisc13);
+    s.splat.Reset(tileSize, hybrid ? SplatRasterizer::Disc::kStamp11 : SplatRasterizer::Disc::kDisc13, anchorPad);
     SplatDraw d;
     d.window = window;
     d.scaling = &cloud.scaling();
@@ -774,7 +799,9 @@ void RenderSplat(const Cloud& cloud, const tile::compat::GlobalMercator& m, int 
         DrawSplatNode(node.points, d, s, info);
         return true;
     });
-    info.opaque = s.splat.Resolve(rgba.data());
+    // modern: discs that grow with the spacing of the points around them, so that a cloud zoomed
+    // in past its density stays a surface instead of dots over the map.
+    info.opaque = hybrid ? s.splat.Resolve(rgba.data()) : s.splat.ResolveAdaptive(rgba.data(), kAdaptiveMaxRadius);
     if (info.opaque == 0) info.blank = true;
 }
 

@@ -36,7 +36,7 @@ if(DDBT_BUILD_BENCH)
   list(APPEND VCPKG_MANIFEST_FEATURES bench)
 endif()
 
-project(ddbt VERSION 0.13.3 LANGUAGES C CXX
+project(ddbt VERSION 0.13.4 LANGUAGES C CXX
         DESCRIPTION "Fast, light COG and COPC builders and tilers"
         HOMEPAGE_URL "https://github.com/DroneDB/ddb-tilers")
 
