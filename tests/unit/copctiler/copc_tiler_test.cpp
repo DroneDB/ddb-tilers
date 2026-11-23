@@ -770,6 +770,27 @@ TEST_F(CopcTilerTest, ErrorsAreTheBaselines) {
     }
 }
 
+// A local CRS is named for what it is not: Agisoft Metashape writes its site frame as a compound
+// CRS whose local part is called "WGS 84". The reason says that it is local, not that no
+// transformation from "WGS 84" to EPSG:3857 exists.
+TEST(LocalCrsReason, SaysTheCrsIsLocalWhateverItsName) {
+    const ddbt::crs::Crs metashape = ddbt::crs::Crs::FromWkt(
+        R"wkt(COMPD_CS["WGS 84",LOCAL_CS["WGS 84",UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Easting",EAST],)wkt"
+        R"wkt(AXIS["Northing",NORTH]],VERT_CS["unknown",VERT_DATUM["unknown",2005],)wkt"
+        R"wkt(UNIT["metre",1,AUTHORITY["EPSG","9001"]],AXIS["Up",UP]]])wkt");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(metashape),
+              "the file's coordinate system (\"WGS 84\") is a local one, with no position on the earth");
+    const ddbt::crs::Crs unnamed = ddbt::crs::Crs::FromWkt(R"wkt(LOCAL_CS["",UNIT["metre",1],AXIS["X",EAST],AXIS["Y",NORTH]])wkt");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(unnamed), "the file's coordinate system is a local one, with no position on the earth");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(ddbt::crs::Crs::FromEpsg(5703)),
+              "the file's coordinate system (\"NAVD88 height\") is a local one, with no position on the earth");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(ddbt::crs::Crs::FromEpsg(4326)), "");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(ddbt::crs::Crs::FromEpsg(32632)), "");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(ddbt::crs::Crs::FromEpsg(4978)), "");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(ddbt::crs::Crs::FromUserInput("EPSG:32632+5703")), "");
+    EXPECT_EQ(ddbt::crs::LocalCrsReason(ddbt::crs::Crs()), "");
+}
+
 // A CRS without a transformation to EPSG:3857 (a site grid): the cloud opens, and its extent and
 // every tile are refused with the reason, in every mode (PointCloudTiler's constructor refused it
 // before it made its transforms)
@@ -782,7 +803,9 @@ TEST_F(CopcTilerTest, ACloudWithoutATransformationToWebMercatorIsRefusedWithTheR
     auto cloud = tiler::Cloud::Get(path);
     EXPECT_FALSE(cloud->compatFootprint().has_value());
     EXPECT_FALSE(cloud->footprint().has_value());
-    const std::string reason = "Cannot tile " + path + ": footprint unavailable: No coordinate transformation from Site grid to EPSG:3857";
+    const std::string reason = "Cannot tile " + path +
+                               ": footprint unavailable: the file's coordinate system (\"Site grid\") is a local one, "
+                               "with no position on the earth";
     try {
         Extent(path, 256);
         ADD_FAILURE() << "an extent";

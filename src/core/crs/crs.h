@@ -136,4 +136,10 @@ private:
 /// geographic takes x (longitude) in [-180, 180] and y (latitude) in [-90, 90], LAS order.
 std::string BoundsMisfit(const Crs& c, double minX, double minY, double maxX, double maxY);
 
+/// Why a cloud in `c` has no position on the earth, "" when it has one: a local (engineering) CRS,
+/// or a vertical CRS alone, as the horizontal part. No transformation can give such a cloud a
+/// footprint, and its name ("WGS 84" for a Metashape site frame) says nothing of where it is:
+/// "the file's coordinate system ("<name>") is a local one, with no position on the earth".
+std::string LocalCrsReason(const Crs& c);
+
 }  // namespace ddbt::crs

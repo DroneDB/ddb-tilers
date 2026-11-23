@@ -334,6 +334,12 @@ std::shared_ptr<const Cloud> Cloud::OpenImpl(const std::string& path, uint64_t s
         c->footprintError_ = std::move(misfit);
         return c;
     }
+    // A local CRS (a site frame) places the cloud nowhere: its reason, not that no transformation
+    // to EPSG:3857 exists (its name may well be "WGS 84")
+    if (std::string local = crs::LocalCrsReason(c->crs_); !local.empty()) {
+        c->footprintError_ = std::move(local);
+        return c;
+    }
 
     const crs::Crs merc = crs::Crs::FromEpsg(3857);
 
