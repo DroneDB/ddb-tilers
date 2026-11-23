@@ -1756,7 +1756,8 @@ StatisticsCall RasterStatistics(const std::string& path, const char* options, in
     };
     StatisticsCall call;
     ddbtRaster* raster = nullptr;
-    EXPECT_EQ(ddbtRasterOpen(path.c_str(), &raster), DDBT_ERR_NONE) << ddbtLastError();
+    // Opened for the call alone: Windows does not remove a file a process keeps open
+    EXPECT_EQ(ddbtRasterOpenEx(path.c_str(), DDBT_RASTER_OPEN_PRIVATE, &raster), DDBT_ERR_NONE) << ddbtLastError();
     Probe probe{&call.fractions, stopAt};
     char* out = nullptr;
     call.code = ddbtRasterStatistics(
@@ -1789,8 +1790,11 @@ TEST(HostApi, RasterStatisticsAreTheStatisticsOfTheBuild) {
     spec.value = [](int band, uint32_t x, uint32_t y) { return static_cast<float>((x * (band + 3) + y * 7) % 251); };
     syn::WriteSynth(input, spec);
     ASSERT_EQ(ddbtBuildCog(input.c_str(), cog.c_str(), nullptr), DDBT_ERR_NONE) << ddbtLastError();
-    std::ifstream sidecarFile(cog + ".stats.json");
-    const std::string sidecarText((std::istreambuf_iterator<char>(sidecarFile)), std::istreambuf_iterator<char>());
+    std::string sidecarText;
+    {
+        std::ifstream sidecarFile(cog + ".stats.json");
+        sidecarText.assign(std::istreambuf_iterator<char>(sidecarFile), std::istreambuf_iterator<char>());
+    }
     const auto sidecar = json::Parse(sidecarText);
     ASSERT_TRUE(sidecar && sidecar->Find("bands")) << "the build writes its statistics";
 
