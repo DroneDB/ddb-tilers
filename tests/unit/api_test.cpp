@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -35,7 +36,7 @@
 
 TEST(Api, Version) {
     const std::string v = ddbtVersion();
-    EXPECT_EQ(v, "0.13.5");
+    EXPECT_EQ(v, "0.14.0");
 }
 
 TEST(Api, LastErrorIsEmptyWhenNothingFailed) {
@@ -103,7 +104,7 @@ TEST(Api, CpuInfoIsJsonWithTheDispatchTarget) {
     EXPECT_NE(s.find("\"dispatchTarget\":\""), std::string::npos) << s;
     EXPECT_NE(s.find("\"compiledTargets\":["), std::string::npos) << s;
     EXPECT_NE(s.find("\"supportedTargets\":["), std::string::npos) << s;
-    EXPECT_NE(s.find("\"version\":\"0.13.5\""), std::string::npos) << s;
+    EXPECT_NE(s.find("\"version\":\"0.14.0\""), std::string::npos) << s;
     EXPECT_EQ(ddbtCpuInfo(nullptr), DDBT_ERR_INVALIDARGS);
 }
 
@@ -1736,5 +1737,132 @@ TEST(HostApi, BuildCopc2DropsTheCrsWhenAsked) {
     EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"dropCrs": "yes"})", nullptr, nullptr), DDBT_ERR_INVALIDARGS);
     EXPECT_EQ(ddbtBuildCopc2(in.c_str(), out.c_str(), R"({"dropCrs": true, "targetCrs": "EPSG:32633"})", nullptr, nullptr),
               DDBT_ERR_INVALIDARGS);
+    std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+struct StatisticsCall {
+    ddbtErr code = DDBT_ERR_NONE;
+    ddbt::cog::tiler::json::Value result;
+    std::vector<double> fractions;
+};
+
+// ddbtRasterStatistics of `path` with `options`; stopAt: the call of keepGoing that stops the pass (0: never)
+StatisticsCall RasterStatistics(const std::string& path, const char* options, int stopAt = 0) {
+    struct Probe {
+        std::vector<double>* fractions;
+        int stopAt;
+    };
+    StatisticsCall call;
+    ddbtRaster* raster = nullptr;
+    EXPECT_EQ(ddbtRasterOpen(path.c_str(), &raster), DDBT_ERR_NONE) << ddbtLastError();
+    Probe probe{&call.fractions, stopAt};
+    char* out = nullptr;
+    call.code = ddbtRasterStatistics(
+        raster, options,
+        [](double fraction, void* userData) {
+            auto* p = static_cast<Probe*>(userData);
+            p->fractions->push_back(fraction);
+            return p->stopAt != 0 && static_cast<int>(p->fractions->size()) >= p->stopAt ? 1 : 0;
+        },
+        &probe, &out);
+    if (out != nullptr) {
+        if (auto v = ddbt::cog::tiler::json::Parse(out)) call.result = *v;
+        ddbtFree(out);
+    }
+    ddbtRasterClose(raster);
+    return call;
+}
+
+}  // namespace
+
+// ddbtRasterStatistics gives, for Byte samples, the statistics the build wrote in its sidecar, bit for bit,
+// whatever the number of threads, every band in one call; the fraction goes from 0 to 1
+TEST(HostApi, RasterStatisticsAreTheStatisticsOfTheBuild) {
+    namespace syn = ddbt::cog::tiler::testing;
+    namespace json = ddbt::cog::tiler::json;
+    const auto dir = ApiScratch("raster-statistics");
+    const std::string input = (dir / "in.tif").string(), cog = (dir / "cog.tif").string();
+    syn::SynthSpec spec = syn::Spec(1500, 3, 1);
+    spec.tile = 256;
+    spec.value = [](int band, uint32_t x, uint32_t y) { return static_cast<float>((x * (band + 3) + y * 7) % 251); };
+    syn::WriteSynth(input, spec);
+    ASSERT_EQ(ddbtBuildCog(input.c_str(), cog.c_str(), nullptr), DDBT_ERR_NONE) << ddbtLastError();
+    std::ifstream sidecarFile(cog + ".stats.json");
+    const std::string sidecarText((std::istreambuf_iterator<char>(sidecarFile)), std::istreambuf_iterator<char>());
+    const auto sidecar = json::Parse(sidecarText);
+    ASSERT_TRUE(sidecar && sidecar->Find("bands")) << "the build writes its statistics";
+
+    std::vector<StatisticsCall> calls;
+    for (const char* options : {static_cast<const char*>(nullptr), R"({"threads": 1})", R"({"threads": 3})"})
+        calls.push_back(RasterStatistics(cog, options));
+    for (const auto& call : calls) {
+        ASSERT_EQ(call.code, DDBT_ERR_NONE) << ddbtLastError();
+        const auto& bands = call.result.Find("bands")->arr;
+        ASSERT_EQ(bands.size(), 3u);
+        for (int b = 1; b <= 3; ++b) {
+            const json::Value& got = bands[static_cast<size_t>(b - 1)];
+            const json::Value* want = sidecar->Find("bands")->Find(std::to_string(b));
+            ASSERT_NE(want, nullptr);
+            for (const char* key : {"min", "max", "mean", "std"})
+                EXPECT_EQ(got.Find(key)->num, want->Find(key)->num) << "band " << b << " " << key;
+            EXPECT_EQ(got.Find("valid")->u, want->Find("valid")->u) << "band " << b;
+            EXPECT_EQ(got.Find("total")->u, want->Find("total")->u) << "band " << b;
+        }
+        ASSERT_GE(call.fractions.size(), 2u);
+        EXPECT_EQ(call.fractions.front(), 0.0);
+        EXPECT_EQ(call.fractions.back(), 1.0);
+        EXPECT_TRUE(std::is_sorted(call.fractions.begin(), call.fractions.end()));
+    }
+
+    // The bands asked, in their order
+    const auto two = RasterStatistics(cog, R"({"bands": [3, 1]})");
+    ASSERT_EQ(two.code, DDBT_ERR_NONE) << ddbtLastError();
+    ASSERT_EQ(two.result.Find("bands")->arr.size(), 2u);
+    EXPECT_EQ(two.result.Find("bands")->arr[0].Find("mean")->num, calls[0].result.Find("bands")->arr[2].Find("mean")->num);
+    std::filesystem::remove_all(dir);
+}
+
+// A band with no pixel that has a value is null; the NoData override leaves out its value in every band
+TEST(HostApi, RasterStatisticsOfABandWithoutValuesIsNull) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-statistics-empty");
+    const std::string path = (dir / "r.tif").string();
+    syn::SynthSpec spec = syn::Spec(300, 2, 1);
+    spec.tile = 256;
+    spec.value = [](int band, uint32_t x, uint32_t) { return band == 0 ? 7.0f : static_cast<float>(x % 9); };
+    syn::WriteSynth(path, spec);
+    const auto call = RasterStatistics(path, R"({"nodata": 7})");
+    ASSERT_EQ(call.code, DDBT_ERR_NONE) << ddbtLastError();
+    const auto& bands = call.result.Find("bands")->arr;
+    ASSERT_EQ(bands.size(), 2u);
+    EXPECT_EQ(bands[0].kind, ddbt::cog::tiler::json::Value::Kind::kNull);
+    ASSERT_TRUE(bands[1].IsObject());
+    EXPECT_EQ(bands[1].Find("max")->num, 8.0);
+    EXPECT_LT(bands[1].Find("valid")->u, bands[1].Find("total")->u) << "the 7s are left out of band 2 too";
+    std::filesystem::remove_all(dir);
+}
+
+// keepGoing stops the pass with DDBT_ERR_CANCELED and no output; bad arguments are DDBT_ERR_INVALIDARGS
+TEST(HostApi, RasterStatisticsStopsWhenAskedAndRefusesBadArguments) {
+    namespace syn = ddbt::cog::tiler::testing;
+    const auto dir = ApiScratch("raster-statistics-stop");
+    const std::string path = (dir / "r.tif").string();
+    syn::SynthSpec spec = syn::Spec(600, 1, 1);
+    spec.tile = 256;
+    syn::WriteSynth(path, spec);
+
+    const auto stopped = RasterStatistics(path, nullptr, 1);
+    EXPECT_EQ(stopped.code, DDBT_ERR_CANCELED);
+    EXPECT_STREQ(ddbtLastError(), "Canceled");
+    EXPECT_EQ(stopped.fractions.size(), 1u) << "nothing read after the stop";
+    EXPECT_EQ(stopped.result.kind, ddbt::cog::tiler::json::Value::Kind::kNull);
+
+    for (const char* bad : {R"({"bands": [2]})", R"({"bands": []})", R"({"bands": [0]})", R"({"threads": -1})",
+                            R"({"nodata": "x"})", R"({"other": 1})", "[1]", "not json"})
+        EXPECT_EQ(RasterStatistics(path, bad).code, DDBT_ERR_INVALIDARGS) << bad;
+    char* out = nullptr;
+    EXPECT_EQ(ddbtRasterStatistics(nullptr, nullptr, nullptr, nullptr, &out), DDBT_ERR_INVALIDARGS);
     std::filesystem::remove_all(dir);
 }

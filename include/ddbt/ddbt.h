@@ -310,6 +310,31 @@ DDBT_API ddbtErr ddbtRasterReadLevel(const ddbtRaster *raster, int level, int x,
                                      const int *bands, int bandCount, ddbtSampleType type, void *out,
                                      uint8_t *mask);
 
+/** Called by ddbtRasterStatistics on the calling thread before the pass, between its chunks of blocks
+ * and at its end, with the fraction done (0 to 1). Returns 0 to go on, anything else to stop the pass
+ * (which then fails with DDBT_ERR_CANCELED). */
+typedef int (*ddbtKeepGoingCallback)(double fraction, void *userData);
+
+/** The exact statistics of bands of a raster: one pass over every pixel of the full resolution (no
+ * overview, no sample), all the bands asked in the same decode, the blocks decoded and summed on
+ * several threads. The pixels without a value are left out: the NoData value of the band (or the
+ * override, compared in the precision of the samples), non-finite samples, a zero in the per-dataset
+ * mask or the alpha band. The arithmetic is the one the statistics sidecar of ddbtBuildCog uses
+ * (DDBT_STATS_MODE), so the result does not depend on the number of threads; for integer samples it
+ * equals the sidecar of the build. Nothing is kept in memory or written.
+ * optionsJson (all optional): {"bands": [1-based band, ...] (default every band), "nodata": a number,
+ * or "nan" (the NoData value of every band instead of its own), "threads": n (threads of the pass, the
+ * calling thread one of them; 0 or absent = the shared pool)}.
+ * The output: {"bands": [{"min", "max", "mean", "std", "valid" (pixels with a value), "total" (width x
+ * height)} or null (no pixel with a value), one per band asked, in order]}.
+ * Codes: DDBT_ERR_INVALIDARGS for a bad argument or option, a band out of range; DDBT_ERR_CANCELED when
+ * keepGoing stopped the pass; DDBT_ERR_EXCEPTION for a block that cannot be read.
+ * @param keepGoing NULL to never stop
+ * @param userData passed to keepGoing
+ * @param outJson receives a NUL-terminated string; release it with ddbtFree */
+DDBT_API ddbtErr ddbtRasterStatistics(const ddbtRaster *raster, const char *optionsJson, ddbtKeepGoingCallback keepGoing,
+                                      void *userData, char **outJson);
+
 /** Fills a window of the raster ddbtWriteRaster writes: the samples of every band of the
  * `width` x `height` pixels at (x, y), of the raster's type in native byte order, interleaved, each
  * row `stride` bytes after the one before.

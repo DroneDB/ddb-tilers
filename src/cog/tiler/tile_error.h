@@ -25,6 +25,7 @@ enum class TileErrorCode {
     kRefused,         // RefusedArgumentException: an argument the raster cannot honour
     kNotFound,        // the input does not exist
     kNotImplemented,  // valid input ddbt cannot tile yet (non-TIFF raster that needs a conversion)
+    kCanceled,        // the caller stopped the work (DroneDB's CanceledException)
 };
 
 class TileError : public std::runtime_error, public cache::WaiterCopyable {

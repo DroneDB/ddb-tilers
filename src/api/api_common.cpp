@@ -33,6 +33,7 @@ ddbtErr CodeOf(cog::tiler::TileErrorCode code) noexcept {
         case TileErrorCode::kRefused: return DDBT_ERR_REFUSED;
         case TileErrorCode::kNotFound: return DDBT_ERR_NOTFOUND;
         case TileErrorCode::kNotImplemented: return DDBT_ERR_NOT_IMPLEMENTED;
+        case TileErrorCode::kCanceled: return DDBT_ERR_CANCELED;
         case TileErrorCode::kException: break;
     }
     return DDBT_ERR_EXCEPTION;
