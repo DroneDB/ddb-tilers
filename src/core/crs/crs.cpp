@@ -247,6 +247,15 @@ std::string BoundsMisfit(const Crs& c, double minX, double minY, double maxX, do
     return "the coordinates do not fit " + (name.empty() ? std::string("the geographic CRS of the file") : name);
 }
 
+std::string LocalCrsReason(const Crs& c) {
+    if (!c.Valid()) return "";
+    const Crs horizontal = c.HorizontalPart();
+    if (horizontal.Type() != CrsType::Engineering && horizontal.Type() != CrsType::Vertical) return "";
+    const std::string& name = horizontal.Name();
+    return "the file's coordinate system" + (name.empty() ? std::string() : " (\"" + name + "\")") +
+           " is a local one, with no position on the earth";
+}
+
 // A compound CRS whose parts PROJ cannot split keeps itself as its horizontal part, so a caller can
 // still transform its x, y
 Crs Crs::HorizontalPart() const {
