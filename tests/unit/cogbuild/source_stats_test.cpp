@@ -558,7 +558,13 @@ TEST(SourceStatistics, AreAnOptionOfDdbtBuildCog) {
     TempDir dir;
     const std::string in = dir.File("in.tif"), out = dir.File("out.tif"), stats = dir.File("source.json");
     syn::WriteSynth(in, Rgb(300, 200));
-    const std::string options = "{\"sourceStatistics\": \"" + stats + "\", \"noJpeg\": true}";
+    // A Windows path has backslashes, which a JSON string escapes
+    std::string escaped;
+    for (const char c : stats) {
+        if (c == '\\' || c == '"') escaped += '\\';
+        escaped += c;
+    }
+    const std::string options = "{\"sourceStatistics\": \"" + escaped + "\", \"noJpeg\": true}";
     ASSERT_EQ(ddbtBuildCog(in.c_str(), out.c_str(), options.c_str()), DDBT_ERR_NONE) << ddbtLastError();
     ExpectStats(stats, TilerReference(in), "api");
     for (const char* bad : {R"({"sourceStatistics": 3})", R"({"sourceStatistics": ""})", R"({"sourceStatistics": true})"}) {
