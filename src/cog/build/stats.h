@@ -30,9 +30,34 @@ struct BandStats {
     uint64_t valid = 0, total = 0;
 };
 
+/// What masks the samples of a band: nothing, a mask (0 = no value), or the alpha band of the pixel.
+enum class StatsMaskKind : uint8_t { kNone, kMask, kAlphaBand };
+
+/// Accumulates `rows` rows of `width` pixels of band `band` (0-based) into `acc`: pixels interleaved
+/// (`bands` samples of f.type each), rows `stride` bytes apart; masked by `mask` (rows `maskStride`
+/// bytes apart) for kMask, by the sample of band `alphaBand` for kAlphaBand. One AddRun per row.
+template <typename Acc>
+void AddBandRows(Acc& acc, const stats::SampleFilter& f, StatsMaskKind kind, int bands, int band, int alphaBand,
+                 const uint8_t* pixels, size_t stride, uint32_t width, uint32_t rows, const uint8_t* mask,
+                 size_t maskStride) {
+    const size_t ss = tiff::SampleTypeSize(f.type);
+    const size_t step = ss * static_cast<size_t>(bands);
+    for (uint32_t y = 0; y < rows; ++y) {
+        const uint8_t* row = pixels + static_cast<size_t>(y) * stride;
+        const uint8_t* m =
+            kind == StatsMaskKind::kMask && mask != nullptr ? mask + static_cast<size_t>(y) * maskStride : nullptr;
+        const uint8_t* al = kind == StatsMaskKind::kAlphaBand ? row + static_cast<size_t>(alphaBand) * ss : nullptr;
+        stats::AddRun(acc, f, row + static_cast<size_t>(band) * ss, step, width, m, al);
+    }
+}
+
+/// The statistics of a band from its exact sums or Welford's accumulation (nullopt: no sample has a
+/// value); `total` = width * height.
+std::optional<BandStats> BandStatsOf(const std::optional<stats::StatsResult>& r, uint64_t total);
+
 class StatsAccumulator {
 public:
-    enum class MaskKind : uint8_t { kNone, kMask, kAlphaBand };
+    using MaskKind = StatsMaskKind;
 
     /// `masks[b]`: what masks band b; alphaBand: index of the alpha band for kAlphaBand.
     StatsAccumulator(int bands, tiff::SampleType type, std::vector<MaskKind> masks, int alphaBand,
@@ -61,8 +86,12 @@ private:
     std::vector<Acc> acc_;
 };
 
-/// Writes "<rasterPath>.stats.json" (DroneDB's schema: bands."<b>" = {max, mean, min, std, total,
-/// valid}, computedAt, exact: true, version: 2), atomically (temporary + rename).
+/// Writes the statistics of `bands` to `path` (DroneDB's schema: bands."<b>" = {max, mean, min, std,
+/// total, valid}, a band without a value left out, computedAt, exact: true, version: 2), atomically
+/// (temporary + rename).
+Status WriteStatsFile(const std::string& path, const std::vector<std::optional<BandStats>>& bands);
+
+/// WriteStatsFile to "<rasterPath>.stats.json".
 Status WriteStatsSidecar(const std::string& rasterPath, const std::vector<std::optional<BandStats>>& bands);
 
 }  // namespace ddbt::cog::build

@@ -12,5 +12,6 @@ list(APPEND DDBT_SOURCES
   cog/build/webp_source.cpp
   cog/build/derived_source.cpp
   cog/build/stats.cpp
+  cog/build/source_stats.cpp
   cog/build/cog_builder.cpp)
 # The statistics arithmetic is cog/tiler/stats_kernel.cpp (compiled without contraction or LTO).

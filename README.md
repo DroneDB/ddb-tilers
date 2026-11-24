@@ -36,7 +36,8 @@ rows it reads exist. Every source block is decoded once. Details:
   with the 8-bit mask, so only such a source is read twice (up to where its alpha is graded).
 - Fully transparent tiles are not written (sparse COG); classic TIFF unless the file is larger
   than 4 GiB.
-- Exact statistics are accumulated during the pass (no second read).
+- Exact statistics are accumulated during the pass (no second read); on request
+  (`sourceStatistics`) those of the input's own pixels too, counted as the pass reads them.
 - The output appears atomically (a temporary file, then a rename).
 
 **COG tiler.** One shared, immutable reader per file and a decoded-block cache with one byte
@@ -200,7 +201,7 @@ C API (`include/ddbt/ddbt.h`; the functions follow DroneDB's libddb signatures):
 
 | Function | |
 |---|---|
-| `ddbtBuildCog(input, output, optionsJson)` | Build a COG. Options: `codec` (`lzw`, `deflate`, `zstd`), `level`, `jpegQuality`, `noJpeg`, `memoryMb`, `statistics`, `report` (path of a JSON build report) |
+| `ddbtBuildCog(input, output, optionsJson)` | Build a COG. Options: `codec` (`lzw`, `deflate`, `zstd`), `level`, `jpegQuality`, `noJpeg`, `memoryMb`, `statistics`, `sourceStatistics` (path where the exact statistics of the input's pixels, counted in the build pass, are written in the schema of the `.stats.json` sidecar), `report` (path of a JSON build report) |
 | `ddbtBuildCopc(input, output, optionsJson)` | Build a COPC. Options: `inputs` (more files to merge), `threads`, `memoryMb`, `tempDir`, `metadata`, `metadataPath`, `report`, `targetCrs`, `dropCrs` |
 | `ddbtBuildCog2(...)`, `ddbtBuildCopc2(...)` | The same builds with a progress callback (fraction and phase) |
 | `ddbtIsOptimizedCog(input, outOptimized)` | Whether a raster is an optimized COG (EPSG:3857, 256 or 512 px tiles, overviews), which a COG build encodes again without a warp |
