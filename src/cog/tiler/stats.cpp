@@ -18,6 +18,7 @@
 #include <limits>
 #include <list>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <sstream>
@@ -274,6 +275,9 @@ tiff::SampleType ToSampleType(PixelType t) {
 // What one pass reads: the full-resolution image of the bands of `want` (1-based), the planes to
 // decode, the internal mask.
 struct PassPlan {
+    // The pool that decodes and sums, and what the caller asked of the pass (its stop, its progress)
+    exec::ThreadPool* pool = &exec::DefaultPool();
+    const StatsPassOptions* options = nullptr;
     const tiff::TiffReader* r = nullptr;
     uint32_t ifd = 0;
     const tiff::IfdInfo* info = nullptr;
@@ -379,7 +383,7 @@ void DecodeRegion(const PassPlan& pp, Region& g) {
     const auto [mc0, mc1] = pp.maskInfo ? MaskColumns(pp, g) : std::pair<uint32_t, uint32_t>{0, 0};
     const size_t nTasks = nBlocks + (mc1 - mc0);
     std::vector<std::string> errors(nTasks);
-    exec::ParallelFor(0, nTasks, 1, [&](size_t k) {
+    exec::ParallelFor(*pp.pool, 0, nTasks, 1, [&](size_t k) {
         errors[k] = k < nBlocks ? DecodeRegionBlock(pp, g, k)
                                 : DecodeRegionMaskColumn(pp, g, mc0 + static_cast<uint32_t>(k - nBlocks));
     });
@@ -417,6 +421,12 @@ void AddRegionRow(const PassPlan& pp, const Region& g, size_t i, int ry, Acc& ac
     }
 }
 
+// Asks the caller whether the pass goes on, with the fraction done (on the calling thread, between chunks)
+void KeepGoing(const PassPlan& pp, double fraction) {
+    if (pp.options != nullptr && pp.options->keepGoing && !pp.options->keepGoing(fraction))
+        throw TileError(TileErrorCode::kCanceled, "Canceled");
+}
+
 // DroneDB's order and arithmetic: chunks of whole block rows decoded in parallel, the next one
 // while the current one is accumulated; one serial Welford per band (bands in parallel).
 std::vector<std::optional<stats::StatsResult>> CompatPass(const PassPlan& pp) {
@@ -429,13 +439,14 @@ std::vector<std::optional<stats::StatsResult>> CompatPass(const PassPlan& pp) {
     DecodeRegion(pp, cur);
     if (!cur.error.empty()) Fail(cur.error);
     for (uint32_t br = 0; br < bd; ++br) {
+        KeepGoing(pp, static_cast<double>(br) / bd);
         const bool hasNext = br + 1 < bd;
-        exec::TaskGroup g;
+        exec::TaskGroup g(*pp.pool);
         if (hasNext) {
             SetupRegion(pp, br + 1, 0, ba, next);
             g.Spawn([&] { DecodeRegion(pp, next); });
         }
-        exec::ParallelFor(0, nb, 1, [&](size_t i) {
+        exec::ParallelFor(*pp.pool, 0, nb, 1, [&](size_t i) {
             for (int ry = 0; ry < cur.rows; ++ry) AddRegionRow(pp, cur, i, ry, acc[i]);
         });
         g.Wait();
@@ -460,10 +471,11 @@ std::vector<std::optional<stats::StatsResult>> ExactPass(const PassPlan& pp) {
     std::vector<stats::ExactSums> sums;
     std::vector<std::string> errors;
     for (size_t b0 = 0; b0 < units; b0 += kBatch) {
+        KeepGoing(pp, static_cast<double>(b0) / static_cast<double>(units));
         const size_t b1 = std::min(units, b0 + kBatch);
         sums.assign((b1 - b0) * nb, stats::ExactSums{});
         errors.assign(b1 - b0, std::string());
-        exec::ParallelFor(b0, b1, 1, [&](size_t u) {
+        exec::ParallelFor(*pp.pool, b0, b1, 1, [&](size_t u) {
             const uint32_t br = static_cast<uint32_t>(u / info.blocksAcross);
             const uint32_t bc = static_cast<uint32_t>(u % info.blocksAcross);
             Region g;
@@ -492,8 +504,20 @@ std::vector<std::optional<stats::StatsResult>> ExactPass(const PassPlan& pp) {
 
 // One exact pass over the full-resolution image for the bands of `want` (1-based).
 std::vector<std::optional<BandStatistics>> ComputePass(const CogSource& src, const std::vector<int>& want,
-                                                       const std::optional<double>& nodata, stats::StatsMode mode) {
+                                                       const std::optional<double>& nodata, stats::StatsMode mode,
+                                                       const StatsPassOptions& options = {}) {
+    // A cap of threads: a pool of its own, the calling thread one of them (as a COPC build with "threads")
+    std::unique_ptr<exec::ThreadPool> ownPool;
+    if (options.threads > 0) {
+        exec::ThreadPoolOptions po;
+        po.threads = options.threads - 1;
+        po.zeroWorkers = options.threads == 1;
+        po.name = "ddbt-stats";
+        ownPool = std::make_unique<exec::ThreadPool>(po);
+    }
     PassPlan pp;
+    if (ownPool) pp.pool = ownPool.get();
+    pp.options = &options;
     pp.r = &src.Reader();
     const SourceLevel& l0 = src.Levels()[0];
     pp.ifd = l0.ifd;
@@ -524,6 +548,7 @@ std::vector<std::optional<BandStatistics>> ComputePass(const CogSource& src, con
         pp.maskInfo = &pp.r->Ifd(*l0.maskIfd);
     }
     const auto results = mode == stats::StatsMode::kExact ? ExactPass(pp) : CompatPass(pp);
+    KeepGoing(pp, 1.0);
     std::vector<std::optional<BandStatistics>> out(want.size());
     const uint64_t total = static_cast<uint64_t>(pp.W) * static_cast<uint64_t>(pp.H);
     for (size_t i = 0; i < want.size(); ++i) {
@@ -582,6 +607,15 @@ std::vector<std::optional<BandStatistics>> ComputeBandStatistics(const CogSource
                                                                  const std::optional<double>& nodata,
                                                                  stats::StatsMode mode) {
     return ComputePass(source, bands, nodata, mode);
+}
+
+std::vector<std::optional<BandStatistics>> ComputeBandStatistics(const CogSource& source, const std::vector<int>& bands,
+                                                                 const std::optional<double>& nodata,
+                                                                 const StatsPassOptions& options) {
+    for (const int b : bands)
+        if (b < 1 || b > source.BandCount())
+            throw TileError(TileErrorCode::kInvalidArgs, "Invalid band " + std::to_string(b) + " of " + source.Path());
+    return ComputePass(source, bands, nodata, stats::StatsModeFromEnv(), options);
 }
 
 std::optional<BandStatistics> ReadStatsSidecar(const std::string& rasterPath, int band,

@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MPL-2.0
 // The raster exports of the C API for a host that reads rasters itself (a GeoTIFF or COG, georeferenced
 // or not, in any CRS): ddbtRasterOpen / ddbtRasterClose, ddbtRasterInfo (what GDAL reports of the file),
-// ddbtRasterMetadata (its metadata domains)
-// and ddbtRasterRead (a window at a resolution, as GDAL's RasterIO reads it with nearest resampling).
+// ddbtRasterMetadata (its metadata domains), ddbtRasterRead (a window at a resolution, as GDAL's RasterIO
+// reads it with nearest resampling) and ddbtRasterStatistics (the exact statistics of its bands).
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <type_traits>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "cog/tiler/cog_source.h"
 #include "cog/tiler/json_lite.h"
 #include "cog/tiler/raster_io.h"
+#include "cog/tiler/stats.h"
 #include "cog/tiler/tile_error.h"
 #include "core/util/half.h"
 #include "ddbt/ddbt.h"
@@ -288,5 +291,77 @@ ddbtErr ddbtRasterReadLevel(const ddbtRaster* raster, int level, int x, int y, i
         CheckRead(raster, bands, bandCount, type);
         ReadPlanned(raster, tl::PlanLevelRead(view, level, x, y, width, height), bands, bandCount, type, out, mask);
         return DDBT_ERR_NONE;
+    });
+}
+
+namespace {
+
+// The options of ddbtRasterStatistics; "" when they are valid, else why not
+std::string ParseStatisticsOptions(const char* text, int bandCount, std::vector<int>& bands,
+                                   std::optional<double>& nodata, size_t& threads) {
+    if (ddbt::api::IsEmpty(text)) return "";
+    const auto v = json::Parse(text);
+    if (!v || !v->IsObject()) return "Invalid optionsJson: not a JSON object";
+    for (const auto& [key, val] : v->obj) {
+        if (key == "bands") {
+            if (val.kind != json::Value::Kind::kArray || val.arr.empty())
+                return "Invalid optionsJson: bands must be a non-empty array of band numbers";
+            bands.clear();
+            for (const auto& b : val.arr) {
+                if (!b.isUint || b.u < 1 || b.u > static_cast<uint64_t>(bandCount))
+                    return "Invalid optionsJson: bands must be band numbers from 1 to " + std::to_string(bandCount);
+                bands.push_back(static_cast<int>(b.u));
+            }
+        } else if (key == "nodata") {
+            if (val.kind == json::Value::Kind::kString && val.str == "nan") nodata = std::numeric_limits<double>::quiet_NaN();
+            else if (val.IsNumber()) nodata = val.num;
+            else return "Invalid optionsJson: nodata must be a number or \"nan\"";
+        } else if (key == "threads") {
+            if (!val.isUint) return "Invalid optionsJson: threads must be a non-negative integer";
+            threads = static_cast<size_t>(std::min<uint64_t>(val.u, 4096));
+        } else {
+            return "Invalid optionsJson: unknown option " + key;
+        }
+    }
+    return "";
+}
+
+}  // namespace
+
+ddbtErr ddbtRasterStatistics(const ddbtRaster* raster, const char* optionsJson, ddbtKeepGoingCallback keepGoing,
+                             void* userData, char** outJson) {
+    if (raster == nullptr || outJson == nullptr)
+        return Fail(DDBT_ERR_INVALIDARGS, "Invalid raster or outJson: NULL");
+    *outJson = nullptr;
+    return ddbt::api::GuardedCall([&]() -> ddbtErr {
+        namespace tl = ddbt::cog::tiler;
+        const tl::CogSource& s = *raster->source;
+        std::vector<int> bands;
+        for (int b = 1; b <= s.BandCount(); ++b) bands.push_back(b);
+        std::optional<double> nodata;
+        tl::StatsPassOptions options;
+        const std::string invalid = ParseStatisticsOptions(optionsJson, s.BandCount(), bands, nodata, options.threads);
+        if (!invalid.empty()) return Fail(DDBT_ERR_INVALIDARGS, invalid);
+        if (keepGoing != nullptr)
+            options.keepGoing = [keepGoing, userData](double fraction) { return keepGoing(fraction, userData) == 0; };
+        const auto stats = tl::ComputeBandStatistics(s, bands, nodata, options);
+        json::Value list = json::Array();
+        for (const auto& st : stats) {
+            if (!st) {
+                list.arr.push_back(json::Value{});
+                continue;
+            }
+            json::Value b = json::Object();
+            b.obj["min"] = json::Number(st->min);
+            b.obj["max"] = json::Number(st->max);
+            b.obj["mean"] = json::Number(st->mean);
+            b.obj["std"] = json::Number(st->stdDev);
+            b.obj["valid"] = json::Unsigned(st->validCount);
+            b.obj["total"] = json::Unsigned(st->pixelCount);
+            list.arr.push_back(std::move(b));
+        }
+        json::Value o = json::Object();
+        o.obj["bands"] = std::move(list);
+        return ddbt::api::CopyOut(json::Dump(o, 0), outJson);
     });
 }

@@ -599,6 +599,46 @@ TEST(CogTilerStats, DefaultPassIsTheExactPass) {
     EXPECT_EQ(d[1]->mean, 349.5);
 }
 
+// A pass with a cap of threads runs on a pool of its own: the same bits at any cap; keepGoing hears 0 first and 1
+// last, and false stops the pass with kCanceled
+TEST(CogTilerStats, AnOwnPoolGivesTheSameBitsAndKeepGoingStopsThePass) {
+    const auto src = CogSource::Open(SamplingTif());
+    const auto reference = ComputeBandStatistics(*src, {1, 2}, std::nullopt, ddbt::cog::stats::StatsMode::kExact);
+    for (const size_t threads : {size_t{1}, size_t{2}, size_t{5}}) {
+        std::vector<double> fractions;
+        StatsPassOptions options;
+        options.threads = threads;
+        options.keepGoing = [&](double f) {
+            fractions.push_back(f);
+            return true;
+        };
+        const auto s = ComputeBandStatistics(*src, {1, 2}, std::nullopt, options);
+        for (size_t i = 0; i < 2; ++i) {
+            ASSERT_TRUE(s[i] && reference[i]) << threads;
+            EXPECT_EQ(s[i]->mean, reference[i]->mean) << threads;
+            EXPECT_EQ(s[i]->stdDev, reference[i]->stdDev) << threads;
+            EXPECT_EQ(s[i]->validCount, reference[i]->validCount) << threads;
+        }
+        ASSERT_GE(fractions.size(), 2u);
+        EXPECT_EQ(fractions.front(), 0.0);
+        EXPECT_EQ(fractions.back(), 1.0);
+    }
+    StatsPassOptions stop;
+    stop.keepGoing = [](double) { return false; };
+    try {
+        ComputeBandStatistics(*src, {1}, std::nullopt, stop);
+        ADD_FAILURE() << "no stop";
+    } catch (const TileError& e) {
+        EXPECT_EQ(e.code(), TileErrorCode::kCanceled);
+    }
+    try {
+        ComputeBandStatistics(*src, {3}, std::nullopt, StatsPassOptions{});
+        ADD_FAILURE() << "band 3 of 2";
+    } catch (const TileError& e) {
+        EXPECT_EQ(e.code(), TileErrorCode::kInvalidArgs);
+    }
+}
+
 TEST(CogTilerStats, AnEightBitMaskLeavesOutItsZeros) {
     // An internal mask of 8 bits a pixel (a graded one, which GDAL reads as it is): the statistics
     // leave out the pixels where it is 0 and keep every other, as GDAL's do, in both passes. Read as

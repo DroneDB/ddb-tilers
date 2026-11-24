@@ -71,6 +71,21 @@ std::vector<std::optional<BandStatistics>> ComputeBandStatistics(const CogSource
                                                                  const std::optional<double>& nodata,
                                                                  stats::StatsMode mode);
 
+/// How one exact pass runs (ComputeBandStatistics with options, ddbtRasterStatistics).
+struct StatsPassOptions {
+    /// Threads that decode and sum at once, the calling thread one of them; 0 = the shared pool
+    size_t threads = 0;
+    /// Called on the calling thread before the pass, between its chunks of blocks and at its end,
+    /// with the fraction done: false stops the pass (TileError kCanceled). Empty = go on.
+    std::function<bool(double fraction)> keepGoing;
+};
+
+/// The exact pass for a host (ddbtRasterStatistics): the arithmetic of DDBT_STATS_MODE, a cap of
+/// threads and a stop, nothing kept in memory or written. TileError kInvalidArgs for a band out of range.
+std::vector<std::optional<BandStatistics>> ComputeBandStatistics(const CogSource& source, const std::vector<int>& bands,
+                                                                 const std::optional<double>& nodata,
+                                                                 const StatsPassOptions& options);
+
 /// The sidecar part alone (tests): the entry of (band, nodata) of the sidecar next to `rasterPath`.
 std::optional<BandStatistics> ReadStatsSidecar(const std::string& rasterPath, int band,
                                                const std::optional<double>& nodata);
