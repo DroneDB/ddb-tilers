@@ -20,6 +20,7 @@
 #include "cog/build/derived_source.h"
 #include "cog/build/pipeline.h"
 #include "cog/build/source.h"
+#include "cog/build/source_stats.h"
 #include "cog/build/stats.h"
 #include "cog/codecs/jpeg.h"
 #include "cog/pyramid/average.h"
@@ -1403,11 +1404,29 @@ struct BuildPass {
 
 }  // namespace
 
-Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options) {
+namespace {
+
+// OpenBuildSource; with `counter`, the file's source is wrapped in a SourceStatistics (under the
+// georeferencing and resampling of a photo: the pixels of the file), which *counter points to.
+Expected<std::unique_ptr<RasterSource>> OpenSource(const std::string& input, const BuildOptions& options,
+                                                   const SourceStatistics** counter) {
     auto src = OpenRasterSource(input, options.memoryBudget);
-    if (src.ok() && !options.scratchBase.empty()) (*src)->SetScratchBase(options.scratchBase);
-    if (!src.ok() || !options.photo) return src;
-    return GeoreferencePhoto(std::move(*src), *options.photo);
+    if (!src.ok()) return src;
+    if (!options.scratchBase.empty()) (*src)->SetScratchBase(options.scratchBase);
+    std::unique_ptr<RasterSource> source = std::move(*src);
+    if (counter != nullptr) {
+        auto counted = std::make_unique<SourceStatistics>(std::shared_ptr<const RasterSource>(std::move(source)));
+        *counter = counted.get();
+        source = std::move(counted);
+    }
+    if (!options.photo) return source;
+    return GeoreferencePhoto(std::move(source), *options.photo);
+}
+
+}  // namespace
+
+Expected<std::unique_ptr<RasterSource>> OpenBuildSource(const std::string& input, const BuildOptions& options) {
+    return OpenSource(input, options, nullptr);
 }
 
 warp::WarpSettings WarpSettingsOf(const BuildOptions& options, const RasterSource& source) {
@@ -1516,7 +1535,8 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
     const auto t0 = std::chrono::steady_clock::now();
     BuildOptions sourceOptions = options;
     if (sourceOptions.scratchBase.empty()) sourceOptions.scratchBase = output + ".image";
-    auto src = OpenBuildSource(input, sourceOptions);
+    const SourceStatistics* sourceStats = nullptr;
+    auto src = OpenSource(input, sourceOptions, options.sourceStatistics.empty() ? nullptr : &sourceStats);
     if (!src.ok()) return src.status();
     const RasterSource& source = **src;
     if (!source.Georef().crs) return Status(StatusCode::kInvalidArgument, "Cannot build COG: input file has no coordinate reference system: " + input);
@@ -1565,11 +1585,25 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         if (!pipe->StoppedForGradedMask()) break;
     }
     const Plan& plan = pass->plan;
+    // The blocks of the source the pass did not read are counted before the output appears
+    std::optional<std::vector<std::optional<BandStats>>> inputStats;
+    if (sourceStats != nullptr) {
+        auto counted = sourceStats->Finish();
+        if (!counted.ok()) {
+            cw->Abort();
+            return counted.status();
+        }
+        inputStats = std::move(*counted);
+    }
     Status s = cw->Finish();
     if (!s.ok()) return s;
     if (options.statistics) {
         const auto stats = pipe->Stats()->Result(static_cast<uint64_t>(plan.width) * plan.height);
         s = WriteStatsSidecar(output, stats);
+        if (!s.ok()) return s;
+    }
+    if (inputStats) {
+        s = WriteStatsFile(options.sourceStatistics, *inputStats);
         if (!s.ok()) return s;
     }
     if (options.progress) options.progress(1.0, "statistics");
@@ -1588,6 +1622,10 @@ Status BuildCog(const std::string& input, const std::string& output, const Build
         report->peakStripBytes = pipe->PeakStripBytes();
         report->sourceBlocksDecoded = pass->producer->BlocksDecoded();
         report->peakSourceCacheBytes = pass->producer->PeakCacheBytes();
+        if (sourceStats != nullptr) {
+            report->sourceBlocksCounted = sourceStats->BlocksCountedByReads() + sourceStats->BlocksCountedAfter();
+            report->sourceBlocksCountedAfter = sourceStats->BlocksCountedAfter();
+        }
         report->secondsTotal = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     }
     return Status::Ok();

@@ -18,41 +18,40 @@ StatsAccumulator::StatsAccumulator(int bands, tiff::SampleType type, std::vector
 void StatsAccumulator::AccumulateRows(int band, const uint8_t* pixels, size_t stride, uint32_t width, uint32_t rows,
                                       const uint8_t* mask) {
     Acc& a = acc_[static_cast<size_t>(band)];
-    const size_t ss = tiff::SampleTypeSize(type_);
-    const size_t step = ss * static_cast<size_t>(bands_);
     const MaskKind mk = masks_[static_cast<size_t>(band)];
     const stats::SampleFilter f{type_, nodata_.has_value(), nodata_.value_or(0)};
-    for (uint32_t y = 0; y < rows; ++y) {
-        const uint8_t* row = pixels + static_cast<size_t>(y) * stride;
-        const uint8_t* p = row + static_cast<size_t>(band) * ss;
-        const uint8_t* m = mk == MaskKind::kMask && mask != nullptr ? mask + static_cast<size_t>(y) * width : nullptr;
-        const uint8_t* al = mk == MaskKind::kAlphaBand ? row + static_cast<size_t>(alphaBand_) * ss : nullptr;
-        if (mode_ == stats::StatsMode::kExact) {
-            stats::AddRun(a.exact, f, p, step, width, m, al);
-        } else {
-            stats::AddRun(a.welford, f, p, step, width, m, al);
-        }
+    if (mode_ == stats::StatsMode::kExact) {
+        AddBandRows(a.exact, f, mk, bands_, band, alphaBand_, pixels, stride, width, rows, mask, width);
+    } else {
+        AddBandRows(a.welford, f, mk, bands_, band, alphaBand_, pixels, stride, width, rows, mask, width);
     }
+}
+
+std::optional<BandStats> BandStatsOf(const std::optional<stats::StatsResult>& r, uint64_t total) {
+    if (!r) return std::nullopt;
+    BandStats s;
+    s.min = r->min;
+    s.max = r->max;
+    s.mean = r->mean;
+    s.stdDev = r->stdDev;
+    s.valid = r->valid;
+    s.total = total;
+    return s;
 }
 
 std::vector<std::optional<BandStats>> StatsAccumulator::Result(uint64_t total) const {
     std::vector<std::optional<BandStats>> out(acc_.size());
-    for (size_t i = 0; i < acc_.size(); ++i) {
-        const auto r = mode_ == stats::StatsMode::kExact ? stats::Finish(acc_[i].exact) : stats::Finish(acc_[i].welford);
-        if (!r) continue;
-        BandStats s;
-        s.min = r->min;
-        s.max = r->max;
-        s.mean = r->mean;
-        s.stdDev = r->stdDev;
-        s.valid = r->valid;
-        s.total = total;
-        out[i] = s;
-    }
+    for (size_t i = 0; i < acc_.size(); ++i)
+        out[i] = BandStatsOf(mode_ == stats::StatsMode::kExact ? stats::Finish(acc_[i].exact) : stats::Finish(acc_[i].welford),
+                             total);
     return out;
 }
 
 Status WriteStatsSidecar(const std::string& rasterPath, const std::vector<std::optional<BandStats>>& bands) {
+    return WriteStatsFile(rasterPath + ".stats.json", bands);
+}
+
+Status WriteStatsFile(const std::string& target, const std::vector<std::optional<BandStats>>& bands) {
     namespace json = tiler::json;
     namespace fs = std::filesystem;
     json::Value j = json::Object();
@@ -82,7 +81,6 @@ Status WriteStatsSidecar(const std::string& rasterPath, const std::vector<std::o
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%FT%TZ", &tm);
     j.obj["computedAt"] = json::String(stamp);
-    const std::string target = rasterPath + ".stats.json";
     const std::string temp = target + ".tmp";
     {
         std::ofstream out(fs::path(std::u8string(temp.begin(), temp.end())), std::ios::trunc | std::ios::binary);

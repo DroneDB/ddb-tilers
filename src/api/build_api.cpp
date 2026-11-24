@@ -7,7 +7,8 @@
 // DDB_COG_JPEG_QUALITY or 75), "noJpeg": bool, "memoryMb": n (pipeline budget, 2048),
 // "statistics": bool (write "<output>.stats.json", true), "evenTileOrigin": bool (false),
 // "insertRange": bool (true), "report": "<path>" (a JSON report of the build is written there),
-// and, to geoproject a photo (a raster without georeferencing of its own) as libddb does:
+// "sourceStatistics": "<path>" (the exact statistics of the input's pixels, counted as the build
+// reads them, are written there in the schema of "<output>.stats.json"), and, to geoproject a photo (a raster without georeferencing of its own) as libddb does:
 // "gcps": [[pixel, line, x, y], ...] (ground control points: pixel and line in the photo after
 // outScale, x and y in gcpSrs), "gcpSrs": "<CRS>" ("EPSG:4326"), "targetSrs": "EPSG:3857" (the
 // default: the photo's COG) | "source" (the photo in the GCPs' CRS on gdalwarp's grid, nearest
@@ -97,6 +98,10 @@ std::string ParseOptions(const char* text, BuildOptions& o, std::string& reportP
         } else if (key == "report") {
             if (val.kind != json::Value::Kind::kString) return "Invalid optionsJson: report must be a string";
             reportPath = val.str;
+        } else if (key == "sourceStatistics") {
+            if (val.kind != json::Value::Kind::kString || val.str.empty())
+                return "Invalid optionsJson: sourceStatistics must be the path of a file";
+            o.sourceStatistics = val.str;
         } else if (key == "gcps" || key == "gcpSrs" || key == "targetSrs" || key == "outScale") {
             if (const std::string err = ParsePhotoOption(key, val, photo(o)); !err.empty()) return err;
         } else {
@@ -131,6 +136,8 @@ void WriteReport(const std::string& path, const BuildReport& r) {
     j.obj["peakStripBytes"] = json::Unsigned(r.peakStripBytes);
     j.obj["sourceBlocksDecoded"] = json::Unsigned(r.sourceBlocksDecoded);
     j.obj["peakSourceCacheBytes"] = json::Unsigned(r.peakSourceCacheBytes);
+    j.obj["sourceBlocksCounted"] = json::Unsigned(r.sourceBlocksCounted);
+    j.obj["sourceBlocksCountedAfter"] = json::Unsigned(r.sourceBlocksCountedAfter);
     std::ofstream out(path, std::ios::trunc | std::ios::binary);
     out << json::Dump(j, 2);
 }

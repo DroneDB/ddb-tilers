@@ -30,7 +30,9 @@
 //     sees every value: a pass that meets a graded value stops there and the build runs again with
 //     an 8-bit mask, so a source whose transparency is only transparent and opaque is read once.
 //   - Overviews: GDAL's cubic resampling, mask-aware, each level from the previous one.
-//   - The statistics sidecar "<output>.stats.json" (exact, version 2), from the pixels written.
+//   - The statistics sidecar "<output>.stats.json" (exact, version 2), from the pixels written;
+//     on request (BuildOptions::sourceStatistics) the statistics of the input's pixels, counted as
+//     the pass reads them.
 //
 // Everything is streamed: full-resolution blocks are produced row by row of blocks, compressed
 // in parallel on the default pool, written in order; overview rows are computed as soon as the
@@ -91,6 +93,10 @@ struct BuildOptions {
     uint64_t memoryBudget = uint64_t{2} << 30;
     /// Write "<output>.stats.json".
     bool statistics = true;
+    /// Where to write the exact statistics of the input's pixels (not the output's: before the warp,
+    /// the resampling and the encoding), counted in the build pass as it reads them (SourceStatistics,
+    /// source_stats.h), in the schema of "<output>.stats.json"; "": none (nothing counted).
+    std::string sourceStatistics;
     /// Snap the warped grid's origin to an even tile (a 512 px retina tile = one block).
     /// Off: GDAL's exact grid.
     bool evenTileOrigin = false;
@@ -118,6 +124,10 @@ struct BuildReport {
     uint64_t peakStripBytes = 0;
     uint64_t sourceBlocksDecoded = 0;
     uint64_t peakSourceCacheBytes = 0;
+    /// With sourceStatistics: the source blocks counted (each once, whatever the reads of the passes),
+    /// and those of them no read of the pass met, read after it to count them.
+    uint64_t sourceBlocksCounted = 0;
+    uint64_t sourceBlocksCountedAfter = 0;
 };
 
 /// A raster whose 8-bit pixels a host computes, written as GDAL's GTiff driver writes a raster

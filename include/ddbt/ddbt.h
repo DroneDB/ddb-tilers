@@ -191,6 +191,15 @@ typedef void (*ddbtProgressCallback)(double fraction, const char *phase, void *u
  * georeferencing) georeferenced by the "gcps" option: [[pixel, line, x, y], ...] in "gcpSrs"
  * ("EPSG:4326" by default); "targetSrs": "source" then writes the photo in that CRS (gdalwarp's
  * grid, nearest neighbour) instead of the EPSG:3857 COG, "outScale" resamples the photo first.
+ * "sourceStatistics": "<path>" writes there the exact statistics of the pixels of the input (not of
+ * the COG: before the warp, the resampling and the encoding), counted in the build pass as it reads
+ * them (no other read of the input), in the schema of the sidecar "<output>.stats.json" (version 2,
+ * "exact": true, "bands": {"<b>": {min, max, mean, std, valid, total}}; a band without a pixel with
+ * a value left out). Their rules are those of ddbtRasterStatistics on the input: a pixel has no
+ * value when it is not finite, at the NoData value, 0 in the per-dataset mask, or (without NoData
+ * nor mask) 0 in the alpha band of a 2- or 4-band 8 / 16-bit raster; a complex band is measured by
+ * its magnitude; the values are raw (no scale or offset); the alpha band has statistics too. For a
+ * photo they are those of the file, before "outScale". Without the option nothing is counted.
  * The other options are listed in src/api/build_api.cpp.
  * @param inputPath source raster
  * @param outputPath destination file
